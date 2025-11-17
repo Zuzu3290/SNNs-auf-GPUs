@@ -90,5 +90,6 @@ graph TD
 ## To-Dos
 This section contains all the tasks and research items planned for the project.  
 
-See the **[To-Dos Markdown file](./todos.md)** 
+See the **[To-Dos Markdown file](https://github.com/Zuzu3290/SNNs-auf-GPUs/blob/main/docs/To-Do.md)** 
+
 
