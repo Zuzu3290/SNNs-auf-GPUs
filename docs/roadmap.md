@@ -86,3 +86,9 @@ graph TD
     style SENSOR fill:#FFFFFF,stroke:#000000,stroke-width:1px,color:#000000
     style INPUT_LAYER fill:#FFFFFF,stroke:#000000,stroke-width:1px,color:#000000
     style EBC fill:#FFFFFF,stroke:#000000,stroke-width:2px,color:#000000
+```
+## To-Dos
+This section contains all the tasks and research items planned for the project.  
+
+See the **[To-Dos Markdown file](./todos.md)** 
+
