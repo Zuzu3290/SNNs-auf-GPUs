@@ -73,6 +73,7 @@
 - [ ] Study different programming languages that can impact GPU application
 - [ ] Different algorithm processing
 - [ ] Measurement and testing parameters and variables of the service as crucial indicators of efficiency to implement using GPUs
+- [ ] Simulation enviornment research 
 
 </details>
 
