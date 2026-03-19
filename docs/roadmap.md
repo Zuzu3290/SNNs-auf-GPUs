@@ -1,21 +1,43 @@
 # SNN-GPU-Event-Based Camera Diagram
 
 ```mermaid
-graph LR
-    %% Define nodes with bold and underlined text
-    SNN["<b><u>Spiking Neural Network (SNN)</u></b>"]
-    GPU["<b><u>Graphics Processing Unit (GPU)</u></b>"]
-    EBC["<b><u>Event-Based Camera</u></b>"]
+graph TD
+    %% ── Environment bands ──────────────────────────────────────────
+    subgraph EBC["📷 Event-Based Camera"]
+        M1["**Module 1 — Event Camera**\nDVS / DAVIS / Prophesee sensor\n→ (x, y, t, polarity) events"]
+        M2["**Module 2 — Driver / SDK**\nlibcaer · Metavision SDK\nBAF · hot-pixel filter · ROI"]
+        M3["**Module 3 — Event Buffer**\nRing buffer · time-window slicing\nvoxel grid (2, T, H, W)"]
+    end
 
-    %% Define arrows
-    SNN --> GPU --> EBC
-    EBC --> SNN
+    subgraph GPU["⚡ GPU"]
+        M4["**Module 4 — GPU Memory**\nPinned memory · async H2D\ndouble buffer · CUDA streams"]
+        M5["**Module 5 — Custom CUDA / ARM Kernel**\nLIF threshold · NEON SIMD\nvoxel scatter · polarity merge"]
+    end
 
-    %% Styles: white background, black border, thicker border
-    style SNN fill:#FFFFFF,stroke:#000000,stroke-width:2px,color:#000000
-    style GPU fill:#FFFFFF,stroke:#000000,stroke-width:2px,color:#000000
-    style EBC fill:#FFFFFF,stroke:#000000,stroke-width:2px,color:#000000
+    subgraph SNN["🧠 Spiking Neural Network"]
+        M6["**Module 6 — SNN Simulation**\nConv-LIF encoder · snnTorch\nBPTT · surrogate gradients"]
+        M7["**Module 7 — Output / Classification**\nRate decode · TTFS\nspike raster · class + confidence"]
+    end
+
+    %% ── Forward flow ───────────────────────────────────────────────
+    M1 --> M2 --> M3 --> M4 --> M5 --> M6 --> M7
+
+    %% ── Feedback loop ──────────────────────────────────────────────
+    M7 -.->|feedback · model updates · bias adaptation| M1
+
+    %% ── Styles ─────────────────────────────────────────────────────
+    style M1 fill:#E1F5EE,stroke:#0F6E56,color:#085041
+    style M2 fill:#E1F5EE,stroke:#0F6E56,color:#085041
+    style M3 fill:#E1F5EE,stroke:#0F6E56,color:#085041
+    style M4 fill:#E6F1FB,stroke:#185FA5,color:#0C447C
+    style M5 fill:#E6F1FB,stroke:#185FA5,color:#0C447C
+    style M6 fill:#EEEDFE,stroke:#534AB7,color:#3C3489
+    style M7 fill:#EEEDFE,stroke:#534AB7,color:#3C3489
 ```
+
+---
+style M6 fill:#EEEDFE,stroke:#534AB7,color:#3C3489
+    style M7 fill:#EEEDFE,stroke:#534AB7,color:#3C3489
 ## Installation
 
 Follow these steps to install the necessary dependencies to run the application on your GPU related to this project.  
