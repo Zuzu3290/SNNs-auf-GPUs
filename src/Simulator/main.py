@@ -154,7 +154,7 @@ class NetworkCanvas(QWidget):
         self.setStyleSheet("background:#0f0f16; border-radius:10px;")
 
         self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
+        self._timer.timeout.connect(self.tick)
         self._timer.start(TICK_MS)
 
     # ── layout ──────────────────────────────────────────────────────────────
@@ -210,7 +210,7 @@ class NetworkCanvas(QWidget):
 
     # ── animation tick ──────────────────────────────────────────────────────
 
-    def _tick(self):
+    def tick(self):
         done = []
         for p in self.pulses:
             p['t'] += 1.0 / ANIM_STEPS
@@ -223,12 +223,12 @@ class NetworkCanvas(QWidget):
         # Pulses that landed at hidden layer
         inp_landed = [p for p in done if p['lt'] == 1]
         if inp_landed:
-            self._resolve_hidden()
+            self.resolve_hidden()
 
         # Pulses that landed at output layer
         out_landed = [p for p in done if p['lt'] == 2]
         if out_landed:
-            self._resolve_output()
+            self.resolve_output()
 
         # Decay flash timers
         for k in list(self.flash.keys()):
@@ -241,7 +241,7 @@ class NetworkCanvas(QWidget):
 
         self.update()
 
-    def _resolve_hidden(self):
+    def resolve_hidden(self):
         """
         Pulses have landed at hidden layer.
         Now run the hidden LIF neurons with the input spikes.
@@ -269,7 +269,7 @@ class NetworkCanvas(QWidget):
 
         self._pending_hidden_spikes = hidden_fired
 
-    def _resolve_output(self):
+    def resolve_output(self):
         """
         Pulses landed at output layer.
         Run output LIF neurons. Flash those that fire.
@@ -446,7 +446,7 @@ class MainWindow(QMainWindow):
                 "Injects this voltage as current.\n"
                 "Neuron only spikes if membrane crosses threshold."
             )
-            btn.clicked.connect(lambda _, idx=i: self._fire_one(idx))
+            btn.clicked.connect(lambda _, idx=i: self.fire_one(idx))
             s.valueChanged.connect(lambda v, l=vlbl: l.setText(f"{v/100:.2f} V"))
             row.addWidget(lbl)
             row.addWidget(s)
@@ -459,7 +459,7 @@ class MainWindow(QMainWindow):
         btn_row = QHBoxLayout()
         fire_all  = QPushButton("⚡ Fire all inputs")
         reset_btn = QPushButton("↺ Reset all membranes")
-        fire_all.clicked.connect(self._fire_all)
+        fire_all.clicked.connect(self.fire_all)
         reset_btn.clicked.connect(self._reset)
         btn_row.addWidget(fire_all)
         btn_row.addWidget(reset_btn)
@@ -480,7 +480,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.info)
         self.setCentralWidget(central)
 
-    def _fire_one(self, idx):
+    def fire_one(self, idx):
         currents      = [0.0] * INPUT_SIZE
         currents[idx] = self.sliders[idx].value() / 100.0
         self.canvas.fire_input(currents)
@@ -497,7 +497,7 @@ class MainWindow(QMainWindow):
                 f"(threshold {THRESHOLD} V). No spike yet."
             )
 
-    def _fire_all(self):
+    def fire_all(self):
         currents = [s.value() / 100.0 for s in self.sliders]
         self.canvas.fire_input(currents)
         v_str = ", ".join(f"{v:.2f}" for v in currents)
