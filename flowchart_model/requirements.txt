@@ -1,0 +1,38 @@
+# ============================================================
+# Event Camera SNN Pipeline — Python Dependencies
+# ============================================================
+# Install all at once:
+#   pip install -r requirements.txt
+#
+# GPU-specific:
+#   CUDA 12.x:  pip install cupy-cuda12x
+#   CUDA 11.x:  pip install cupy-cuda11x
+#   PyTorch CUDA: https://pytorch.org/get-started/locally/
+
+# Core scientific stack
+numpy>=1.24
+scipy>=1.10
+
+# Deep learning (CPU or CUDA — install the correct wheel for your GPU)
+# torch>=2.1.0   # install via https://pytorch.org
+
+# Spiking Neural Network frameworks (choose one or both)
+snntorch>=0.9.1          # primary SNN library
+# norse>=0.0.7           # alternative (uncomment to use)
+
+# Event camera drivers (uncomment the one matching your hardware)
+# pyaer>=0.1.2           # iniVation DAVIS / DVS cameras
+# metavision-sdk-core    # Prophesee cameras (install from Prophesee website)
+# metavision-sdk-driver  # Prophesee driver
+
+# GPU kernel execution (choose based on your CUDA version)
+# cupy-cuda12x           # CUDA 12.x
+# cupy-cuda11x           # CUDA 11.x
+# pycuda>=2022.1         # alternative to CuPy
+
+# Visualisation (optional but recommended)
+matplotlib>=3.7
+Pillow>=10.0
+
+# Utilities
+tqdm>=4.65
