@@ -182,30 +182,30 @@ const phases = [
   },
 ];
 
-const Badge = ({ status }) => (
+const Badge = ({ status }: { status: string }) => (
   <span style={{
-    background: STATUS_BG[status], color: STATUS[status],
+    background: (STATUS_BG as Record<string, string>)[status], color: (STATUS as Record<string, string>)[status],
     fontSize: 11, fontWeight: 500, padding: "2px 8px",
-    borderRadius: 6, border: `0.5px solid ${STATUS[status]}`, whiteSpace: "nowrap"
-  }}>{STATUS_LABEL[status]}</span>
+    borderRadius: 6, border: `0.5px solid ${(STATUS as Record<string, string>)[status]}`, whiteSpace: "nowrap"
+  }}>{(STATUS_LABEL as Record<string, string>)[status]}</span>
 );
 
 export default function App() {
-  const [expandedPhase, setExpandedPhase] = useState("dev");
-  const [activeBlock, setActiveBlock] = useState(null);
-  const [activeItem, setActiveItem] = useState(null);
-  const [tab, setTab] = useState("detail");
+  const [expandedPhase, setExpandedPhase] = useState<string>("dev");
+  const [activeBlock, setActiveBlock] = useState<string | null>(null);
+  const [activeItem, setActiveItem] = useState<number | null>(null);
+  const [tab, setTab] = useState<string>("detail");
 
   const currentPhase = phases.find(p => p.id === expandedPhase);
   const currentBlock = currentPhase?.blocks.find(b => b.id === activeBlock);
 
-  const handlePhase = (id) => {
+  const handlePhase = (id: string) => {
     setExpandedPhase(id);
     setActiveBlock(null);
     setActiveItem(null);
   };
 
-  const handleBlock = (id) => {
+  const handleBlock = (id: string) => {
     setActiveBlock(id === activeBlock ? null : id);
     setActiveItem(null);
     setTab("detail");
@@ -318,7 +318,7 @@ export default function App() {
       {/* Legend */}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: "0.75rem" }}>
         {Object.entries(STATUS_LABEL).map(([k, v]) => (
-          <span key={k} style={{ background: STATUS_BG[k], color: STATUS[k], fontSize: 11, fontWeight: 500, padding: "2px 8px", borderRadius: 6, border: `0.5px solid ${STATUS[k]}` }}>{v}</span>
+          <span key={k} style={{ background: (STATUS_BG as Record<string, string>)[k], color: (STATUS as Record<string, string>)[k], fontSize: 11, fontWeight: 500, padding: "2px 8px", borderRadius: 6, border: `0.5px solid ${(STATUS as Record<string, string>)[k]}` }}>{v}</span>
         ))}
         <span style={{ fontSize: 11, color: "var(--color-text-tertiary)", alignSelf: "center" }}>— R&D readiness status per block</span>
       </div>
