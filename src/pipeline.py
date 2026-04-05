@@ -32,8 +32,8 @@ from event_camera  import EventCamera
 from camera_driver import CameraDriver
 from event_buffer  import TimeWindowBuffer
 from gpu_memory    import GPUMemoryManager, get_best_device
-from spike_kernel  import SpikeKernel
-from snn_model     import SpikingClassifier
+from acceleration.N_H.spike_kernel  import SpikeKernel
+from learning.snn_model     import SpikingClassifier
 from output_decoder import RateDecoder, plot_spike_raster
 
 try:
