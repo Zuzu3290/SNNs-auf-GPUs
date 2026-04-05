@@ -7,3 +7,6 @@ torch::Tensor snn_forward(torch::Tensor mem, torch::Tensor input, float threshol
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("forward", &snn_forward, "SNN Forward Update (CUDA)");
 }
+
+
+//(also a wrapper
