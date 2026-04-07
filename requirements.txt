@@ -12,6 +12,9 @@
 # Core scientific stack
 numpy>=1.24
 scipy>=1.10
+nir>=1.0.6
+nirtorch>=2.0.5
+matplotlib>=3.7
 
 # Deep learning (CPU or CUDA — install the correct wheel for your GPU)
 # torch>=2.1.0   # install via https://pytorch.org

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import snn_cuda.snn_forward as snn_cuda
-from snn_module import SNNLayer
+from learning.snn_torch_module import SNNLayer
 
 if torch.cuda.is_available():
     device = "cuda"

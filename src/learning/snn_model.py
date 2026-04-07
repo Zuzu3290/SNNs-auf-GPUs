@@ -1,6 +1,5 @@
 """
-Module 6: Spiking Neural Network Simulation
-=============================================
+
 Defines SNN architectures using snnTorch, with a Norse fallback.
 
 Architectures:
@@ -32,44 +31,15 @@ Usage:
 import numpy as np
 import time
 from typing import Optional, Tuple
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import snntorch as snn
+from snntorch import surrogate
+from snntorch import functional as SF
+from snntorch import utils
+import norse.torch as norse
 
-try:
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
-
-try:
-    import snntorch as snn
-    from snntorch import surrogate
-    from snntorch import functional as SF
-    from snntorch import utils
-    HAS_SNNTORCH = True
-except ImportError:
-    HAS_SNNTORCH = False
-
-try:
-    import norse.torch as norse
-    HAS_NORSE = True
-except ImportError:
-    HAS_NORSE = False
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _check_deps():
-    if not HAS_TORCH:
-        raise RuntimeError("PyTorch required: pip install torch")
-    if not HAS_SNNTORCH and not HAS_NORSE:
-        raise RuntimeError(
-            "snnTorch or Norse required:\n"
-            "  pip install snntorch\n"
-            "  pip install norse"
-        )
 
 
 def spike_rate(spikes: "torch.Tensor") -> float:
@@ -101,11 +71,7 @@ class SpikingEncoder(nn.Module):
                  beta:        float = 0.95,
                  threshold:   float = 1.0,
                  spike_grad         = None):
-        _check_deps()
         super().__init__()
-
-        if not HAS_SNNTORCH:
-            raise RuntimeError("snnTorch required for SpikingEncoder")
 
         sg = spike_grad or surrogate.fast_sigmoid(slope=25)
 
@@ -178,7 +144,6 @@ class SpikingClassifier(nn.Module):
                  hidden_ch:   int   = 64,
                  beta:        float = 0.9,
                  threshold:   float = 1.0):
-        _check_deps()
         if not HAS_SNNTORCH:
             raise RuntimeError("snnTorch required")
         super().__init__()
@@ -275,8 +240,6 @@ class SpikingRecurrent(nn.Module):
     """
     Recurrent SNN using Norse's LSNN (Adaptive LIF) cells.
     Better for sequences / temporal patterns.
-
-    Requires: pip install norse
     """
 
     def __init__(self,
@@ -284,9 +247,6 @@ class SpikingRecurrent(nn.Module):
                  n_bins:      int   = 5,
                  n_classes:   int   = 10,
                  hidden_size: int   = 256):
-        if not HAS_NORSE:
-            raise RuntimeError("Norse required: pip install norse")
-        _check_deps()
         super().__init__()
 
         W, H = sensor_size
@@ -332,9 +292,6 @@ def build_loss(loss_type: str = "rate"):
     'rate' → cross-entropy on summed spike counts (rate code)
     'mse'  → mean-square error on rate vs one-hot
     """
-    if not HAS_SNNTORCH:
-        return nn.CrossEntropyLoss()
-
     if loss_type == "rate":
         return SF.ce_rate_loss()
     elif loss_type == "mse":
