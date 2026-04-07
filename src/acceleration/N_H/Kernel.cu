@@ -43,3 +43,6 @@ __global__ void snn_forward_kernel(
     v[v_idx] = new_v;
     spikes[inp_idx] = spike;
 }
+
+
+

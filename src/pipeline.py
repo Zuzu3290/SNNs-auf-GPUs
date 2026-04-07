@@ -35,17 +35,8 @@ from gpu_memory    import GPUMemoryManager, get_best_device
 from acceleration.N_H.spike_kernel  import SpikeKernel
 from learning.snn_model     import SpikingClassifier
 from learning.output_decoder import RateDecoder, plot_spike_raster
+import torch
 
-try:
-    import torch
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
-
-
-# ---------------------------------------------------------------------------
-# Default class names (replace with your dataset's labels)
-# ---------------------------------------------------------------------------
 
 CLASS_NAMES = [
     "background", "car", "pedestrian", "cyclist",
@@ -104,25 +95,19 @@ def run_pipeline(args):
     )
     gm.allocate()
 
-    # ------------------------------------------------------------------
     # Module 5: CUDA spike kernel
-    # ------------------------------------------------------------------
     kernel = SpikeKernel(backend="auto", device=device)
-
-    # ------------------------------------------------------------------
     # Module 6: SNN model
-    # ------------------------------------------------------------------
-    if HAS_TORCH:
-        model = SpikingClassifier(
+    model = SpikingClassifier(
             sensor_size = (args.width, args.height),
             n_bins      = args.n_bins,
             n_classes   = args.n_classes,
             hidden_ch   = 64,
         ).to(torch.device(device))
-        model.eval()
+    model.eval()
 
         # Optionally load checkpoint
-        if args.checkpoint:
+    if args.checkpoint:
             ckpt = torch.load(args.checkpoint, map_location=device)
             model.load_state_dict(ckpt["model_state_dict"])
             print(f"Loaded checkpoint: {args.checkpoint}")
@@ -130,9 +115,7 @@ def run_pipeline(args):
         model = None
         print("WARNING: PyTorch not available — SNN step will be skipped")
 
-    # ------------------------------------------------------------------
     # Module 7: Decoder
-    # ------------------------------------------------------------------
     n_names   = min(args.n_classes, len(CLASS_NAMES))
     names     = CLASS_NAMES[:n_names] + [f"class_{i}" for i in range(n_names, args.n_classes)]
     decoder   = RateDecoder(n_classes=args.n_classes, class_names=names)
