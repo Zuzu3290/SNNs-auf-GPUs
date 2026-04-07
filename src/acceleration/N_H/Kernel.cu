@@ -5,6 +5,9 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <ATen/ATen.h>
+#include "memory_management.h"
+#include "energy_management.h"
+#include "throughput_optimization.h"
 
 __global__ void snn_forward_kernel(
     const float* input,

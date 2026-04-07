@@ -28,13 +28,13 @@ sys.path.insert(0, str(Path(__file__).parent / "module5_cuda"))
 sys.path.insert(0, str(Path(__file__).parent / "module6_snn"))
 sys.path.insert(0, str(Path(__file__).parent / "module7_output"))
 
-from event_camera  import EventCamera
-from camera_driver import CameraDriver
-from event_buffer  import TimeWindowBuffer
+from motion_input.event_camera  import EventCamera
+from motion_input.camera_driver import CameraDriver
+from motion_input.event_buffer  import TimeWindowBuffer
 from gpu_memory    import GPUMemoryManager, get_best_device
 from acceleration.N_H.spike_kernel  import SpikeKernel
 from learning.snn_model     import SpikingClassifier
-from output_decoder import RateDecoder, plot_spike_raster
+from learning.output_decoder import RateDecoder, plot_spike_raster
 
 try:
     import torch
