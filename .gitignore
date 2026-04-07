@@ -26,3 +26,5 @@ build/
 Thumbs.db
 
 src/learning/Pytorch_study/
+src/learning/Zuhair_SNN_pytorch.py
+src/learning/snn_model.py
