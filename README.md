@@ -1,4 +1,7 @@
 # SNNs-auf-GPUs
+
+This project implements a lightweight domain-specific compiler and runtime for spiking neural network workloads. The system integrates a PyTorch-based SNN front end with a native C++/CUDA execution back end. It lowers model computations into an internal intermediate representation, applies device-aware scheduling and planning, and executes optimized kernels on GPU depending on workload characteristics. The architecture is designed as a research-oriented foundation for future extensions such as operator fusion, PTX-based kernel execution, adaptive scheduling, and timestep-aware optimization.
+
 The repo covers a topic related to the refinement of Neural networks on Neomorphic AI hardware. 
 
 From inside the snn_cuda/ directory:

@@ -332,3 +332,17 @@ Since you aren't pre-compiling, the deployment environment must meet these crite
 CUDA Toolkit Installed: The machine running the code must have nvcc available in its PATH.
 C++ Compiler: A compatible compiler (like g++ or clang) must be present.
 First-Run Delay: The very first time you run the script, it will take 30–60 seconds to compile before it actually starts training/inference. 
+
+
+
+
+
+
+The compiler should become a dedicated package that does this:
+
+PyTorch/SNN graph
+→ capture/lower
+→ internal IR
+→ scheduler
+→ backend selection
+→ CUDA/PTX/native launch
