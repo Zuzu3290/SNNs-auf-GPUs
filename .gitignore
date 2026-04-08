@@ -1,3 +1,9 @@
 # ignore virtual environments
 venv/
 Distribution/**/venv/
+
+# ignore python files
+Distribution/simple_ml_prototype/__pycache__/
+Distribution/simple_ml_prototype/dist/
+Distribution/simple_ml_prototype/*.tar
+Distribution/simple_ml_prototype/**/*.pth
