@@ -19,6 +19,20 @@ import argparse
 import numpy as np
 from pathlib import Path
 
+#inducting the compiler into your project.
+from src.compiler.capture import capture_model
+from src.compiler.lowering import lower_to_ir
+from src.compiler.scheduler import schedule_graph
+from src.compiler.planner import build_execution_plan
+from src.compiler.runtime_interface import run_plan
+
+def run_accelerated(model, sample_input):
+    fx_graph = capture_model(model, sample_input)
+    ir_graph = lower_to_ir(fx_graph)
+    scheduled = schedule_graph(ir_graph, sample_input)
+    plan = build_execution_plan(scheduled)
+    return run_plan(plan, sample_input)
+
 # Module imports
 sys.path.insert(0, str(Path(__file__).parent / "module1_camera"))
 sys.path.insert(0, str(Path(__file__).parent / "module2_driver"))
