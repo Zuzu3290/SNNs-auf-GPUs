@@ -4,7 +4,6 @@ import snntorch as snn
 import torch.nn.functional as F
 import os 
 import time
-import snn_cuda.snn_forward as snn_cuda
 import matplotlib.pyplot as plt
 import numpy as np
 import itertools
@@ -30,7 +29,6 @@ threshold = 0
 beta = 0.5  # neuron decay rate, this controls membrane decay.
 nap_time = 0
 batch_size = 1 # only one sample to learn, daataloader returns as an iterator divided up into mini-batches of size
-neuron_capacity = 0
 spike_grad = surrogate.fast_sigmoid() # surrogate gradient
 num_steps = 25 # SNNs process data over time. implement for operation varibale : timesetps
 num_inter = 0
@@ -208,22 +206,22 @@ def train_snn(model, data, optimizer, loss_fn, device):
 
     ## Running a single forwar-pass as per tutorial to visualize the output of an untrained network.
     train_batch = iter(dataloader)
-        with torch.no_grad():
-            for feature, label in train_batch:
-                feature = torch.swapaxes(input=feature, axis0=0, axis1=1)
-                label = torch.swapaxes(input=label, axis0=0, axis1=1)
-                feature = feature.to(device)
-                label = label.to(device)
-                mem = model(feature)
+    with torch.no_grad():
+        for feature, label in train_batch:
+            feature = torch.swapaxes(input=feature, axis0=0, axis1=1)
+            label = torch.swapaxes(input=label, axis0=0, axis1=1)
+            feature = feature.to(device)
+            label = label.to(device)
+            mem = model(feature)
 
-        # plot
-        plt.plot(mem[:, 0, 0].cpu(), label="Output")
-        plt.plot(label[:, 0, 0].cpu(), '--', label="Target")
-        plt.title("Untrained Output Neuron")
-        plt.xlabel("Time")
-        plt.ylabel("Membrane Potential")
-        plt.legend(loc='best')
-        plt.show()
+    # plot
+    plt.plot(mem[:, 0, 0].cpu(), label="Output")
+    plt.plot(label[:, 0, 0].cpu(), '--', label="Target")
+    plt.title("Untrained Output Neuron")
+    plt.xlabel("Time")
+    plt.ylabel("Membrane Potential")
+    plt.legend(loc='best')
+    plt.show()
     
     optimizer = torch.optim.Adam(params=model.parameters(), lr=1e-3)
 loss_function = torch.nn.MSELoss()
