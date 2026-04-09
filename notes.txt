@@ -1,0 +1,221 @@
+notes:
+
+ideal working mechanism for removing outliers using unsupervised algorithm : Local Outlier Factor. 
+
+We can build a data cleaning and scaling pipeline as such :Raw data → Step 1 → Step 2 → Output
+example : X → StandardScaler → LocalOutlierFactor → outlier labels
+	followed by pipeline object creation
+
+pytorch doesnt take dataframes rather it works with numpy so we have to use numpy
+Next, using TensorDataset, we make X and Y become a Tensor object, and print the result.
+
+
+
+
+To watch and build :
+https://brsoff.github.io/tutorials/advanced/cpp_extension.html
+https://docs.pytorch.org/tutorials/extension.html
+https://youtu.be/Bs1mdHZiAS8?si=p_pGwraJ9qbG7m_7
+https://youtu.be/syLFCVYua6Q?si=F4HoxRUSSU1LsaXT
+https://youtu.be/bH9Nkg7G8S0?si=m8Nuc0MIutqcthzE
+https://youtu.be/pDdP0TFzsoQ?si=Fxph_mDI7B_pB059
+https://youtu.be/tHL5STNJKag?si=B5K7c2C4HERK-eY-
+
+
+You’re absolutely right to ask: “Why are we doing this?” and “What problem forces us into this custom‑CUDA path?”
+The answer lies in the gap between PyTorch’s general‑purpose GPU acceleration and the very specific, performance‑sensitive nature of SNN workloads.
+
+Below is a clear, structured way to frame the problem → limitations of PyTorch → your custom‑CUDA solution. This is exactly what you’ll want in a paper or competition write‑up.
+
+1. The core problem: SNNs don’t “fit” PyTorch’s default GPU model
+At a high level, the problem is:
+
+SNNs are iterative, event‑driven, and often memory‑intensive over many timesteps, unlike standard CNNs/Transformers.
+
+When you implement them naively in PyTorch, you end up:
+
+Call‑ing many small CUDA kernels (e.g., one per timestep, one per update step).
+
+Transferring intermediate tensors back and forth, or doing redundant writes (voltages, spikes, resets).
+
+In this case, the bottleneck is not the GPU compute, but the pattern and structure of calls PyTorch forces you into.
+
+2. Why PyTorch’s internal GPU acceleration is “not enough”
+PyTorch is optimized for standard operations (matmuls, convs, norms, etc.) backed by highly tuned libraries like cuBLAS, cuDNN, and ATen.
+
+But several limitations show up for SNNs:
+
+2.1. PyTorch executes “sequentially” and launches many small kernels
+A naive SNN forward pass in Python/Pure‑PyTorch usually looks like:
+
+Loop over timesteps → call torch.add, torch.where, torch.relu, etc.
+
+Each call becomes a separate CUDA kernel launch with its own overhead.
+
+Consequences:
+
+Kernel‑launch overhead becomes significant when you have many timesteps and small batches.
+
+Unnecessary memory traffic (repeated reads/writes of voltages, spikes) and no fusion of related SNN operations.
+
+PyTorch is flexible, but flexibility ≠ efficiency for custom iterative dynamics.
+
+2.2. PyTorch hides low‑level control
+Even though PyTorch runs on CUDA, it:
+
+Abstracts away how kernels are organized (grids, blocks, memory layout).
+
+Uses general tensor patterns (e.g., TensorIterator, generic elementwise ops) that are not tuned to SNN neuron shapes or tiling patterns.
+
+So for SNNs, you often:
+
+Can’t easily fuse spike integration, reset, and synaptic updates into one kernel.
+
+Can’t control memory layout (e.g., tiling neurons vs timesteps) for optimal cache/SM usage.
+
+Your “PyTorch‑only” baseline is then suboptimal for GPU acceleration, even though it uses the GPU.
+
+2.3. PyTorch’s default behavior is not always energy‑efficient
+Many small kernels mean:
+
+More idle time between kernels,
+
+Less CUDA‑graph‑style continuous compute,
+
+More CPU‑side scheduling and synchronization points.
+
+This is bad for:
+
+Latency‑critical inference (e.g., robotics, real‑time control).
+
+Energy‑efficient SNNs, where you want dense GPU utilization with minimal launches.
+
+3. Restating the problem for your study
+You can phrase the problem formally like this:
+
+Problem statement:
+When implementing SNN forward passes in PyTorch using only built‑in operators, each timestep and SNN update step is decomposed into multiple small CUDA kernels. This leads to:
+
+High kernel‑launch overhead,
+
+Redundant memory traffic,
+
+Poor control over GPU scheduling and memory layout,
+
+Suboptimal energy efficiency and latency.
+As a result, the GPU acceleration PyTorch provides is far below the hardware’s potential for SNN workloads.
+
+Then your research question becomes:
+
+Research question:
+How can we design a custom CUDA‑based SNN forward pass that fuses neuron dynamics, spike processing, and memory management into optimized GPU kernels, and how much performance gain can this achieve compared to a naive PyTorch implementation?
+
+4. Why your custom‑CUDA‑extension path is the right solution
+Your custom‑CUDA‑extension approach directly attacks the above problem:
+
+4.1. You fuse SNN operations
+Instead of calling torch.add, torch.where, etc., in a loop, you write:
+
+One CUDA kernel that does:
+
+Current integration,
+
+Thresholding,
+
+Reset,
+
+And potentially synaptic updates
+in a single pass over the neuron‑timestep space.
+
+This:
+
+Reduces kernel launches,
+
+Reduces memory traffic,
+
+Lets you reuse cached data inside the kernel.
+
+4.2. You control GPU layout and scheduling
+You choose:
+
+How neurons and timesteps are mapped to threads/blocks,
+
+Memory layout (e.g., neuron‑major vs timestep‑major),
+
+Grid‑level tiling (for large networks).
+
+This gives you:
+
+Better cache utilization,
+
+Better SM occupancy,
+
+Better latency/energy for SNN‑specific workloads.
+
+4.3. You keep the usability of PyTorch
+You don’t throw away PyTorch; you extend it:
+
+Define your SNN layer in Python (e.g., SNNLayer),
+
+Use your custom CUDA kernel under the hood whenever you step in time.
+
+So:
+
+Training and experimentation still feel like PyTorch.
+
+Performance‑critical paths run in your hardware‑aware kernel, not PyTorch’s generic operators.
+
+5. How to present this in your project / paper
+In your “study mode” write‑up, structure it like this:
+
+Problem section
+
+Describe SNNs and their iterative nature.
+
+Show a naive PyTorch implementation (loop over timesteps, small ops).
+
+Profile it and show:
+
+High kernel‑launch overhead,
+
+Low GPU utilization,
+
+High latency/energy.
+
+Limitations of PyTorch’s GPU acceleration
+
+Explain that PyTorch is optimized for standard operations, not for fusing SNN dynamics.
+
+Cite that flexibility introduces overhead and suboptimal patterns.
+
+Your solution: custom CUDA extensions for SNNs
+
+Present your SNN‑specific CUDA kernel that fuses updates.
+
+Explain how it maps neurons/timesteps to GPU resources.
+
+Show a clean PyTorch‑style API around it.
+
+Results
+
+Compare:
+
+Naive PyTorch SNN,
+
+Your custom CUDA‑kernel SNN,
+on:
+
+Latency (forward‑pass time),
+
+GPU utilization,
+
+Energy‑proxy (e.g., power‑time).
+
+6. In one sentence: “Why we do this”
+You can summarize it as:
+
+“We build custom CUDA kernels for SNN forward passes because PyTorch’s default GPU acceleration decomposes SNN dynamics into many small, unfused kernels, leading to high overhead and suboptimal GPU utilization; our custom kernels fuse neuron updates and memory operations into tightly‑controlled GPU code that matches the SNN’s temporal and spatial structure.”
+
+If you want, the next step can be:
+
+Help you write a minimal PyTorch profiling script that quantifies the overhead of a naive SNN vs your CUDA‑kernel version, so you can back this story with hard numbers.
