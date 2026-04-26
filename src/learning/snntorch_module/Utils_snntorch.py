@@ -20,3 +20,7 @@ import tqdm
 MSE = nn.MSELoss()
 ##for snn
 loss_function = SF.mse_count_loss(correct_rate=0.8, incorrect_rate=0.2)
+#Inlcusion of performance matrix and the confusion matrix for the evaluation of the model performance
+#Inclusion of recoridng performance matrix data for later resulta nd evaulatzion of perfromace.
+def plot_confusion_matrix():
+    pass

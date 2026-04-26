@@ -25,5 +25,3 @@ build/
 .DS_Store
 Thumbs.db
 
-src/learning/Zuhair_SNN_pytorch.py
-src/learning/snn_model.py

@@ -1,30 +1,29 @@
 import math
 import os
 from dotenv import load_dotenv
-
 load_dotenv("SNN_module.env")
 
 class Settings:
     def __init__(self):
         # Neural network architecture
-        self.INPUT_SIZE = int(os.getenv("INPUT_SIZE"))
-        self.HIDDEN_SIZE = int(os.getenv("HIDDEN_SIZE"))
-        self.HIDDEN_LAYERS = int(os.getenv("HIDDEN_LAYERS"))
-        self.OUTPUT_SIZE = int(os.getenv("OUTPUT_SIZE"))
-        self.THRESHOLD = float(os.getenv("THRESHOLD"))
-        self.LEAK = float(os.getenv("LEAK"))
-        self.OVERRIDE = os.getenv("OVERRIDE").lower() 
+        self.INPUT_SIZE = int(os.getenv("INPUT_SIZE",10))
+        self.HIDDEN_SIZE = int(os.getenv("HIDDEN_SIZE",16))
+        self.HIDDEN_LAYERS = int(os.getenv("HIDDEN_LAYERS",3))
+        self.OUTPUT_SIZE = int(os.getenv("OUTPUT_SIZE",5))
+        self.THRESHOLD = float(os.getenv("THRESHOLD",0.5))
+        self.LEAK = float(os.getenv("LEAK",1.0))
+        self.OVERRIDE = os.getenv("OVER_RIDE", "false").lower() == "true"        
         self.NETWORK_STRUCT = os.getenv("NETWORK_STRUCT", None)  # S=stable, A=ascending, D=descending
         self.network_structure = self.generate_network_structure()
 
         # Training parameters
         self.LOSS_FUNCTION = os.getenv("LOSS_FUNCTION", "MSE")
         self.OPTIMIZER = os.getenv("OPTIMIZER", "Adam")
-        self.EPOCHS = int(os.getenv("EPOCHS"))
-        self.TIMESTEPS = int(os.getenv("TIMESTEPS"))
-        self.BATCH_SIZE = int(os.getenv("BATCH_SIZE"))
-        self.BETA = float(os.getenv("BETA"))
-        self.NAP_TIMES = int(os.getenv("NAP_TIMES"))
+        self.EPOCHS = int(os.getenv("EPOCHS", 10))
+        self.TIMESTEPS = int(os.getenv("TIMESTEPS", 25))
+        self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", 1))
+        self.BETA = float(os.getenv("BETA", 0.5))
+        self.NAP_TIMES = int(os.getenv("NAP_TIMES", 1))
 
 
     def generate_network_structure(self):
@@ -47,8 +46,8 @@ class Settings:
 
             elif self.NETWORK_STRUCT == "A":
                 for A in range(self.HIDDEN_LAYERS):
+                    layers.append(prev)
                     next_layer = prev + 4  # controlled linear growth
-                    layers.append(next_layer)
                     prev = next_layer
 
             else:
