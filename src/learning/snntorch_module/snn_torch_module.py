@@ -20,18 +20,7 @@ import snntorch.spikeplot as SP # a library for visualizing spiking activity and
 
 
 #interface
-input_size = 0
-output_size = 0
-hidden_layer_width = 0
-hidden_layer_height = 0
-# time_interval = 0
-threshold = 0
-beta = 0.5  # neuron decay rate, this controls membrane decay.
-nap_time = 0
-batch_size = 1 # only one sample to learn, daataloader returns as an iterator divided up into mini-batches of size
 spike_grad = surrogate.fast_sigmoid() # surrogate gradient
-num_steps = 25 # SNNs process data over time. implement for operation varibale : timesetps
-num_inter = 0
 y = torch.zeros(1, output_size) # target output placeholder
 y_predicted = torch.zeros(1, output_size) # predicted output placeholder
 
