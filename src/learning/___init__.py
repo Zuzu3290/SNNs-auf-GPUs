@@ -1,1 +1,1 @@
-from learning.snntorch_module.Utils_snntorch import *
+from learning.snntorch_module.library import *
