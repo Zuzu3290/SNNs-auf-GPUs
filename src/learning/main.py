@@ -1,32 +1,65 @@
-import os
 import torch
-from torch.utils.cpp_extension import load
+import os
 
-# 1. Point to your source files
-_src_path = os.path.join(os.getcwd(), "csrc")
-_sources = [
-    os.path.join(_src_path, "binding.cpp"), 
-    os.path.join(_src_path, "kernel.cu")
-]
+from src.skeleton.snn_config import Settings
+from src.skeleton.Encoding import build_dataloaders
+from src.learning.snntorch_module.Craft import build_model
+from src.skeleton.training import SNNTrainer
+from src.skeleton.inference import SNNInference
 
-# 2. Compile and load on the fly
-# This will search for 'nvcc' on your system path
-snn_backend = load(
-    name="snn_cuda_backend",
-    sources=_sources,
-    extra_cuda_cflags=["-O3", "--use_fast_math"],
-    verbose=True
-)
 
-# 3. Use your custom kernel in a PyTorch Module
-class CustomSNN(torch.nn.Module):
-    def __init__(self, threshold=1.0):
-        super().__init__()
-        self.threshold = threshold
+def main():
+    cfg = Settings()
 
-    def forward(self, mem, input_spikes):
-        # Calls the C++ function defined in binding.cpp
-        return snn_backend.forward(mem, input_spikes, self.threshold)
-    
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    os.makedirs(cfg.PLOT_DIR, exist_ok=True)
+    os.makedirs(cfg.MODEL_DIR, exist_ok=True)
+    os.makedirs(cfg.REPORT_DIR, exist_ok=True)
 
-## with JIT loading 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print("=" * 60)
+    print("SNN auf GPUs — Application Started")
+    print("=" * 60)
+
+    print(f"Device: {device}")
+    print(f"Dataset type: {cfg.DATASET_TYPE}")
+    print(f"Dataset name: {cfg.DATASET_NAME}")
+    print(f"Model type: {cfg.MODEL_TYPE}")
+    print(f"Network structure: {cfg.network_structure}")
+
+    train_loader, test_loader = build_dataloaders(cfg)
+
+    model = build_model(cfg).to(device)
+
+    print(model)
+    print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    trainer = SNNTrainer(
+        model=model,
+        train_loader=train_loader,
+        test_loader=test_loader,
+        config=cfg,
+        device=device
+    )
+
+    results = trainer.train()
+
+    inference = SNNInference(
+        model=model,
+        config=cfg,
+        device=device
+    )
+
+    if cfg.SAVE_MODEL:
+        model_path = os.path.join(cfg.MODEL_DIR, "snn_model.pth")
+        inference.save_model(model_path)
+        print(f"Model saved to: {model_path}")
+
+    print("=" * 60)
+    print("SNN auf GPUs — Application Finished")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()

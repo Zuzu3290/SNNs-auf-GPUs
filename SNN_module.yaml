@@ -1,0 +1,47 @@
+architecture:
+  input_size: 10
+  hidden_size: 16
+  hidden_layers: 3
+  output_size: 10
+  threshold: 0.5
+  leak: 1.0
+  override: false
+  network_struct: S
+
+training:
+  loss_function: CrossEntropy
+  optimizer: Adam
+  epochs: 10
+  timesteps: 25
+  batch_size: 128
+  beta: 0.95
+  nap_times: 1
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  num_classes: 10
+
+dataset:
+  dataset_type: digital
+  dataset_name: MNIST
+  data_path: ./data
+
+input:
+  input_mode: 2D
+  image_channels: 1
+  image_height: 28
+  image_width: 28
+
+neuromorphic:
+  use_tonic: false
+  event_representation: frame
+  sensor_size: null
+
+model:
+  model_type: CSNN
+  save_model: true
+
+output:
+  output_dir: ./outputs
+  plot_dir: ./outputs/plots
+  model_dir: ./outputs/models
+  report_dir: ./outputs/reports
