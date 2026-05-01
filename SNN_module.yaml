@@ -1,12 +1,14 @@
 architecture:
-  input_size: 10
-  hidden_size: 16
-  hidden_layers: 3
+  input_size: 50
+  hidden_size: 50
+  hidden_layers: 5
   output_size: 10
   threshold: 0.5
   leak: 1.0
   override: false
   network_struct: S
+  device: cuda
+  simulator: ON  
 
 training:
   loss_function: CrossEntropy
@@ -21,27 +23,18 @@ training:
   num_classes: 10
 
 dataset:
-  dataset_type: digital
+  dataset_type: digital # or event. If its event then we the applictaion would directly run the applictaion to use tonic
   dataset_name: MNIST
   data_path: ./data
+  encoding_method: rate
 
-input:
-  input_mode: 2D
-  image_channels: 1
-  image_height: 28
-  image_width: 28
-
-neuromorphic:
-  use_tonic: false
-  event_representation: frame
-  sensor_size: null
-
-model:
-  model_type: CSNN
-  save_model: true
+# input:
+#   input_mode: 2D
+#   image_channels: 1
+#   image_height: 28
+#   image_width: 28
 
 output:
   output_dir: ./outputs
   plot_dir: ./outputs/plots
-  model_dir: ./outputs/models
-  report_dir: ./outputs/reports
+  data_dir: ./outputs/data
