@@ -1,0 +1,44 @@
+That means the compiler is responsible for:
+
+identifying spiking operations from PyTorch/snntorch/SpikingJelly code
+converting them into a simpler execution graph
+deciding what runs on CPU and what runs on GPU
+choosing the correct CUDA/PTX kernel
+launching through your native layer
+
+It becomes the brain of the runtime.
+
+Its job is to:
+
+observe or receive SNN computations from the PyTorch side
+lower them into a simpler internal representation
+decide which parts should execute on CPU and which on GPU
+schedule execution across timesteps and kernels
+launch CUDA code efficiently through a native runtime
+remain extensible enough for future optimization research like fusion, PTX generation, and adaptive scheduling
+
+It is a specialized compiler/runtime for SNN-oriented accelerated execution.
+
+Design flow :
+ir.hpp
+Defines your internal operation format.
+This is the language your compiler understands.
+
+lowering.cpp
+Takes PyTorch/SNN-side operations and converts them into your IR., Converts PyTorch/FX nodes into your IR nodes.
+
+scheduler.cpp
+Decides:
+The heart 
+CPU or GPU
+launch order
+maybe whether to fuse simple ops
+
+runtime.cpp
+Executes the scheduled plan and talks to backend code.
+
+backend_cuda.cu
+Contains the actual CUDA kernel launches and GPU-specific execution.
+
+pybind_module.cpp
+Connects C++ compiler code to Python/PyTorch.
