@@ -38,10 +38,8 @@ class Settings:
         self.NUM_CLASSES = int(training.get("num_classes", self.OUTPUT_SIZE))
 
         # Dataset control
-        self.DATASET_TYPE = dataset.get("dataset_type", "digital")  # Neuromorphic dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
         self.DATA_PATH = dataset.get("data_path", "./data")
-        self.ENCODING_METHOD = dataset.get("encoding_method", "rate")
 
         # Input control
         self.INPUT_MODE = input_cfg.get("input_mode", "2D")
