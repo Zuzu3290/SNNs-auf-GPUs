@@ -7,13 +7,14 @@ architecture:
   leak: 1.0
   override: false
   network_struct: S
-  device: cuda
+  device: "cuda"
   simulator: ON  
 
 training:
   loss_function: CrossEntropy
   optimizer: Adam
   epochs: 10
+  iterations_per_epoch: 100
   timesteps: 25 
   batch_size: 128
   beta: 0.95

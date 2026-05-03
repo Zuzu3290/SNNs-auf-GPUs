@@ -29,6 +29,7 @@ class Settings:
         self.LOSS_FUNCTION = training.get("loss_function", "CrossEntropy")
         self.OPTIMIZER = training.get("optimizer", "Adam")
         self.EPOCHS = int(training.get("epochs", 10))
+        self.ITERA = int(training.get("iterations_per_epoch", 100))
         self.TIMESTEPS = int(training.get("timesteps", 25))
         self.BATCH_SIZE = int(training.get("batch_size", 128))
         self.BETA = float(training.get("beta", 0.95))
@@ -41,11 +42,11 @@ class Settings:
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
         self.DATA_PATH = dataset.get("data_path", "./data")
 
-        # Input control
-        self.INPUT_MODE = input_cfg.get("input_mode", "2D")
-        self.IMAGE_CHANNELS = int(input_cfg.get("image_channels", 1))
-        self.IMAGE_HEIGHT = int(input_cfg.get("image_height", 28))
-        self.IMAGE_WIDTH = int(input_cfg.get("image_width", 28))
+        # # Input control
+        # self.INPUT_MODE = input_cfg.get("input_mode", "2D")
+        # self.IMAGE_CHANNELS = int(input_cfg.get("image_channels", 1))
+        # self.IMAGE_HEIGHT = int(input_cfg.get("image_height", 28))
+        # self.IMAGE_WIDTH = int(input_cfg.get("image_width", 28))
 
         # Output control
         self.OUTPUT_DIR = output.get("output_dir", "./outputs")
