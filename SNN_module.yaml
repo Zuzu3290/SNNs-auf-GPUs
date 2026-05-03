@@ -14,7 +14,7 @@ training:
   loss_function: CrossEntropy
   optimizer: Adam
   epochs: 10
-  timesteps: 25
+  timesteps: 25 
   batch_size: 128
   beta: 0.95
   nap_times: 1
@@ -23,16 +23,8 @@ training:
   num_classes: 10
 
 dataset:
-  dataset_type: digital # or event. If its event then we the applictaion would directly run the applictaion to use tonic
   dataset_name: MNIST
-  data_path: ./data
-  encoding_method: rate
-
-# input:
-#   input_mode: 2D
-#   image_channels: 1
-#   image_height: 28
-#   image_width: 28
+  data_path:
 
 output:
   output_dir: ./outputs

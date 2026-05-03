@@ -1,29 +1,6 @@
 import torch
 import torch.nn as nn
 
-from src.learning.snntorch_module.library import SNNLibrary
-
-    # Spiking Data to rate 
-    def rate_encoding():
-        spike_data = spikegen.rate(data_it, num_steps=num_steps)
-        return print(spike_data.size()) ## Defining input vector size orientation with num_steps x batch_size x input dimensions
-
-    ## snntorch.spikeplot is used to generate a visualization of the spiking activity in the data batcch being sent as neuron input.
-    def latency_encoding():
-        spike_data = spikegen.latency(data_it, num_steps=100, tau=5, threshold=0.01) # Higehr tau lower firing rate, lower tau higher firing rate. Threshold is the voltage threshold for spike generation, which determines when a neuron will fire based on its membrane potential. A lower threshold will result in more frequent spiking, while a higher threshold will lead to less frequent spiking.
-        return print(spike_data.size()) ## Defining input vector size orientation with num_steps x batch_size x input dimensions    
-
-    def convert_to_time(data, tau=5, threshold=0.01):   # threshold isdefined to resapocate voltage threshold and the tau for the time constant of the neuron that is of teh RC circuit.
-        spike_time = tau * torch.log(data / (data - threshold))
-        return spike_time 
-
-    def delta_encoding():
-        # A configuration can be set to mediate between on_spike + off_spike if needed 
-        if True :
-            spike_data = spikegen.delta(data, threshold=4, off_spike=True)
-        else: 
-            spike_data = spikegen.delta(data_it, num_steps=100, threshold=0.01)
-        return print(spike_data.size()) ## Defining input vector size orientation with num_steps x batch_size x input dimensions
 class CSNN(nn.Module):
     """
     Convolutional Spiking Neural Network.

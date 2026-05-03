@@ -1,214 +1,98 @@
 """
-data_pipeline.py
-----------------
 Universal data processing pipeline for Spiking Neural Networks.
-Two Encoder Classes:
-  • DigitalDataEncoder   — For static image datasets (MNIST, FashionMNIST, CIFAR-10, etc.)
-  • NeuromorphicEncoder  — For event-based datasets (N-MNIST, DVS, etc.)
-
-
+NeuromorphicEncoder  — For event-based datasets (N-MNIST, DVS, etc.)
 """
-
+from __future__ import annotations
+ 
+import sys
 import torch
-from torch.utils.data import DataLoader, Dataset
-from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
 import tonic
 from tonic import DiskCachedDataset
-import tonic.transforms as tonic_transforms
-import snntorch.spikegen as spikegen
-import numpy as np
-from skeleton import Settings
-from typing import Tuple
-import matplotlib.pyplot as plt
-from __future__ import annotations
+import tonic.transforms as transforms
+import torchvision
+from snn_config import Settings
 
-
-class DigitalDatasetEncoder:
-    """
-    Encoder for static image datasets (MNIST, FashionMNIST, CIFAR-10, etc.).
- 
-    Handles:
-      - DataLoader wrapping (no caching for digital data—already fast)
-      - Returns raw batch DataLoaders: (data [B, C, H, W], targets [B])
-    
-    Note: Dataset construction is handled externally. This class only wraps
-    pre-constructed datasets into DataLoaders.
-    """
-    def __init__(self, train_ds: Dataset, test_ds: Dataset, cfg: Settings):
-        self.cfg = cfg
-        self.train_loader = None
-        self.test_loader = None
-        self.build(train_ds, test_ds)
-
-    def get_transforms(self):
-        return transforms.Compose([
-            transforms.Resize((self.cfg.IMAGE_HEIGHT, self.cfg.IMAGE_WIDTH)),
-            transforms.Grayscale(num_output_channels=self.cfg.IMAGE_CHANNELS),
-            transforms.ToTensor(),
-            transforms.Normalize((0,), (1,))
-        ])
-    
-    def build(self, train_ds: Dataset, test_ds: Dataset) -> None:
-        """Wrap datasets into DataLoaders."""
-        # Build dataloaders
-        self.train_loader = DataLoader(
-            train_ds,
-            batch_size=self.cfg.BATCH_SIZE,
-            shuffle=True,
-            drop_last=True,
-        )
- 
-        self.test_loader = DataLoader(
-            test_ds,
-            batch_size=self.cfg.BATCH_SIZE,
-            shuffle=False,
-            drop_last=True,
-        )
-
-        return self.train_loader, self.test_loader
-
-    def print_sample(self) -> None:
-        """Fetch and display one sample from the training set."""
-        data, target = next(iter(self.train_loader))
-        sample = data[0]  # (C, H, W)
-        img = sample.numpy()
- 
-        if img.shape[0] == 1:
-            img = img[0]  # (H, W) for grayscale
-        else:
-            img = np.transpose(img, (1, 2, 0))  # (H, W, C)
- 
-        print(f"  Dataset: {self.cfg.DATASET_NAME}")
-        print(f"  Type: Digital (static images)")
-        print(f"  Sample shape: {sample.shape}")
-        print(f"  Target: {target[0].item()}")
- 
-        fig, ax = plt.subplots(figsize=(4, 4))
-        ax.imshow(img, cmap="gray" if img.ndim == 2 else None)
-        ax.set_title(f"Label: {target[0].item()}")
-        ax.axis("off")
-        plt.tight_layout()
-        plt.show()
-    
 
 class NeuromorphicEncoder:
-    """
-    Encoder for event-based neuromorphic datasets (N-MNIST, DVS, etc.).
- 
-    Handles:
-      - DataLoader wrapping with optional disk caching
-      - PadTensors collation for variable-length sequences
-      - Returns raw batch DataLoaders: (data [T, B, C, H, W], targets [B])
-        where T is variable (padded to longest in batch)
- 
-    Notes:
-      - Data is already temporally structured (no encoding needed)
-      - Dataset construction is handled externally
-      - Caching significantly speeds up repeated dataloading
-    """
- 
-    def __init__(self, train_ds: Dataset, test_ds: Dataset, cfg: Settings, use_cache: bool = True):
-        self.cfg = cfg
-        self.use_cache = use_cache
-        self.train_loader = None
-        self.test_loader = None
-        self.build(train_ds, test_ds)
 
-    def _build(self, train_ds: Dataset, test_ds: Dataset) -> None:
-        if self.use_cache:
-            train_ds = DiskCachedDataset(
-                train_ds,
-                cache_path=f"{self.cfg.DATA_PATH}/cache/train"
-            )
-            test_ds = DiskCachedDataset(
-                test_ds,
-                cache_path=f"{self.cfg.DATA_PATH}/cache/test"
-            )
+        def __init__(self, cfg: Settings, use_cache: bool = True):
+            self.cfg = cfg
+            self.use_cache = use_cache
+            self.train_loader: DataLoader
+            self.test_loader:  DataLoader
+            self.build()
         
-        self.train_loader = DataLoader(
-            train_ds,
-            batch_size=self.cfg.BATCH_SIZE,
-            collate_fn=tonic.collation.PadTensors(batch_first=False),
-            shuffle=True,
-        )
+        def build(self):
+            data_path = self.cfg.DATA_PATH
+            batch_size = self.cfg.BATCH_SIZE
  
-        self.test_loader = DataLoader(
-            test_ds,
-            batch_size=self.cfg.BATCH_SIZE,
-            collate_fn=tonic.collation.PadTensors(batch_first=False),
-            shuffle=False,
-        )
-
-        return self.train_loader, self.test_loader
-
-    def print_sample(self) -> None:
-        """Fetch and display one sample from the training set."""
-        data, targets = next(iter(self.train_loader))
-        sample = data[:, 0]  # (T, C, H, W) — first sample in batch
+            if not data_path:
+                sensor_size = tonic.datasets.NMNIST.sensor_size
+                frame_tf    = transforms.Compose([transforms.Denoise(filter_time=10000), transforms.ToFrame(sensor_size=sensor_size, time_window=1000)])
+                trainset = tonic.datasets.NMNIST(save_to="./tmp/data", transform=frame_tf, train=True)
+                testset  = tonic.datasets.NMNIST(save_to="./tmp/data", transform=frame_tf, train=False)
+                self.dataset_label = "N-MNIST (default)"
+            else:
+                full_raw    = tonic.datasets.FileDataset(save_to=data_path)
+                sensor_size = full_raw.sensor_size
+                frame_tf    = transforms.Compose([transforms.Denoise(filter_time=10000), transforms.ToFrame(sensor_size=sensor_size, time_window=1000)])
+                full_set  = tonic.datasets.FileDataset(save_to=data_path, transform=frame_tf)
+                # 80/20 split manually
+                n_train   = int(0.8 * len(full_set))
+                n_test    = len(full_set) - n_train
+                trainset, testset = torch.utils.data.random_split(full_set, [n_train, n_test])
+                self.dataset_label = getattr(self.cfg, "DATASET_NAME", "Custom Neuromorphic Dataset")
+    
+            self.sensor_size = sensor_size    
+            # validate raw datasets before caching or DataLoader wrapping
+            validate_first_sample(trainset, "train")
+            validate_first_sample(testset,  "test")
+    
+            aug_tf = transforms.Compose([torch.from_numpy, torchvision.transforms.RandomRotation([-10, 10])])
+    
+            if self.use_cache:
+                train_data = DiskCachedDataset(trainset, transform=aug_tf, cache_path="./cache/train")
+                test_data  = DiskCachedDataset(testset,  cache_path="./cache/test")
+            else:
+                train_data, test_data = trainset, testset
+    
+            pad = tonic.collation.PadTensors(batch_first=False)
+            self._train_loader = DataLoader(train_data, batch_size=batch_size, collate_fn=pad, shuffle=True)
+            self._test_loader  = DataLoader(test_data,  batch_size=batch_size, collate_fn=pad)
+    
+        def get_dataloaders(self) -> tuple[DataLoader, DataLoader]:
+            return self._train_loader, self._test_loader
+    
+    
+def validate_first_sample(dataset, split: str) -> None:
+    """Index dataset[0] directly — no DataLoader overhead. Exits on failure."""
+    try:
+        events, target = dataset[0]
+        if events is None or (hasattr(events, "numel") and events.numel() == 0):
+            raise ValueError("first sample is empty")
+    except Exception as exc:
+        print(f"[ERROR] {split} dataset validation failed — {exc}")
+        sys.exit(1)
  
-        # Sum over time and polarity channels to visualize
-        if sample.ndim == 4:
-            frame = sample.numpy().sum(axis=0).sum(axis=0)  # (H, W)
-        else:
-            frame = sample.numpy().sum(axis=0)  # (H, W)
  
-        print(f"  Dataset: {self.cfg.DATASET_NAME}")
-        print(f"  Type: Neuromorphic (event-based)")
-        print(f"  Sample shape (T, C, H, W): {sample.shape}")
-        print(f"  Target: {targets[0].item()}")
-        print(f"  Time steps (padded): {data.shape[0]}")
- 
-        fig, ax = plt.subplots(figsize=(4, 4))
-        ax.imshow(frame, cmap="inferno")
-        ax.set_title(f"Label: {targets[0].item()} (Event sum)")
-        ax.axis("off")
-        plt.tight_layout()
-        plt.show()
-
-from data_pipeline import DigitalDataEncoder, NeuromorphicEncoder
-
-def build_dataloaders(config):
-    if config.DATASET_TYPE.lower() == "digital":
-        encoder = DigitalDatasetEncoder(config)
-
-    elif config.DATASET_TYPE.lower() == "event":
-        encoder = NeuromorphicEncoder(config)
-
-    else:
-        raise ValueError("DATASET_TYPE must be either 'digital' or 'event'")
-
-    return encoder.load_dataset()
-
-train_loader, test_loader = build_dataloaders(config)
-
-
-# Receive raw events 
-# (x,y,t,p)
-# Group them into a short time window.
-# Convert them into one of these:
-# event voxel grid,
-# event frame,
-# time surface,
-# direct spike input.
-# Feed that into the SNN.
-#Resume this study at https://www.perplexity.ai/search/76c72946-8644-487d-8c15-fd6d6bb00123
-
 def main():
-    cfg = Settings()
-
-    if cfg.DATASET_TYPE.lower() == "digital":
-        print("Initializing DigitalDataEncoder…")
-        encoder = DigitalDataEncoder(cfg)
-    elif cfg.DATASET_TYPE.lower() == "event":
-        print("Initializing NeuromorphicEncoder…")
-        encoder = NeuromorphicEncoder(cfg, use_cache=True)
-    else:
-        raise ValueError(f"Unknown DATASET_TYPE: {cfg.DATASET_TYPE}")
- 
-    # Get dataloaders
+    cfg     = Settings()
+    encoder = NeuromorphicEncoder(cfg, use_cache=True)
     train_loader, test_loader = encoder.get_dataloaders()
+ 
+    # --- runtime sensor-size report ---
+    H, W, C = encoder.sensor_size
+    print(f"[INFO] Dataset      : {encoder.dataset_label}")
+    print(f"[INFO] Sensor size  : H={H}  W={W}  C={C}  (polarity channels)")
+ 
+    # if encoder.input_size is not None and encoder.input_size != H * W * C:
+    #     print(f"[WARN] architecture.input_size={encoder.input_size} does not match "
+    #           f"flattened sensor size {H * W * C} — input layer requires adjustment.")
+ 
     return train_loader, test_loader
-
+ 
+ 
 if __name__ == "__main__":
     train_loader, test_loader = main()
     print("\n✓ Dataloaders ready for training/testing.")
