@@ -7,9 +7,6 @@ import torch
 from snntorch import functional as SF
 from skeleton import Settings
 
-cfg = Settings()
-device = torch.device(cfg.DEVICE)
-
 class SNNTrainer:
  
     def __init__(self, model, train_loader, cfg: Settings, device: torch.device):
