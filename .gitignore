@@ -16,6 +16,11 @@ build/
 .venv/
 venv/
 
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
 # IDE
 .vscode/
 .idea/
