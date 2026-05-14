@@ -1,7 +1,7 @@
 import yaml
 
 class Settings:
-    def __init__(self, yaml_path="SNN_module.yaml"):
+    def __init__(self, yaml_path="SNNs-auf-GPUs\SNN_module.yaml"):
         self.yaml_path = yaml_path
         self.config = self.load_yaml_config(yaml_path)
 
@@ -107,7 +107,7 @@ class Settings:
 
         # Append output layer separately
         layers.append(self.OUTPUT_SIZE)
-
+    
         return layers
 
     def display(self):
