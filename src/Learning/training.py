@@ -5,9 +5,10 @@ import csv
 import time
 import torch
 from snntorch import functional as SF
-from snn_config import Settings
+from skeleton import Settings
 
-device = torch.device(Settings.DEVICE)
+cfg = Settings()
+device = torch.device(cfg.DEVICE)
 
 class SNNTrainer:
  
@@ -47,7 +48,7 @@ class SNNTrainer:
               csv_path: str = "./outputs/data/training_results.csv") -> dict:
  
         epochs    = self.cfg.EPOCHS
-        num_iters = self.cfg.TRAINING_ITERS
+        num_iters = self.cfg.ITERA
  
         if checkpoint_dir is not None:
             os.makedirs(checkpoint_dir, exist_ok=True)

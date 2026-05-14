@@ -5,14 +5,16 @@ NeuromorphicEncoder  — For event-based datasets (N-MNIST, DVS, etc.)
 from __future__ import annotations
  
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 from torch.utils.data import DataLoader
 import tonic
 from tonic import DiskCachedDataset
 import tonic.transforms as transforms
 import torchvision
-from snn_config import Settings
-
+from skeleton import Settings
 
 class NeuromorphicEncoder:
 
@@ -44,10 +46,13 @@ class NeuromorphicEncoder:
                 trainset, testset = torch.utils.data.random_split(full_set, [n_train, n_test])
                 self.dataset_label = getattr(self.cfg, "DATASET_NAME", "Custom Neuromorphic Dataset")
     
-            self.sensor_size = sensor_size    
+            self.sensor_size = sensor_size  
+            H, W, C = self.sensor_size
+            print(f"[INFO] Sensor size  : H={H}  W={W}  C={C}  (polarity channels)")
+            print(f"[INFO] Dataset      : {self.dataset_label}")  
             # validate raw datasets before caching or DataLoader wrapping
-            validate_first_sample(trainset, "train")
-            validate_first_sample(testset,  "test")
+            self.validate_first_sample(trainset, "train")
+            self.validate_first_sample(testset,  "test")
     
             aug_tf = transforms.Compose([torch.from_numpy, torchvision.transforms.RandomRotation([-10, 10])])
     
@@ -58,43 +63,19 @@ class NeuromorphicEncoder:
                 train_data, test_data = trainset, testset
     
             pad = tonic.collation.PadTensors(batch_first=False)
-            self._train_loader = DataLoader(train_data, batch_size=batch_size, collate_fn=pad, shuffle=True)
-            self._test_loader  = DataLoader(test_data,  batch_size=batch_size, collate_fn=pad)
+            self.train_loader = DataLoader(train_data, batch_size=batch_size, collate_fn=pad, shuffle=True)
+            self.test_loader  = DataLoader(test_data,  batch_size=batch_size, collate_fn=pad)
     
         def get_dataloaders(self) -> tuple[DataLoader, DataLoader]:
-            return self._train_loader, self._test_loader
+            return self.train_loader, self.test_loader
     
     
-def validate_first_sample(dataset, split: str) -> None:
-    """Index dataset[0] directly — no DataLoader overhead. Exits on failure."""
-    try:
-        events, target = dataset[0]
-        if events is None or (hasattr(events, "numel") and events.numel() == 0):
-            raise ValueError("first sample is empty")
-    except Exception as exc:
-        print(f"[ERROR] {split} dataset validation failed — {exc}")
-        sys.exit(1)
- 
- 
-def main():
-    cfg     = Settings()
-    encoder = NeuromorphicEncoder(cfg, use_cache=True)
-    train_loader, test_loader = encoder.get_dataloaders()
- 
-    # --- runtime sensor-size report ---
-    H, W, C = encoder.sensor_size
-    print(f"[INFO] Dataset      : {encoder.dataset_label}")
-    print(f"[INFO] Sensor size  : H={H}  W={W}  C={C}  (polarity channels)")
- 
-    # if encoder.input_size is not None and encoder.input_size != H * W * C:
-    #     print(f"[WARN] architecture.input_size={encoder.input_size} does not match "
-    #           f"flattened sensor size {H * W * C} — input layer requires adjustment.")
- 
-    return train_loader, test_loader
- 
- 
-if __name__ == "__main__":
-    train_loader, test_loader = main()
-    print("\n✓ Dataloaders ready for training/testing.")
-    print("  - Encoding can be applied in training loop (snntorch, Norse, etc.)")
-    print("  - Or use data directly if already encoded (neuromorphic).")
+        def validate_first_sample(self, dataset, split: str) -> None:
+            """Index dataset[0] directly — no DataLoader overhead. Exits on failure."""
+            try:
+                events, target = dataset[0]
+                if events is None or (hasattr(events, "numel") and events.numel() == 0):
+                    raise ValueError("first sample is empty")
+            except Exception as exc:
+                print(f"[ERROR] {split} dataset validation failed — {exc}")
+                sys.exit(1)

@@ -1,6 +1,4 @@
-import math
 import yaml
-
 
 class Settings:
     def __init__(self, yaml_path="SNN_module.yaml"):
@@ -23,6 +21,7 @@ class Settings:
         self.OVERRIDE = bool(architecture.get("override", False))
         self.NETWORK_STRUCT = architecture.get("network_struct", "S")
         self.DEVICE = architecture.get("device", "cuda")
+        self.KERNEL = architecture.get("kernel", "OFF")
         self.SIMULATOR = architecture.get("simulator", "OFF")
 
         # Training parameters
@@ -119,11 +118,10 @@ class Settings:
         print(f"Network architecture : {self.network_structure}")
         print(f"Epochs               : {self.EPOCHS}")
         print(f"Device               : {self.DEVICE}")
-        print(f"Encoding method      : {self.ENCODING_METHOD}")
+        print(f"Kernel               : {self.KERNEL}")
         print(f"Threshold            : {self.THRESHOLD}")
 
         print("=" * 60)
-
 
 if __name__ == "__main__":
     cfg = Settings()
