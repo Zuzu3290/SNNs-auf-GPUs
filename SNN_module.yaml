@@ -8,6 +8,7 @@ architecture:
   override: false
   network_struct: S
   device: "cuda"
+  kernel: OFF
   simulator: ON  
 
 training:

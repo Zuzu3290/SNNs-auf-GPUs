@@ -11,8 +11,7 @@ import tonic
 from tonic import DiskCachedDataset
 import tonic.transforms as transforms
 import torchvision
-from snn_config import Settings
-
+from skeleton import Settings
 
 class NeuromorphicEncoder:
 

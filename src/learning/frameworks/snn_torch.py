@@ -3,14 +3,15 @@ from snntorch import surrogate
 from snntorch import functional as SF
 from snntorch import spikeplot as splt
 from snntorch import utils
+
 import torch
 import torch.nn as nn
-from src.skeleton.inference import SNNTester
-from src.skeleton.snn_config import Settings
-from src.skeleton.data_pipeline import train_loader, test_loader
-from src.skeleton.training import SNNTrainer
 
-device = torch.device(Settings.DEVICE)
+from skeleton.snn_config import Settings
+from learning.inference import SNNTester
+from learning.data_pipeline import NeuromorphicEncoder
+from learning.training import SNNTrainer
+
 
 class SNN(nn.Module):
 
@@ -26,11 +27,11 @@ class SNN(nn.Module):
     def __init__(self, cfg: Settings, spike_grad=surrogate.atan()):
         super().__init__()
 
-        self.cfg    = cfg
-        self.device = torch.device(cfg.architecture.device)
+        self.cfg = cfg
+        self.device = torch.device(cfg.DEVICE)
 
-        beta        = cfg.training.beta
-        num_classes = cfg.training.num_classes
+        beta        = cfg.BETA
+        num_classes = cfg.NUM_CLASSES
 
         self.net = nn.Sequential(
             nn.Conv2d(self.IN_CHANNELS, self.CONV1_OUT, self.CONV1_KERNEL),
@@ -42,13 +43,13 @@ class SNN(nn.Module):
             nn.Flatten(),
             nn.Linear(self.FC_IN, num_classes),
             snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True, output=True),
-        ).to(device)
+        ).to(self.device)
 
         self.optimizer = torch.optim.Adam(
             self.net.parameters(),
-            lr=cfg.training.learning_rate,
+            lr=cfg.LEARNING_RATE,
             betas=(0.9, 0.999),
-            weight_decay=cfg.training.weight_decay,
+            weight_decay=cfg.WEIGHT_DECAY,
         )
         self.loss_fn = SF.mse_count_loss(correct_rate=0.8, incorrect_rate=0.2)
         
@@ -63,16 +64,16 @@ class SNN(nn.Module):
  
         return torch.stack(spk_rec)
     
-    def get_trainer(self, train_loader, test_loader) -> SNNTrainer:
-        return SNNTrainer(self.net, self.optimizer, self.loss_fn, train_loader, test_loader, device)
- 
+    def get_trainer(self, train_loader) -> SNNTrainer:
+        return SNNTrainer(self, train_loader, self.cfg, self.device)
+
     def get_inference(self, test_loader) -> SNNTester:
-        return SNNTester(self.net, test_loader, device)
+        return SNNTester(self.net, test_loader, self.cfg, self.device)
 
 
 
 if __name__ == "__main__":
-    from skeleton.data_pipeline import main as load_data
+    from learning.data_pipeline import main as load_data
  
     train_loader, test_loader = load_data()
  
@@ -84,4 +85,4 @@ if __name__ == "__main__":
     print("\n\u2713 Model ready.")
     print(f"  - Device    : {model.device}")
     print(f"  - FC_IN     : {SNN.FC_IN}  (verify matches your sensor resolution)")
-    print(f"  - Classes   : {cfg.training.num_classes}")
+    print(f"  - Classes   : {cfg.NUM_CLASSES}")

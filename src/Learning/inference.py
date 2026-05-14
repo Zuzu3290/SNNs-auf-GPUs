@@ -6,9 +6,8 @@ import time
 import torch
 import numpy as np
 from snntorch import functional as SF
-from snn_config import Settings
- 
- 
+from skeleton import Settings 
+
 # Energy per synaptic op — adjust for your target neuromorphic platform
 ENERGY_PER_SPIKE_PJ = 3.5
  
@@ -19,7 +18,7 @@ class SNNTester:
         self.test_loader = test_loader
         self.cfg         = cfg
         self.device      = device
-        self.num_classes = cfg.training.num_classes
+        self.num_classes = cfg.NUM_CLASSES
         self.batch_log   = []
 
     def _class_metrics(self, cm: np.ndarray) -> list[dict]:
