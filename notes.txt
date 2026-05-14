@@ -219,3 +219,26 @@ You can summarize it as:
 If you want, the next step can be:
 
 Help you write a minimal PyTorch profiling script that quantifies the overhead of a naive SNN vs your CUDA‑kernel version, so you can back this story with hard numbers.
+
+Look intofor project : 
+-Feature engineering for tabular Data with GPU acceleration
+-Finding the bottleneck: Optimizing  System Deep leanring pipelines wirh Nsight Systems
+- introduction to CUDA, acclerated computing with Moden CUDA/C++, GPU-accelerated Workflow. 
+- GPU accleration wiht the C++ library, Scaling GPu-accelertaed applictaions 
+- Optimizing CUA ML codes wiht NVIDIA Nsight pprofiting tools --> FInd the bottleneck --> Nsight Anaysis System 
+- Fundamentals for Deep learning, 
+Building Real-time Video AI applictaions --> Disaster Risk monitoring --> Anomply detection --> Predictive maintence 
+
+-Model Parallisim : Building and Deploying Large Neural networks 
+Computer Viison for industriaö Inspection 
+
+-- Building High Performance and Al-Enabled Sensor Processing Applictaions 
+what is graphical neural networks?
+- Introduction to Grpah Neural networks 
+
+What is adversial Machine learning?
+
+
+https://developers.googleblog.com/torchtpu-running-pytorch-natively-on-tpus-at-google-scale/
+
+https://arxiv.org/html/2211.12826v4
