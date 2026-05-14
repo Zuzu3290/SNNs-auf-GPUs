@@ -13,7 +13,7 @@ from learning.data_pipeline import NeuromorphicEncoder
 from learning.training import SNNTrainer
 
 
-class SNN(nn.Module):
+class SNN_TORCH(nn.Module):
 
     IN_CHANNELS:    int   = 2       # polarity channels from event camera (C in sensor_size)
     CONV1_OUT:      int   = 12      # first conv output channels
@@ -78,11 +78,11 @@ if __name__ == "__main__":
     train_loader, test_loader = load_data()
  
     cfg       = Settings()
-    model     = SNN(cfg)
+    model     = SNN_TORCH(cfg)
     trainer   = model.get_trainer(train_loader, test_loader)
     inference = model.get_inference(test_loader)
  
     print("\n\u2713 Model ready.")
     print(f"  - Device    : {model.device}")
-    print(f"  - FC_IN     : {SNN.FC_IN}  (verify matches your sensor resolution)")
+    print(f"  - FC_IN     : {SNN_TORCH.FC_IN}  (verify matches your sensor resolution)")
     print(f"  - Classes   : {cfg.NUM_CLASSES}")

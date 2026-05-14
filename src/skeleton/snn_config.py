@@ -1,6 +1,4 @@
-import math
 import yaml
-
 
 class Settings:
     def __init__(self, yaml_path="SNN_module.yaml"):
@@ -124,7 +122,6 @@ class Settings:
         print(f"Threshold            : {self.THRESHOLD}")
 
         print("=" * 60)
-
 
 if __name__ == "__main__":
     cfg = Settings()

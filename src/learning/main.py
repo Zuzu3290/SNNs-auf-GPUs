@@ -3,7 +3,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from skeleton import Settings
-from learning.frameworks.snn_torch import SNN
+from learning.frameworks.snn_torch import SNN_TORCH
 from learning.data_pipeline import main as load_data  # Import the main() function
 
 def main():
@@ -13,14 +13,16 @@ def main():
     train_loader, test_loader = load_data()
     
     # Create model and pass loaders
-    model = SNN(cfg)
+    model = SNN_TORCH(cfg)
     trainer = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)
     
     print("\n✓ Model ready.")
+    cfg.display()
     return model, trainer, inference
 
 if __name__ == "__main__":
+    cfg = Settings()
     model, trainer, inference = main()
     
     # Train the model
