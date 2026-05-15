@@ -3,7 +3,7 @@ import math
 import norse.torch as norse
 import torch
 import torch.nn as nn
-from snntorch import functional as SF
+import torch.nn.functional as F
 
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
@@ -100,7 +100,9 @@ class SNN_NORSE(nn.Module):
             betas=(0.9, 0.999),
             weight_decay=cfg.WEIGHT_DECAY,
         )
-        self.loss_fn = SF.mse_count_loss(correct_rate=0.8, incorrect_rate=0.2)
+        # CrossEntropy on spike counts — sums spikes over T, then maximises correct class logit.
+        # Simpler gradient signal than mse_count_loss; typically converges faster for classification.
+        self.loss_fn = lambda spk_rec, targets: F.cross_entropy(spk_rec.sum(0), targets)
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         return self.net(data)
