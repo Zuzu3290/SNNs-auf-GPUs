@@ -7,8 +7,6 @@ architecture:
   leak: 1.0
   override: false
   network_struct: S
-  device: cuda
-  kernel: OFF
   simulator: ON  
 
 training:
@@ -23,6 +21,10 @@ training:
   learning_rate: 0.001
   weight_decay: 0.0001
   num_classes: 10
+  device: cuda
+  kernel: OFF
+  DDP: OFF
+  num_workers: 4
 
 dataset:
   dataset_name: MNIST

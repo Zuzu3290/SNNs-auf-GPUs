@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 import tonic
 from tonic import DiskCachedDataset
 import tonic.transforms as transforms
@@ -79,3 +79,35 @@ class NeuromorphicEncoder:
             except Exception as exc:
                 print(f"[ERROR] {split} dataset validation failed — {exc}")
                 sys.exit(1)
+
+
+
+"""
+First, sampler.set_epoch(epoch) must be called at the start of every epoch. The sampler uses the epoch number as a random seed for shuffling.
+ If you forget this, every epoch will iterate over data in the same order, which degrades generalisation.
+
+Second, pin_memory=True in the DataLoader pre-allocates page-locked host memory, enabling asynchronous CPU-to-GPU transfers 
+when you call tensor.to(device, non_blocking=True). This overlap is where real throughput gains come from.
+
+Third, persistent_workers=True avoids respawning worker processes every epoch — a significant overhead reduction when num_workers > 0.
+"""
+# def create_distributed_dataloader(dataset, config, ctx):
+#     sampler = DistributedSampler(
+#         dataset,
+#         num_replicas=ctx.world_size,
+#         rank=ctx.rank,
+#         shuffle=True,
+#     )
+#     loader = DataLoader(
+#         dataset,
+#         batch_size=config.batch_size,
+#         sampler=sampler,
+#         num_workers=config.num_workers,
+#         pin_memory=True,
+#         drop_last=True,
+#         persistent_workers=config.num_workers > 0,
+#     )
+#     return loader, sampler
+
+
+
