@@ -86,3 +86,15 @@ if __name__ == "__main__":
     print(f"  - Device    : {model.device}")
     print(f"  - FC_IN     : {SNN_TORCH.FC_IN}  (verify matches your sensor resolution)")
     print(f"  - Classes   : {cfg.NUM_CLASSES}")
+
+
+
+    """
+Automatic Mixed Precision (AMP) keeps master weights in FP32 but runs the forward pass and loss computation in FP16. 
+This halves memory bandwidth requirements and enables Tensor Core acceleration on modern NVIDIA GPUs, 
+often yielding a 1.5–2x throughput improvement with negligible accuracy impact.
+
+We use torch.autocast for the forward pass and torch.amp.GradScaler for loss scaling. 
+A subtlety: we create the GradScaler with enabled=config.use_amp. 
+When disabled, the scaler becomes a no-op — same code path, zero overhead, no branching.
+"""
