@@ -7,7 +7,8 @@ architecture:
   leak: 1.0
   override: false
   network_struct: S
-  device: "cuda"
+  device: cuda
+  kernel: OFF
   simulator: ON  
 
 training:
