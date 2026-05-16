@@ -15,13 +15,14 @@ scipy>=1.10
 nir>=1.0.6
 nirtorch>=2.0.5
 matplotlib>=3.7
+PyYAML>=6.0
 
 # Deep learning (CPU or CUDA — install the correct wheel for your GPU)
 # torch>=2.1.0   # install via https://pytorch.org
 
 # Spiking Neural Network frameworks (choose one or both)
 snntorch>=0.9.1          # primary SNN library
-# norse>=0.0.7           # alternative (uncomment to use)
+norse>=0.0.7             # Norse SNN framework
 
 # Event camera drivers (uncomment the one matching your hardware)
 # pyaer>=0.1.2           # iniVation DAVIS / DVS cameras
