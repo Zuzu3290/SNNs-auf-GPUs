@@ -84,3 +84,4 @@ class NeuromorphicEncoder:
 def main() -> tuple[DataLoader, DataLoader]:
     cfg = Settings()
     return NeuromorphicEncoder(cfg).get_dataloaders()
+    
