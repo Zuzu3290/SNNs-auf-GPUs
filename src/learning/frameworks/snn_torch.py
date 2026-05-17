@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
-from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
+from learning.event_data_workflow.data_pipelinev2 import NeuromorphicEncoder
 from learning.training import SNNTrainer
 
 

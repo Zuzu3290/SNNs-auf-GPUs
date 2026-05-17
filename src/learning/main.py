@@ -4,15 +4,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from skeleton import Settings
 from learning.frameworks.snn_torch import SNN_TORCH
-from learning.event_data_workflow.data_pipeline import main as load_data  # Import the main() function
+from learning.event_data_workflow.data_pipelinev2 import NeuromorphicEncoder
 
 def main():
     cfg = Settings()
-    
-    # Get dataloaders from data_pipeline
-    train_loader, test_loader = load_data()
-    
-    # Create model and pass loaders
+
+    encoder = NeuromorphicEncoder(cfg)
+    train_loader, test_loader = encoder.get_dataloaders()
+
     model = SNN_TORCH(cfg)
     trainer = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)

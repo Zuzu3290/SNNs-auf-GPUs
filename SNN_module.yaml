@@ -18,7 +18,7 @@ training:
   optimizer: Adam
   epochs: 10
   iterations_per_epoch: 100
-  timesteps: 25 
+  timesteps: 25
   batch_size: 128
   beta: 0.95
   nap_times: 1
@@ -29,6 +29,9 @@ training:
   kernel: OFF
   DDP: OFF
   num_workers: 4
+  use_amp: true
+  grad_accum_steps: 1
+  lr_scheduler: cosine
 
 dataset:
   dataset_name: MNIST

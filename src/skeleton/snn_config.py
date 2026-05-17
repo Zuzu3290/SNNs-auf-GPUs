@@ -42,6 +42,9 @@ class Settings:
         self.KERNEL = training.get("kernel", "OFF")
         self.DDP = training.get("DDP", "OFF")
         self.NUM_WORKERS = int(training.get("num_workers", 4))
+        self.USE_AMP = bool(training.get("use_amp", True))
+        self.GRAD_ACCUM_STEPS = max(1, int(training.get("grad_accum_steps", 1)))
+        self.LR_SCHEDULER = training.get("lr_scheduler", "cosine")
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
