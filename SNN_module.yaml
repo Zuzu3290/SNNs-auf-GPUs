@@ -7,7 +7,11 @@ architecture:
   leak: 1.0
   override: false
   network_struct: S
-  simulator: ON  
+  simulator: ON
+  temporal_slice_duration: 15000
+  temporal_overlap: 0
+  total_time_window: 30000
+  num_workers: 2
 
 training:
   loss_function: CrossEntropy

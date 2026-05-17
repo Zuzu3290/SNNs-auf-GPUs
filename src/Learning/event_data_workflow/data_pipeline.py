@@ -38,7 +38,11 @@ class NeuromorphicEncoder:
             else:
                 full_raw    = tonic.datasets.FileDataset(save_to=data_path)
                 sensor_size = full_raw.sensor_size
-                frame_tf    = transforms.Compose([transforms.Denoise(filter_time=10000), transforms.ToFrame(sensor_size=sensor_size, time_window=1000)])
+                frame_tf    = transforms.Compose(
+                    [
+                        transforms.Denoise(filter_time=10000), 
+                        transforms.ToFrame(sensor_size=sensor_size, time_window=1000)
+                    ])
                 full_set  = tonic.datasets.FileDataset(save_to=data_path, transform=frame_tf)
                 # 80/20 split manually
                 n_train   = int(0.8 * len(full_set))
@@ -54,7 +58,7 @@ class NeuromorphicEncoder:
             self.validate_first_sample(trainset, "train")
             self.validate_first_sample(testset,  "test")
     
-            aug_tf = transforms.Compose([torch.from_numpy, torchvision.transforms.RandomRotation([-10, 10])])
+            aug_tf = transforms.Compose([torch.from_numpy, torchvision.transforms.RandomRotation([-30, 30])])
     
             if self.use_cache:
                 train_data = DiskCachedDataset(trainset, transform=aug_tf, cache_path="./cache/train")
@@ -63,9 +67,21 @@ class NeuromorphicEncoder:
                 train_data, test_data = trainset, testset
     
             pad = tonic.collation.PadTensors(batch_first=False)
-            self.train_loader = DataLoader(train_data, batch_size=batch_size, collate_fn=pad, shuffle=True)
-            self.test_loader  = DataLoader(test_data,  batch_size=batch_size, collate_fn=pad)
-    
+            self.train_loader = DataLoader(
+                train_data,
+                batch_size=batch_size, 
+                num_workers=2, 
+                collate_fn=pad, 
+                shuffle=True)
+            # the resulting tensor will be in the format (batch, time, channel, height, width).
+            
+            self.test_loader  = DataLoader(
+                test_data,  
+                batch_size=batch_size, 
+                num_workers=2, 
+                collate_fn=pad)
+            #multi-threading using num_workers     
+
         def get_dataloaders(self) -> tuple[DataLoader, DataLoader]:
             return self.train_loader, self.test_loader
     

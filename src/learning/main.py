@@ -4,7 +4,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from skeleton import Settings
 from learning.frameworks.snn_torch import SNN_TORCH
-from learning.data_pipeline import main as load_data  # Import the main() function
+from learning.event_data_workflow.data_pipeline import main as load_data  # Import the main() function
 
 def main():
     cfg = Settings()

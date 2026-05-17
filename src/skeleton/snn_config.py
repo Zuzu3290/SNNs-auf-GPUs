@@ -21,6 +21,10 @@ class Settings:
         self.OVERRIDE = bool(architecture.get("override", False))
         self.NETWORK_STRUCT = architecture.get("network_struct", "S")
         self.SIMULATOR = architecture.get("simulator", "OFF")
+        self.TEMPORAL_SLICE_DURATION = int(architecture.get("temporal_slice_duration", 15000))
+        self.TEMPORAL_OVERLAP = int(architecture.get("temporal_overlap", 0))
+        self.TOTAL_TIME_WINDOW = int(architecture.get("total_time_window", 30000))
+        self.NUM_WORKERS = int(architecture.get("num_workers", 2))
 
         # Training parameters
         self.LOSS_FUNCTION = training.get("loss_function", "CrossEntropy")
