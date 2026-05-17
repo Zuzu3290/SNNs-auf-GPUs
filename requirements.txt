@@ -37,6 +37,6 @@ norse>=0.0.7             # Norse SNN framework
 # Visualisation (optional but recommended)
 matplotlib>=3.7
 Pillow>=10.0
-# tonic>=0.3.0           # for event data handling and visualization
+tonic>=0.3.0           # for event data handling and visualization
 # Utilities
 tqdm>=4.65
