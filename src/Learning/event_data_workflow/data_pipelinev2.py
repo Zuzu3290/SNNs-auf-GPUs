@@ -21,8 +21,8 @@ import tonic.transforms as transforms
 import torchvision
 
 # Import new components
-from cache_engine import AdaptiveCacheController, auto_cache_dataset
-from temporal_slicer import create_sliced_dataset, create_cached_sliced_dataset
+from .cache_engine import AdaptiveCacheController, auto_cache_dataset
+from .temporal_slicer import create_sliced_dataset, create_cached_sliced_dataset
 
 
 class NeuromorphicEncoder:
@@ -181,25 +181,28 @@ class NeuromorphicEncoder:
 
     def _create_loaders(self, train_data, test_data):
         """Create DataLoaders from prepared datasets."""
-        batch_size = self.cfg.BATCH_SIZE
+        batch_size  = self.cfg.BATCH_SIZE
+        num_workers = self.cfg.NUM_WORKERS
         pad = tonic.collation.PadTensors(batch_first=False)
 
         self.train_loader = DataLoader(
             train_data,
             batch_size=batch_size,
-            num_workers=2,
+            num_workers=num_workers,
             collate_fn=pad,
             shuffle=True,
             pin_memory=True,
-            persistent_workers=True
+            persistent_workers=num_workers > 0,
+            drop_last=True,
         )
 
         self.test_loader = DataLoader(
             test_data,
             batch_size=batch_size,
-            num_workers=2,
+            num_workers=num_workers,
             collate_fn=pad,
-            pin_memory=True
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
         )
 
         print(f"\n[PIPELINE] DataLoaders created successfully")

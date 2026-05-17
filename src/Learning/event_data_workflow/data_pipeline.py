@@ -66,20 +66,26 @@ class NeuromorphicEncoder:
             else:
                 train_data, test_data = trainset, testset
     
+            num_workers = self.cfg.NUM_WORKERS
             pad = tonic.collation.PadTensors(batch_first=False)
             self.train_loader = DataLoader(
                 train_data,
-                batch_size=batch_size, 
-                num_workers=2, 
-                collate_fn=pad, 
-                shuffle=True)
-            # the resulting tensor will be in the format (batch, time, channel, height, width).
-            
-            self.test_loader  = DataLoader(
-                test_data,  
-                batch_size=batch_size, 
-                num_workers=2, 
-                collate_fn=pad)
+                batch_size=batch_size,
+                num_workers=num_workers,
+                collate_fn=pad,
+                shuffle=True,
+                pin_memory=True,
+                persistent_workers=num_workers > 0,
+                drop_last=True,
+            )
+            self.test_loader = DataLoader(
+                test_data,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                collate_fn=pad,
+                pin_memory=True,
+                persistent_workers=num_workers > 0,
+            )
             #multi-threading using num_workers     
 
         def get_dataloaders(self) -> tuple[DataLoader, DataLoader]:
