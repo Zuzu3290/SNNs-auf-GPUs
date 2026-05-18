@@ -1,40 +1,54 @@
 import sys
+import os
 from pathlib import Path
+
+# Add the 'src' directory to the path so we can import from 'skeleton' and 'learning'
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from skeleton import Settings
-from learning.frameworks.snn_torch import SNN_TORCH
-from learning.frameworks.snn_norse import SNN_NORSE
-from learning.data_pipeline import main as load_data  # Import the main() function
-
-FRAMEWORK = "norse"   # switch between "torch" and "norse"
+# Using SpikingJelly framework
+from learning.frameworks.snn_spikingjelly import SNN
+from learning.data_pipeline import NeuromorphicEncoder as load_data
 
 def main():
+    # 1. Initialize settings
     cfg = Settings()
-
-    # Get dataloaders from data_pipeline
-    train_loader, test_loader = load_data()
-
-    # Select framework
-    if FRAMEWORK == "norse":
-        model = SNN_NORSE(cfg)
-    else:
-        model = SNN_TORCH(cfg)
-
-    trainer   = model.get_trainer(train_loader)
+    
+    # 2. Create the data encoder and retrieve the dataloaders
+    # We pass 'cfg' to the class, then call the method to get the actual loaders
+    encoder = load_data(cfg)
+    train_loader, test_loader = encoder.get_dataloaders()
+    
+    # 3. Create the SpikingJelly model using our settings
+    model = SNN(cfg)
+    
+    # 4. Setup trainer and inference engines
+    trainer = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)
-
-    print(f"\n✓ Model ready  [{FRAMEWORK}]")
+    
+    print("\n✓ SpikingJelly Model ready.")
     cfg.display()
+    
     return model, trainer, inference
 
 if __name__ == "__main__":
-    cfg = Settings()
+    # Ensure a directory for checkpoints exists
+    os.makedirs("./checkpoints", exist_ok=True)
+
+    # Initialize the system
     model, trainer, inference = main()
-
-    # Train the model
+    
+    # 5. Start the Training process
+    print("\nStarting training...")
     results = trainer.train(checkpoint_dir="./checkpoints")
-
+    
     print("\n✓ Training complete!")
-    print(f"  Final loss: {results['loss_history'][-1]:.4f}")
-    print(f"  Final accuracy: {results['accuracy_history'][-1]:.4f}")
+    
+    # Check if results contains history before printing
+    if results and 'loss_history' in results and len(results['loss_history']) > 0:
+        final_loss = results['loss_history'][-1]
+        final_acc = results['accuracy_history'][-1]
+        print(f"   Final loss: {final_loss:.4f}")
+        print(f"   Final accuracy: {final_acc:.4f}")
+    else:
+        print("   Training finished, but no history was returned.")
