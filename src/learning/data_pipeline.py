@@ -79,3 +79,9 @@ class NeuromorphicEncoder:
             except Exception as exc:
                 print(f"[ERROR] {split} dataset validation failed — {exc}")
                 sys.exit(1)
+
+
+def main() -> tuple[DataLoader, DataLoader]:
+    cfg = Settings()
+    return NeuromorphicEncoder(cfg).get_dataloaders()
+    
