@@ -27,7 +27,6 @@ training:
   num_classes: 10
   device: cuda
   kernel: OFF
-  DDP: OFF
   num_workers: 4
   use_amp: true
   grad_accum_steps: 1
