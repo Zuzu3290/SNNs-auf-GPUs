@@ -10,6 +10,7 @@ Strict layer order (enforced):
 from __future__ import annotations
 
 import sys
+import logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # src/ → skeleton
@@ -36,6 +37,8 @@ def _mb_init(self, *a, **kw):
         kw.setdefault("unit_divisor", 1024)
     orig_tqdm_init(self, *a, **kw)
 t.tqdm.__init__ = _mb_init
+
+logger = logging.getLogger(__name__)
 
 
 class NeuromorphicEncoder:
@@ -96,9 +99,9 @@ class NeuromorphicEncoder:
 
         self.sensor_size = sensor_size
         H, W, C = sensor_size
-        print(f"[PIPELINE] Dataset : {self.dataset_label}  |  Sensor H={H} W={W} C={C}")
-        print(f"[PIPELINE] Train   : {len(raw_train)} recordings")
-        print(f"[PIPELINE] Test    : {len(raw_test)} recordings")
+        logger.info(f"[PIPELINE] Dataset : {self.dataset_label}  |  Sensor H={H} W={W} C={C}")
+        logger.info(f"[PIPELINE] Train   : {len(raw_train)} recordings")
+        logger.info(f"[PIPELINE] Test    : {len(raw_test)} recordings")
 
         self.validate_first_sample(raw_train, "train")
         self.validate_first_sample(raw_test, "test")
@@ -151,7 +154,7 @@ class NeuromorphicEncoder:
                 transform=test_tf,
                 verbose=True,
             )
-            print(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
+            logger.info(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
         else:
             # No slicing: cache with transforms baked in
             train_data = controller.wrap_dataset(raw_train, transform=train_tf, split="train")
@@ -184,9 +187,9 @@ class NeuromorphicEncoder:
             **dl_cfg,
         )
 
-        print(f"[PIPELINE] Train batches : {len(self.train_loader)}")
-        print(f"[PIPELINE] Test batches  : {len(self.test_loader)}")
-        print(f"[PIPELINE] Batch size    : {batch_size}")
+        logger.info(f"[PIPELINE] Train batches : {len(self.train_loader)}")
+        logger.info(f"[PIPELINE] Test batches  : {len(self.test_loader)}")
+        logger.info(f"[PIPELINE] Batch size    : {batch_size}")
 
     def get_dataloaders(self) -> tuple[DataLoader, DataLoader]:
         """Return (train_loader, test_loader) for use in the training loop."""
@@ -198,16 +201,16 @@ class NeuromorphicEncoder:
         cache_path = PROJECT_ROOT / "cache"
         if cache_path.exists():
             shutil.rmtree(cache_path)
-            print("[PIPELINE] Cache cleared")
+            logger.info("[PIPELINE] Cache cleared")
 
     def validate_first_sample(self, dataset, split: str) -> None:
         try:
             events, target = dataset[0]
             if events is None or (hasattr(events, "numel") and events.numel() == 0):
                 raise ValueError("first sample is empty")
-            print(f"[VALIDATION] {split.capitalize()} dataset: first sample OK")
+            logger.info(f"[VALIDATION] {split.capitalize()} dataset: first sample OK")
         except Exception as exc:
-            print(f"[ERROR] {split} validation failed — {exc}")
+            logger.error(f"[ERROR] {split} validation failed — {exc}")
             sys.exit(1)
 
 
@@ -223,4 +226,4 @@ def main() -> tuple[DataLoader, DataLoader]:
 
 if __name__ == "__main__":
     train_loader, test_loader = main()
-    print(f"\n[PIPELINE] Ready — {len(train_loader)} train batches, {len(test_loader)} test batches")
+    logger.info(f"[PIPELINE] Ready — {len(train_loader)} train batches, {len(test_loader)} test batches")

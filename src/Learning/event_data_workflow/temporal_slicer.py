@@ -7,10 +7,15 @@ Divides long event recordings into smaller temporal windows to:
 - Enable models to process shorter, more focused sequences
 """
 from __future__ import annotations
+
+import logging
 from typing import Optional, Tuple, List
 from dataclasses import dataclass
 import numpy as np
 from torch.utils.data import Dataset
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class TemporalSliceConfig:
@@ -54,9 +59,8 @@ class TemporalSlicedDataset(Dataset):
 
         if self.config.overlap_us > 0 and self.verbose:
             overlap_pct = 100 * self.config.overlap_us / self.config.slice_duration_us
-            # log info 
-            print(
-                f"[TEMPORAL SLICER] WARNING: overlap={self.config.overlap_us/1000:.1f}ms "
+            logger.warning(
+                f"[TEMPORAL SLICER] overlap={self.config.overlap_us/1000:.1f}ms "
                 f"({overlap_pct:.0f}% of slice). Adjacent slices share events — "
                 "set overlap_us=0 to eliminate duplicate training samples."
             )
@@ -75,12 +79,12 @@ class TemporalSlicedDataset(Dataset):
 
         if self.verbose:
             mode = "event-driven" if self.config.events_per_slice else "time-driven"
-            print(f"\n[TEMPORAL SLICER] Building slice index ({mode})...")
+            logger.info(f"[TEMPORAL SLICER] Building slice index ({mode})...")
             if self.config.events_per_slice:
-                print(f"  Events per slice : {self.config.events_per_slice}")
+                logger.info(f"  Events per slice : {self.config.events_per_slice}")
             else:
-                print(f"  Slice duration   : {self.config.slice_duration_us / 1000:.1f} ms")
-                print(f"  Overlap          : {self.config.overlap_us / 1000:.1f} ms")
+                logger.info(f"  Slice duration   : {self.config.slice_duration_us / 1000:.1f} ms")
+                logger.info(f"  Overlap          : {self.config.overlap_us / 1000:.1f} ms")
 
         total_slices = 0
         discarded_slices = 0
@@ -108,19 +112,17 @@ class TemporalSlicedDataset(Dataset):
 
             except Exception as e:
                 if self.verbose:
-                    # need to log this error
-                    print(f"  [ERROR] Failed to process sample {idx}: {e}")
+                    logger.error(f"  [TEMPORAL SLICER] Failed to process sample {idx}: {e}")
                 continue
 
         if self.verbose:
             n_orig = len(self.dataset)
             expansion = total_slices / n_orig if n_orig > 0 else 0
-            # need to log this later  into log info 
-            print(f"  Original samples : {n_orig}")
-            print(f"  Total slices     : {total_slices}")
-            print(f"  Discarded (sparse): {discarded_slices}")
-            print(f"  Expansion factor : {expansion:.2f}x")
-            print(f"[TEMPORAL SLICER] Index built\n")
+            logger.info(f"  Original samples  : {n_orig}")
+            logger.info(f"  Total slices      : {total_slices}")
+            logger.info(f"  Discarded (sparse): {discarded_slices}")
+            logger.info(f"  Expansion factor  : {expansion:.2f}x")
+            logger.info("[TEMPORAL SLICER] Index built")
 
     def time_driven_bounds(self, t: np.ndarray) -> List[Tuple[int, int]]:
         """
@@ -178,11 +180,11 @@ class TemporalSlicedDataset(Dataset):
 
         events, target = self.dataset[original_idx]
 
-        if hasattr(events, 'dtype'):  # structured array
+        if hasattr(events, 'dtype'):  # structured array (x, y, t, p)
             sliced_events = events[start_idx:end_idx].copy()
             if len(sliced_events) > 0:
                 sliced_events['t'] -= sliced_events['t'][0]
-        else:  # tensor fallback
+        else:  # tensor fallback — timestamps at column 2
             sliced_events = events[start_idx:end_idx].clone()
             if len(sliced_events) > 0:
                 sliced_events[:, 2] -= sliced_events[0, 2]
@@ -219,8 +221,7 @@ class AdaptiveTemporalSlicer:
         event_rates = []
 
         indices = np.random.choice(len(self.dataset), self.num_samples, replace=False)
-        # to log
-        print(f"\n[ADAPTIVE SLICER] Analyzing {self.num_samples} samples...")
+        logger.info(f"[ADAPTIVE SLICER] Analyzing {self.num_samples} samples...")
 
         for idx in indices:
             try:
@@ -241,12 +242,10 @@ class AdaptiveTemporalSlicer:
                     event_rates.append(num_events / duration_ms)
 
             except Exception as e:
-                # to log warning 
-                print(f"  [WARNING] Failed to analyze sample {idx}: {e}")
+                logger.warning(f"  [ADAPTIVE SLICER] Failed to analyze sample {idx}: {e}")
                 continue
 
         if not durations:
-            # to log error
             raise RuntimeError(
                 f"[ADAPTIVE SLICER] Could not collect valid statistics — "
                 f"all {self.num_samples} sampled entries were empty or failed to load."
@@ -262,21 +261,21 @@ class AdaptiveTemporalSlicer:
             'mean_event_rate':     np.mean(event_rates)   if event_rates else float('nan'),
             'median_event_rate':   np.median(event_rates) if event_rates else float('nan'),
         }
-        self.print_stats()
+        self.log_stats()
         return self.stats
 
-    def print_stats(self):
-        # change to being called the log stats or something like that  into info 
+    def log_stats(self):
         if self.stats is None:
             return
         s = self.stats
-        print(f"\n{'='*60}")
-        print("DATASET TEMPORAL STATISTICS")
-        print(f"{'='*60}")
-        print(f"Duration  — mean: {s['mean_duration_ms']:.2f}ms  median: {s['median_duration_ms']:.2f}ms  std: {s['std_duration_ms']:.2f}ms")
-        print(f"Events    — mean: {s['mean_event_count']:.1f}  median: {s['median_event_count']:.1f}  std: {s['std_event_count']:.1f}")
-        print(f"Rate      — mean: {s['mean_event_rate']:.1f} ev/ms  median: {s['median_event_rate']:.1f} ev/ms")
-        print(f"{'='*60}\n")
+        sep = "=" * 60
+        logger.info(sep)
+        logger.info("DATASET TEMPORAL STATISTICS")
+        logger.info(sep)
+        logger.info(f"Duration  — mean: {s['mean_duration_ms']:.2f}ms  median: {s['median_duration_ms']:.2f}ms  std: {s['std_duration_ms']:.2f}ms")
+        logger.info(f"Events    — mean: {s['mean_event_count']:.1f}  median: {s['median_event_count']:.1f}  std: {s['std_event_count']:.1f}")
+        logger.info(f"Rate      — mean: {s['mean_event_rate']:.1f} ev/ms  median: {s['median_event_rate']:.1f} ev/ms")
+        logger.info(sep)
 
     def suggest_slice_config(self, target_slices_per_sample: int = 2, min_events_per_slice: int = 50) -> TemporalSliceConfig:
         """
@@ -290,18 +289,21 @@ class AdaptiveTemporalSlicer:
 
         expected_events = suggested_ms * self.stats['mean_event_rate']
         if expected_events < min_events_per_slice:
-            # to log warning 
-            print(f"[WARNING] {suggested_ms:.1f}ms slice yields ~{expected_events:.1f} events; adjusting up.")
+            logger.warning(f"[ADAPTIVE SLICER] {suggested_ms:.1f}ms slice yields ~{expected_events:.1f} events; adjusting up.")
             suggested_ms = min_events_per_slice / self.stats['mean_event_rate']
             suggested_us = int(suggested_ms * 1000)
 
-        config = TemporalSliceConfig( slice_duration_us=suggested_us, overlap_us=0, min_events_per_slice=min_events_per_slice, discard_incomplete=False)
-            # log info 
-        print(f"[ADAPTIVE SLICER] Recommended config:")
-        print(f"  Slice duration : {suggested_ms:.2f} ms")
-        print(f"  Overlap        : 0 ms (no duplicate samples)")
-        print(f"  Min events     : {min_events_per_slice}")
-        print(f"  Expected slices: ~{target_slices_per_sample} per sample\n")
+        config = TemporalSliceConfig(
+            slice_duration_us=suggested_us,
+            overlap_us=0,
+            min_events_per_slice=min_events_per_slice,
+            discard_incomplete=False,
+        )
+        logger.info("[ADAPTIVE SLICER] Recommended config:")
+        logger.info(f"  Slice duration : {suggested_ms:.2f} ms")
+        logger.info("  Overlap        : 0 ms (no duplicate samples)")
+        logger.info(f"  Min events     : {min_events_per_slice}")
+        logger.info(f"  Expected slices: ~{target_slices_per_sample} per sample")
 
         return config
 
@@ -319,7 +321,6 @@ def create_sliced_dataset(
 ) -> TemporalSlicedDataset:
     """
     Create a temporally sliced dataset.
-
     """
     if events_per_slice is not None:
         config = TemporalSliceConfig(
