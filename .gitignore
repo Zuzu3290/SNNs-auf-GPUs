@@ -13,6 +13,13 @@ build/
 .env
 .env.local
 .env.*.local
+.venv/
+venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
 
 # IDE
 .vscode/
@@ -28,3 +35,21 @@ Thumbs.db
 # data
 data/
 notes.txt
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# ML Results & Models
+checkpoints/
+outputs/
+*.pth
+*.pt
+*.csv
+
+# Data
+tmp/
+cache/
+notes.txt 

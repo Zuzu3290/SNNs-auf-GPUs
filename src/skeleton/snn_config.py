@@ -1,7 +1,11 @@
 import yaml
+from pathlib import Path
+
+# Absolute path to SNN_module.yaml — works regardless of working directory
+_DEFAULT_YAML = Path(__file__).parent.parent.parent / "SNN_module.yaml"
 
 class Settings:
-    def __init__(self, yaml_path="SNN_module.yaml"):
+    def __init__(self, yaml_path=str(_DEFAULT_YAML)):
         self.yaml_path = yaml_path
         self.config = self.load_yaml_config(yaml_path)
 
@@ -116,7 +120,7 @@ class Settings:
 
         # Append output layer separately
         layers.append(self.OUTPUT_SIZE)
-
+    
         return layers
 
     def display(self):
