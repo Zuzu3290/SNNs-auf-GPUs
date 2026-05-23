@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
-from learning.event_data_workflow.data_pipelinev2 import NeuromorphicEncoder
+from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
 from learning.training import SNNTrainer
 
 
@@ -68,7 +68,7 @@ class SNN_TORCH(nn.Module):
         return SNNTrainer(self, train_loader, self.cfg, self.device)
 
     def get_inference(self, test_loader) -> SNNTester:
-        return SNNTester(self.net, test_loader, self.cfg, self.device)
+        return SNNTester(self, test_loader, self.cfg, self.device)
 
 
 
