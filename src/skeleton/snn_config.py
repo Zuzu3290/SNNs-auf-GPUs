@@ -24,9 +24,11 @@ class Settings:
         self.LEAK = float(architecture.get("leak", 1.0))
         self.OVERRIDE = bool(architecture.get("override", False))
         self.NETWORK_STRUCT = architecture.get("network_struct", "S")
-        self.DEVICE = architecture.get("device", "cuda")
-        self.KERNEL = architecture.get("kernel", "OFF")
         self.SIMULATOR = architecture.get("simulator", "OFF")
+        self.TEMPORAL_SLICE_DURATION = int(architecture.get("temporal_slice_duration", 15000))
+        self.TEMPORAL_OVERLAP = int(architecture.get("temporal_overlap", 0))
+        self.TOTAL_TIME_WINDOW = int(architecture.get("total_time_window", 30000))
+        self.NUM_WORKERS = int(architecture.get("num_workers", 2))
 
         # Training parameters
         self.LOSS_FUNCTION = training.get("loss_function", "CrossEntropy")
@@ -40,6 +42,13 @@ class Settings:
         self.LEARNING_RATE = float(training.get("learning_rate", 0.001))
         self.WEIGHT_DECAY = float(training.get("weight_decay", 0.0001))
         self.NUM_CLASSES = int(training.get("num_classes", self.OUTPUT_SIZE))
+        self.DEVICE = training.get("device", "cuda")
+        self.KERNEL = training.get("kernel", "OFF")
+        self.DDP = training.get("DDP", "OFF")
+        self.NUM_WORKERS = int(training.get("num_workers", 4))
+        self.USE_AMP = bool(training.get("use_amp", True))
+        self.GRAD_ACCUM_STEPS = max(1, int(training.get("grad_accum_steps", 1)))
+        self.LR_SCHEDULER = training.get("lr_scheduler", "cosine")
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")

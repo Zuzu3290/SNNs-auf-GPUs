@@ -6,23 +6,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from skeleton import Settings
-# Using SpikingJelly framework
-from learning.frameworks.snn_spikingjelly import SNN
-from learning.data_pipeline import NeuromorphicEncoder as load_data
+from learning.frameworks.snn_torch import SNN_TORCH
+from learning.event_data_workflow import NeuromorphicEncoder
 
 def main():
     # 1. Initialize settings
     cfg = Settings()
-    
-    # 2. Create the data encoder and retrieve the dataloaders
-    # We pass 'cfg' to the class, then call the method to get the actual loaders
-    encoder = load_data(cfg)
+
+    encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
-    
-    # 3. Create the SpikingJelly model using our settings
-    model = SNN(cfg)
-    
-    # 4. Setup trainer and inference engines
+
+    model = SNN_TORCH(cfg)
     trainer = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)
     
@@ -38,17 +32,18 @@ if __name__ == "__main__":
     # Initialize the system
     model, trainer, inference = main()
     
-    # 5. Start the Training process
-    print("\nStarting training...")
     results = trainer.train(checkpoint_dir="./checkpoints")
-    
+
     print("\n✓ Training complete!")
-    
-    # Check if results contains history before printing
-    if results and 'loss_history' in results and len(results['loss_history']) > 0:
-        final_loss = results['loss_history'][-1]
-        final_acc = results['accuracy_history'][-1]
-        print(f"   Final loss: {final_loss:.4f}")
-        print(f"   Final accuracy: {final_acc:.4f}")
-    else:
-        print("   Training finished, but no history was returned.")
+    print(f"  Final loss     : {results['loss_history'][-1]:.4f}")
+    print(f"  Final accuracy : {results['accuracy_history'][-1]:.4f}")
+    print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
+
+    trainer.plot_training()
+    trainer.plot_raster()
+
+    test_results = inference.run()
+
+    print("\n✓ Testing complete!")
+    print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
+    print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")

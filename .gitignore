@@ -51,3 +51,5 @@ outputs/
 
 # Data
 tmp/
+cache/
+notes.txt 

@@ -3,7 +3,7 @@ import torch.nn as nn
 from spikingjelly.activation_based import neuron, functional, surrogate
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
-from learning.data_pipeline import NeuromorphicEncoder
+from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
 from learning.training import SNNTrainer
 
 class SNN(nn.Module):

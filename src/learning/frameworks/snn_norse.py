@@ -115,9 +115,10 @@ class SNN_NORSE(nn.Module):
 
 
 if __name__ == "__main__":
-    from learning.data_pipeline import main as load_data
+    from learning.event_data_workflow import NeuromorphicEncoder
 
-    train_loader, test_loader = load_data()
+    encoder = NeuromorphicEncoder(Settings())
+    train_loader, test_loader = encoder.get_dataloaders()
 
     cfg       = Settings()
     model     = SNN_NORSE(cfg)

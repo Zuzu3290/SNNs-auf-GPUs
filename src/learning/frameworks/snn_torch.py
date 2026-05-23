@@ -3,13 +3,11 @@ from snntorch import surrogate
 from snntorch import functional as SF
 from snntorch import spikeplot as splt
 from snntorch import utils
-
 import torch
 import torch.nn as nn
-
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
-from learning.data_pipeline import NeuromorphicEncoder
+from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
 from learning.training import SNNTrainer
 
 
@@ -68,12 +66,12 @@ class SNN_TORCH(nn.Module):
         return SNNTrainer(self, train_loader, self.cfg, self.device)
 
     def get_inference(self, test_loader) -> SNNTester:
-        return SNNTester(self.net, test_loader, self.cfg, self.device)
+        return SNNTester(self, test_loader, self.cfg, self.device)
 
 
 
 if __name__ == "__main__":
-    from learning.data_pipeline import main as load_data
+    from learning.event_data_workflow.data_pipeline import main as load_data
  
     train_loader, test_loader = load_data()
  
@@ -86,3 +84,15 @@ if __name__ == "__main__":
     print(f"  - Device    : {model.device}")
     print(f"  - FC_IN     : {SNN_TORCH.FC_IN}  (verify matches your sensor resolution)")
     print(f"  - Classes   : {cfg.NUM_CLASSES}")
+
+
+
+    """
+Automatic Mixed Precision (AMP) keeps master weights in FP32 but runs the forward pass and loss computation in FP16. 
+This halves memory bandwidth requirements and enables Tensor Core acceleration on modern NVIDIA GPUs, 
+often yielding a 1.5–2x throughput improvement with negligible accuracy impact.
+
+We use torch.autocast for the forward pass and torch.amp.GradScaler for loss scaling. 
+A subtlety: we create the GradScaler with enabled=config.use_amp. 
+When disabled, the scaler becomes a no-op — same code path, zero overhead, no branching.
+"""
