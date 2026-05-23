@@ -16,7 +16,7 @@ nir>=1.0.6
 nirtorch>=2.0.5
 matplotlib>=3.7
 PyYAML>=6.0
-
+psutil>=5.9
 # Deep learning (CPU or CUDA — install the correct wheel for your GPU)
 # torch>=2.1.0   # install via https://pytorch.org
 
