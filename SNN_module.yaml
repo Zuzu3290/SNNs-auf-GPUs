@@ -15,9 +15,9 @@ training:
   loss_function: CrossEntropy
   optimizer: Adam
   epochs: 10
-  iterations_per_epoch: 100
-  timesteps: 25 
-  batch_size: 128
+  iterations_per_epoch: 937   # 60000 / 64 — full N-MNIST dataset per epoch
+  timesteps: 16               # matches n_time_bins in data_pipeline
+  batch_size: 64
   beta: 0.95
   nap_times: 1
   learning_rate: 0.001

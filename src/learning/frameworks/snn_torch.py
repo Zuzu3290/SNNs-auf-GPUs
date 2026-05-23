@@ -3,6 +3,7 @@ from snntorch import surrogate
 from snntorch import functional as SF
 from snntorch import spikeplot as splt
 from snntorch import utils
+import torch.nn.functional as F
 
 import torch
 import torch.nn as nn
@@ -51,7 +52,9 @@ class SNN_TORCH(nn.Module):
             betas=(0.9, 0.999),
             weight_decay=cfg.WEIGHT_DECAY,
         )
-        self.loss_fn = SF.mse_count_loss(correct_rate=0.8, incorrect_rate=0.2)
+        # cross_entropy on summed spikes — framework-agnostic, matches Norse loss.
+        # Replaced SF.mse_count_loss (SNNTorch-specific) for fair framework comparison.
+        self.loss_fn = lambda spk_rec, targets: F.cross_entropy(spk_rec.sum(0), targets)
         
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """Iterate over timesteps and collect output spikes."""
