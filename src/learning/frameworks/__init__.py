@@ -1,3 +1,3 @@
-from .snn_torch import SNN_TORCH
+from .snn_spikingjelly import SNN
 
 __all__ = ['SNN_TORCH']

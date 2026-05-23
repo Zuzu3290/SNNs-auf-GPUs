@@ -1,5 +1,8 @@
 import sys
+import os
 from pathlib import Path
+
+# Add the 'src' directory to the path so we can import from 'skeleton' and 'learning'
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from skeleton import Settings
@@ -7,6 +10,7 @@ from learning.frameworks.snn_torch import SNN_TORCH
 from learning.event_data_workflow import NeuromorphicEncoder
 
 def main():
+    # 1. Initialize settings
     cfg = Settings()
 
     encoder = NeuromorphicEncoder(cfg)
@@ -16,12 +20,16 @@ def main():
     trainer = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)
     
-    print("\n✓ Model ready.")
+    print("\n✓ SpikingJelly Model ready.")
     cfg.display()
+    
     return model, trainer, inference
 
 if __name__ == "__main__":
-    cfg = Settings()
+    # Ensure a directory for checkpoints exists
+    os.makedirs("./checkpoints", exist_ok=True)
+
+    # Initialize the system
     model, trainer, inference = main()
     
     results = trainer.train(checkpoint_dir="./checkpoints")

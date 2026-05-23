@@ -3,10 +3,8 @@ from snntorch import surrogate
 from snntorch import functional as SF
 from snntorch import spikeplot as splt
 from snntorch import utils
-
 import torch
 import torch.nn as nn
-
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
 from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
