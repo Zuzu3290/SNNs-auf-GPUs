@@ -22,9 +22,11 @@ class SNNTrainer:
         self.cfg          = cfg
         self.device       = device
 
-        self.loss_hist = []
-        self.acc_hist  = []
-        self.epoch_log = []
+        self.loss_hist       = []
+        self.acc_hist        = []
+        self.spike_rate_hist = []
+        self.last_spk_rec    = None
+        self.epoch_log       = []
 
         use_amp = getattr(cfg, "USE_AMP", True) and device.type == "cuda"
         self.scaler           = torch.amp.GradScaler(enabled=use_amp)
@@ -84,7 +86,7 @@ class SNNTrainer:
 
         for epoch in range(epochs):
             self.model.net.train()
-            epoch_loss, epoch_acc, n, step_count = 0.0, 0.0, 0, 0
+            epoch_loss, epoch_acc, epoch_spike, n, step_count = 0.0, 0.0, 0.0, 0, 0
             t0 = time.perf_counter()
 
             self.model.optimizer.zero_grad(set_to_none=True)
@@ -105,12 +107,18 @@ class SNNTrainer:
                     self.scaler.update()
                     self.model.optimizer.zero_grad(set_to_none=True)
 
-                raw_loss = loss_val.item() * accum
-                acc = SF.accuracy_rate(spk_rec, targets)
+                raw_loss   = loss_val.item() * accum
+                acc        = SF.accuracy_rate(spk_rec, targets)
+                spike_rate = spk_rec.detach().float().mean().item()
+
                 self.loss_hist.append(raw_loss)
                 self.acc_hist.append(acc)
-                epoch_loss += raw_loss
-                epoch_acc  += acc
+                self.spike_rate_hist.append(spike_rate)
+                self.last_spk_rec = spk_rec.detach().cpu()
+
+                epoch_loss  += raw_loss
+                epoch_acc   += acc
+                epoch_spike += spike_rate
                 n += 1
 
                 if i == num_iters:
@@ -130,10 +138,13 @@ class SNNTrainer:
             train_acc      = epoch_acc  / n
             current_lr     = self.model.optimizer.param_groups[0]["lr"]
 
+            train_spike = epoch_spike / n
+
             self.epoch_log.append({
                 "epoch":            epoch + 1,
                 "train_loss":       round(train_loss,     4),
                 "train_accuracy":   round(train_acc,      4),
+                "spike_rate":       round(train_spike,    4),
                 "learning_rate":    round(current_lr,     6),
                 "epoch_duration_s": round(epoch_duration, 2),
             })
@@ -141,6 +152,7 @@ class SNNTrainer:
             print(f"\nEpoch {epoch + 1}/{epochs}")
             print(f"  • Train Loss     : {train_loss:.4f}")
             print(f"  • Train Accuracy : {train_acc * 100:.2f}%")
+            print(f"  • Spike Rate     : {train_spike:.4f}")
             print(f"  • LR             : {current_lr:.6f}")
             print(f"  • Duration       : {epoch_duration:.2f}s")
 
@@ -152,10 +164,58 @@ class SNNTrainer:
         self.write_csv(csv_path)
 
         return {
-            "loss_history":     self.loss_hist,
-            "accuracy_history": self.acc_hist,
-            "epoch_log":        self.epoch_log,
+            "loss_history":       self.loss_hist,
+            "accuracy_history":   self.acc_hist,
+            "spike_rate_history": self.spike_rate_hist,
+            "epoch_log":          self.epoch_log,
         }
+
+    def plot_training(self, save_dir: str = "./outputs/plots") -> None:
+        import matplotlib.pyplot as plt
+        os.makedirs(save_dir, exist_ok=True)
+
+        fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+        fig.suptitle("SNN Training Metrics", fontsize=14)
+
+        axes[0].plot(self.loss_hist, linewidth=0.8)
+        axes[0].set_ylabel("Loss")
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].plot(self.acc_hist, color="tab:green", linewidth=0.8)
+        axes[1].set_ylabel("Accuracy")
+        axes[1].set_ylim(0, 1)
+        axes[1].grid(True, alpha=0.3)
+
+        axes[2].plot(self.spike_rate_hist, color="tab:orange", linewidth=0.8)
+        axes[2].set_ylabel("Spike Rate")
+        axes[2].set_xlabel("Batch")
+        axes[2].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        path = os.path.join(save_dir, "training_metrics.png")
+        plt.savefig(path, dpi=150)
+        plt.show()
+        print(f"[PLOT] Saved → {path}")
+
+    def plot_raster(self, save_dir: str = "./outputs/plots") -> None:
+        if self.last_spk_rec is None:
+            print("[PLOT] No spike data — run train() first.")
+            return
+        import matplotlib.pyplot as plt
+        from snntorch import spikeplot as splt
+        os.makedirs(save_dir, exist_ok=True)
+
+        spk_sample = self.last_spk_rec[:, 0, :]   # [T, num_classes] — first sample in last batch
+        fig, ax = plt.subplots(figsize=(10, 3))
+        splt.raster(spk_sample, ax, s=40, c="black")
+        ax.set_title("Output Neuron Spike Raster  (last batch · sample 0)")
+        ax.set_xlabel("Time step")
+        ax.set_ylabel("Neuron index")
+        plt.tight_layout()
+        path = os.path.join(save_dir, "spike_raster.png")
+        plt.savefig(path, dpi=150)
+        plt.show()
+        print(f"[PLOT] Saved → {path}")
     
 
 

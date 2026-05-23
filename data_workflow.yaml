@@ -1,0 +1,14 @@
+slice_duration_us # Defines window size.
+min_events_per_slice # Minimum number of events required in a slice to be considered valid.
+overlap_us # Amount of overlap between consecutive slices, in microseconds.
+discard_incomplete: bool = False  # Whether to discard the last partial slice
+events_per_slice: Optional[int] = None  # Event-driven mode: new slice every N events
+
+dataset:          Base neuromorphic dataset
+slice_duration_ms: Duration of each time-driven slice (ms)
+overlap_ms:       Overlap between slices — keep at 0 to avoid duplicate samples
+min_events:       Slices with fewer events are dropped at index-build time
+events_per_slice: If set, switch to event-driven mode (ignores slice_duration_ms)
+auto_tune:        Analyze dataset and auto-tune time-driven parameters
+transform:        Applied to each slice after extraction
+verbose:          Print diagnostics

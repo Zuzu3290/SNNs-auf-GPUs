@@ -1,135 +1,226 @@
 """
-Universal data processing pipeline for Spiking Neural Networks.
-NeuromorphicEncoder  — For event-based datasets (N-MNIST, DVS, etc.)
+Neuromorphic Data Pipeline — single entry point for all event-based dataset loading.
+
+Strict layer order (enforced):
+    1. Raw dataset load        — no transforms, no caching
+    2. Adaptive cache          — raw recordings only (BoundedRecordingCache / DiskCache)
+    3. Temporal slicing        — stateless transform, optional
+    4. DataLoader construction — coordinator-driven worker / prefetch config
 """
 from __future__ import annotations
- 
+
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # src/ → skeleton
+sys.path.insert(0, str(Path(__file__).parent))                # sibling modules
 
 import torch
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 import tonic
-from tonic import DiskCachedDataset
 import tonic.transforms as transforms
 import torchvision
 from skeleton import Settings
+from cache_engine import AdaptiveCacheController, PipelineMemoryCoordinator
+from temporal_slicer import create_sliced_dataset
+
+PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
+
+import tqdm as t
+orig_tqdm_init = t.tqdm.__init__
+def _mb_init(self, *a, **kw):
+    if kw.get("total", 0) > 1_000_000:
+        kw.setdefault("unit", "B")
+        kw.setdefault("unit_scale", True)
+        kw.setdefault("unit_divisor", 1024)
+    orig_tqdm_init(self, *a, **kw)
+t.tqdm.__init__ = _mb_init
+
 
 class NeuromorphicEncoder:
+    """
+    Builds train and test DataLoaders for neuromorphic event-based datasets.
 
-        def __init__(self, cfg: Settings, use_cache: bool = True):
-            self.cfg = cfg
-            self.use_cache = use_cache
-            self.train_loader: DataLoader
-            self.test_loader:  DataLoader
-            self.build()
-        
-        def build(self):
-            data_path = self.cfg.DATA_PATH
-            batch_size = self.cfg.BATCH_SIZE
- 
-            if not data_path:
-                sensor_size = tonic.datasets.NMNIST.sensor_size
-                frame_tf    = transforms.Compose([transforms.Denoise(filter_time=10000), transforms.ToFrame(sensor_size=sensor_size, time_window=1000)])
-                trainset = tonic.datasets.NMNIST(save_to="./tmp/data", transform=frame_tf, train=True)
-                testset  = tonic.datasets.NMNIST(save_to="./tmp/data", transform=frame_tf, train=False)
-                self.dataset_label = "N-MNIST (default)"
-            else:
-                full_raw    = tonic.datasets.FileDataset(save_to=data_path)
-                sensor_size = full_raw.sensor_size
-                frame_tf    = transforms.Compose(
-                    [
-                        transforms.Denoise(filter_time=10000), 
-                        transforms.ToFrame(sensor_size=sensor_size, time_window=1000)
-                    ])
-                full_set  = tonic.datasets.FileDataset(save_to=data_path, transform=frame_tf)
-                # 80/20 split manually
-                n_train   = int(0.8 * len(full_set))
-                n_test    = len(full_set) - n_train
-                trainset, testset = torch.utils.data.random_split(full_set, [n_train, n_test])
-                self.dataset_label = getattr(self.cfg, "DATASET_NAME", "Custom Neuromorphic Dataset")
-    
-            self.sensor_size = sensor_size  
-            H, W, C = self.sensor_size
-            print(f"[INFO] Sensor size  : H={H}  W={W}  C={C}  (polarity channels)")
-            print(f"[INFO] Dataset      : {self.dataset_label}")  
-            # validate raw datasets before caching or DataLoader wrapping
-            self.validate_first_sample(trainset, "train")
-            self.validate_first_sample(testset,  "test")
-    
-            aug_tf = transforms.Compose([torch.from_numpy, torchvision.transforms.RandomRotation([-30, 30])])
-    
-            if self.use_cache:
-                train_data = DiskCachedDataset(trainset, transform=aug_tf, cache_path="./cache/train")
-                test_data  = DiskCachedDataset(testset,  cache_path="./cache/test")
-            else:
-                train_data, test_data = trainset, testset
-    
-            num_workers = self.cfg.NUM_WORKERS
-            pad = tonic.collation.PadTensors(batch_first=False)
-            self.train_loader = DataLoader(
-                train_data,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                collate_fn=pad,
-                shuffle=True,
-                pin_memory=True,
-                persistent_workers=num_workers > 0,
-                drop_last=True,
+    Args:
+        cfg                 : Settings object (DATA_PATH, BATCH_SIZE, etc.)
+        use_temporal_slicing: Divide each recording into temporal windows
+        slice_duration_ms   : Window size in ms (default: cfg.TEMPORAL_SLICE_DURATION / 1000)
+        auto_tune_slicing   : Analyse dataset and auto-select slice parameters
+        events_per_slice    : Switch to event-driven slicing (ignores slice_duration_ms)
+    """
+
+    def __init__(
+        self,
+        cfg: Settings,
+        use_temporal_slicing: bool = False,
+        slice_duration_ms: float = None,
+        auto_tune_slicing: bool = False,
+        events_per_slice: int = None,
+    ):
+        self.cfg = cfg
+        self.use_temporal_slicing = use_temporal_slicing
+        self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)
+        self.auto_tune_slicing = auto_tune_slicing
+        self.events_per_slice = events_per_slice
+
+        self.train_loader: DataLoader
+        self.test_loader: DataLoader
+
+        self.coordinator = PipelineMemoryCoordinator.from_system()
+        self.build()
+
+    def build(self):
+        raw_train, raw_test, frame_tf = self.load_raw()
+        train_data, test_data = self.apply_pipeline(raw_train, raw_test, frame_tf)
+        self.create_loaders(train_data, test_data)
+
+    def load_raw(self):
+        """Load raw event datasets with no transform — caching and slicing come later."""
+        data_path = self.cfg.DATA_PATH
+        time_window = self.cfg.TEMPORAL_SLICE_DURATION
+
+        if not data_path:
+            sensor_size = tonic.datasets.NMNIST.sensor_size
+            raw_train = tonic.datasets.NMNIST(save_to=str(DATA_DIR), train=True)
+            raw_test  = tonic.datasets.NMNIST(save_to=str(DATA_DIR), train=False)
+            self.dataset_label = "N-MNIST"
+        else:
+            full_raw = tonic.datasets.FileDataset(save_to=data_path)
+            sensor_size = full_raw.sensor_size
+            n_train = int(0.8 * len(full_raw))
+            raw_train, raw_test = torch.utils.data.random_split(
+                full_raw, [n_train, len(full_raw) - n_train]
             )
-            self.test_loader = DataLoader(
-                test_data,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                collate_fn=pad,
-                pin_memory=True,
-                persistent_workers=num_workers > 0,
+            self.dataset_label = getattr(self.cfg, "DATASET_NAME", "Custom Dataset")
+
+        self.sensor_size = sensor_size
+        H, W, C = sensor_size
+        print(f"[PIPELINE] Dataset : {self.dataset_label}  |  Sensor H={H} W={W} C={C}")
+        print(f"[PIPELINE] Train   : {len(raw_train)} recordings")
+        print(f"[PIPELINE] Test    : {len(raw_test)} recordings")
+
+        self.validate_first_sample(raw_train, "train")
+        self.validate_first_sample(raw_test, "test")
+
+        frame_tf = transforms.Compose([
+            transforms.Denoise(filter_time=10000),
+            transforms.ToFrame(sensor_size=sensor_size, time_window=time_window),
+        ])
+        return raw_train, raw_test, frame_tf
+
+    def apply_pipeline(self, raw_train, raw_test, frame_tf):
+        """
+        Layer 1 — Cache raw recordings via AdaptiveCacheController.
+        Layer 2 — Temporal slicing (optional, stateless).
+
+        Caching always wraps raw datasets so all slices from one recording
+        share a single cache entry.
+        """
+        max_recs = self.coordinator.max_recordings(avg_recording_bytes=50_000)
+        controller = AdaptiveCacheController(
+            cache_path=str(PROJECT_ROOT / "cache"),
+            max_cached_recordings=max_recs,
+            verbose=True,
+        )
+
+        train_tf = transforms.Compose([
+            frame_tf,
+            torch.from_numpy,
+            torchvision.transforms.RandomRotation([-10, 10]),
+        ])
+        test_tf = frame_tf
+
+        if self.use_temporal_slicing:
+            # Layer 1: cache raw events (slicing needs raw timestamps)
+            cached_train = controller.wrap_dataset(raw_train, split="train")
+            cached_test  = controller.wrap_dataset(raw_test,  split="test")
+
+            # Layer 2: stateless slicing with transforms applied per slice
+            train_data = create_sliced_dataset(
+                cached_train,
+                slice_duration_ms=self.slice_duration_ms,
+                auto_tune=self.auto_tune_slicing,
+                events_per_slice=self.events_per_slice,
+                transform=train_tf,
+                verbose=True,
             )
-            #multi-threading using num_workers     
+            test_data = create_sliced_dataset(
+                cached_test,
+                slice_duration_ms=self.slice_duration_ms,
+                transform=test_tf,
+                verbose=True,
+            )
+            print(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
+        else:
+            # No slicing: cache with transforms baked in
+            train_data = controller.wrap_dataset(raw_train, transform=train_tf, split="train")
+            test_data  = controller.wrap_dataset(raw_test,  transform=test_tf,  split="test")
 
-        def get_dataloaders(self) -> tuple[DataLoader, DataLoader]:
-            return self.train_loader, self.test_loader
-    
-    
-        def validate_first_sample(self, dataset, split: str) -> None:
-            """Index dataset[0] directly — no DataLoader overhead. Exits on failure."""
-            try:
-                events, target = dataset[0]
-                if events is None or (hasattr(events, "numel") and events.numel() == 0):
-                    raise ValueError("first sample is empty")
-            except Exception as exc:
-                print(f"[ERROR] {split} dataset validation failed — {exc}")
-                sys.exit(1)
+        return train_data, test_data
+
+    def create_loaders(self, train_data, test_data):
+        """Build DataLoaders; worker count and prefetch driven by PipelineMemoryCoordinator."""
+        batch_size = self.cfg.BATCH_SIZE
+        dl_cfg = {
+            k: v for k, v in self.coordinator.dataloader_config().items()
+            if v is not None  # prefetch_factor must be omitted (not None) when num_workers=0
+        }
+
+        pad = tonic.collation.PadTensors(batch_first=False)
+
+        self.train_loader = DataLoader(
+            train_data,
+            batch_size=batch_size,
+            collate_fn=pad,
+            shuffle=True,
+            drop_last=True,
+            **dl_cfg,
+        )
+        self.test_loader = DataLoader(
+            test_data,
+            batch_size=batch_size,
+            collate_fn=pad,
+            **dl_cfg,
+        )
+
+        print(f"[PIPELINE] Train batches : {len(self.train_loader)}")
+        print(f"[PIPELINE] Test batches  : {len(self.test_loader)}")
+        print(f"[PIPELINE] Batch size    : {batch_size}")
+
+    def get_dataloaders(self) -> tuple[DataLoader, DataLoader]:
+        """Return (train_loader, test_loader) for use in the training loop."""
+        return self.train_loader, self.test_loader
+
+    def clear_cache(self):
+        """Clear all disk cache directories."""
+        import shutil
+        cache_path = PROJECT_ROOT / "cache"
+        if cache_path.exists():
+            shutil.rmtree(cache_path)
+            print("[PIPELINE] Cache cleared")
+
+    def validate_first_sample(self, dataset, split: str) -> None:
+        try:
+            events, target = dataset[0]
+            if events is None or (hasattr(events, "numel") and events.numel() == 0):
+                raise ValueError("first sample is empty")
+            print(f"[VALIDATION] {split.capitalize()} dataset: first sample OK")
+        except Exception as exc:
+            print(f"[ERROR] {split} validation failed — {exc}")
+            sys.exit(1)
 
 
-
-"""
-First, sampler.set_epoch(epoch) must be called at the start of every epoch. The sampler uses the epoch number as a random seed for shuffling.
- If you forget this, every epoch will iterate over data in the same order, which degrades generalisation.
-
-Second, pin_memory=True in the DataLoader pre-allocates page-locked host memory, enabling asynchronous CPU-to-GPU transfers 
-when you call tensor.to(device, non_blocking=True). This overlap is where real throughput gains come from.
-
-Third, persistent_workers=True avoids respawning worker processes every epoch — a significant overhead reduction when num_workers > 0.
-"""
-# def create_distributed_dataloader(dataset, config, ctx):
-#     sampler = DistributedSampler(
-#         dataset,
-#         num_replicas=ctx.world_size,
-#         rank=ctx.rank,
-#         shuffle=True,
-#     )
-#     loader = DataLoader(
-#         dataset,
-#         batch_size=config.batch_size,
-#         sampler=sampler,
-#         num_workers=config.num_workers,
-#         pin_memory=True,
-#         drop_last=True,
-#         persistent_workers=config.num_workers > 0,
-#     )
-#     return loader, sampler
+def main() -> tuple[DataLoader, DataLoader]:
+    """
+    Standalone entry point — loads N-MNIST by default (cfg.DATA_PATH is empty).
+    Returns (train_loader, test_loader) ready for the training loop.
+    """
+    cfg = Settings()
+    encoder = NeuromorphicEncoder(cfg)
+    return encoder.get_dataloaders()
 
 
-
+if __name__ == "__main__":
+    train_loader, test_loader = main()
+    print(f"\n[PIPELINE] Ready — {len(train_loader)} train batches, {len(test_loader)} test batches")
