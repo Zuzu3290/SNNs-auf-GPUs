@@ -141,10 +141,64 @@ class NeuromorphicEncoder:
         self.build()
 
     def _load_workflow(self) -> dict:
-        with open(_WORKFLOW_YAML) as f:
+        with open(_WORKFLOW_YAML, encoding="utf-8") as f:
             return yaml.safe_load(f)
 
+    def _print_config(self):
+        cfg = self.cfg
+        sep = "=" * 60
+        print(sep)
+        print("Pipeline Configuration")
+        print(sep)
+
+        print(f"  Framework          : {self.framework}  →  layout [{self.data_format}]")
+        print(f"  Dataset            : {cfg.DATASET_NAME}")
+        print(f"  Device             : {cfg.DEVICE}")
+
+        print(f"\n  -- Framing --")
+        if self.frame_mode == "n_time_bins":
+            print(f"  Mode               : n_time_bins  (fixed T={self.n_time_bins})")
+        else:
+            print(f"  Mode               : time_window  ({self.time_window_us / 1000:.1f} ms per frame, variable T)")
+
+        print(f"\n  -- Architecture --")
+        print(f"  Sensor             : {cfg.SENSOR_H}x{cfg.SENSOR_W}  ({cfg.IN_CHANNELS} ch)")
+        print(f"  Conv1              : {cfg.CONV1_OUT} filters  {cfg.CONV1_KERNEL}x{cfg.CONV1_KERNEL}")
+        print(f"  Conv2              : {cfg.CONV2_OUT} filters  {cfg.CONV2_KERNEL}x{cfg.CONV2_KERNEL}")
+        print(f"  Pool kernel        : {cfg.POOL_KERNEL}")
+        print(f"  FC_IN (auto)       : {cfg.FC_IN}")
+        print(f"  Threshold          : {cfg.THRESHOLD}")
+
+        print(f"\n  -- Training --")
+        print(f"  Epochs             : {cfg.EPOCHS}")
+        print(f"  Batch size         : {cfg.BATCH_SIZE}")
+        print(f"  Timesteps          : {cfg.TIMESTEPS}")
+        print(f"  Learning rate      : {cfg.LEARNING_RATE}")
+        print(f"  Weight decay       : {cfg.WEIGHT_DECAY}")
+        print(f"  LR scheduler       : {cfg.LR_SCHEDULER}")
+        print(f"  Loss               : {cfg.LOSS_FN}")
+        print(f"  Optimizer          : {cfg.OPTIMIZER_TYPE}")
+        print(f"  Surrogate          : {cfg.SURROGATE}")
+        print(f"  AMP                : {cfg.USE_AMP}")
+
+        print(f"\n  -- Neuron params ({self.framework}) --")
+        if self.framework == "torch":
+            print(f"  beta               : {cfg.BETA}")
+        elif self.framework == "norse":
+            print(f"  tau_mem_inv        : {cfg.TAU_MEM_INV} Hz")
+        elif self.framework == "spikingjelly":
+            print(f"  tau                : {cfg.TAU}")
+
+        print(f"\n  -- Preprocessing --")
+        print(f"  Denoise filter     : {self.denoise_filter_time_us} us")
+        print(f"  Augmentation       : {'ON  rotation=+-' + str(self.rotation_deg) + 'deg' if self.augmentation_enabled else 'OFF'}")
+        print(f"  Temporal slicing   : {'ON  ' + str(self.slice_duration_ms) + ' ms' if self.use_temporal_slicing else 'OFF'}")
+        print(f"  Cache path         : {self.cache_path}")
+
+        print(sep)
+
     def build(self):
+        self._print_config()
         raw_train, raw_test, frame_tf = self.load_raw()
         train_data, test_data = self.apply_pipeline(raw_train, raw_test, frame_tf)
         self.create_loaders(train_data, test_data)

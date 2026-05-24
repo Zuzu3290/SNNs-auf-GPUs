@@ -88,7 +88,7 @@ class SNN_NORSE(nn.Module):
 
         self.optimizer = _optimizer(self.net.parameters(), cfg)
         # CrossEntropy on spike counts — sums spikes over T, then maximises correct class logit.
-        self.loss_fn = lambda spk_rec, targets: F.cross_entropy(spk_rec.sum(0), targets)
+        self.loss_fn = lambda spk_rec, targets: F.cross_entropy(spk_rec.float().sum(0), targets)
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         return self.net(data)

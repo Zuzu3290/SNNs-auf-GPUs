@@ -74,7 +74,7 @@ class Settings:
         self.DATA_DIR = output.get("data_dir", "./outputs/data")
 
     def load_yaml_config(self, yaml_path):
-        with open(yaml_path, "r") as file:
+        with open(yaml_path, "r", encoding="utf-8") as file:
             return yaml.safe_load(file)
 
     def display(self):
