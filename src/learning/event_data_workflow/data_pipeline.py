@@ -327,12 +327,20 @@ class NeuromorphicEncoder:
         return train_data, test_data
 
     def create_loaders(self, train_data, test_data):
-        """Build DataLoaders; worker count and prefetch driven by PipelineMemoryCoordinator."""
+        """Build DataLoaders; worker count capped by cfg.NUM_WORKERS (training.num_workers in YAML)."""
         batch_size = self.cfg.BATCH_SIZE
         dl_cfg = {
             k: v for k, v in self.coordinator.dataloader_config().items()
             if v is not None  # prefetch_factor must be omitted (not None) when num_workers=0
         }
+
+        # YAML training.num_workers acts as a hard cap — set to 0 on Colab to avoid OOM.
+        yaml_workers = getattr(self.cfg, "NUM_WORKERS", 4)
+        if yaml_workers < dl_cfg.get("num_workers", 4):
+            dl_cfg["num_workers"] = yaml_workers
+            if yaml_workers == 0:
+                dl_cfg.pop("prefetch_factor", None)
+                dl_cfg["persistent_workers"] = False
 
         # n_time_bins → fixed T, stack directly.  time_window → variable T, pad to max in batch.
         if self.frame_mode == "n_time_bins":

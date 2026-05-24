@@ -13,10 +13,10 @@ architecture:
   pool_kernel:  2
 
   output_size:  10
-  threshold:    1.0   # shared LIF firing threshold — same value used by all frameworks
+  threshold:    0.5   # old pipeline value — change to 1.0 after validation test
 
 training:
-  framework: norse           # torch | norse | spikingjelly  ← one line to switch everything
+  framework: torch           # torch | norse | spikingjelly  ← one line to switch everything
 
   epochs: 5
   iterations_per_epoch: 937  # 60000 / batch_size=64 = full N-MNIST epoch
@@ -26,10 +26,10 @@ training:
   weight_decay: 0.0001
   num_classes: 10
   device: cuda
-  num_workers: 4
+  num_workers: 0        # 0 = single-process loading, safe on Colab (no worker OOM). Increase on high-RAM machines.
   use_amp: false  # Norse LIF surrogate gradients underflow in float16 → silent GradScaler skips → no learning
   grad_accum_steps: 1
-  lr_scheduler: cosine       # cosine | none
+  lr_scheduler: none         # none = old pipeline behavior; switch to cosine after validation test
 
   # Playground — swap any of these without touching Python code
   loss_fn:   cross_entropy   # cross_entropy | mse_count  (mse_count: SNNTorch only)
