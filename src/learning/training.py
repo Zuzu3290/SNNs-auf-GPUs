@@ -16,6 +16,23 @@ cfg = Settings()
 device = torch.device(cfg.DEVICE)
 
 
+def aggregate_spike_output(spk_rec: torch.Tensor) -> torch.Tensor:
+    """Reduce any spike recording shape to [B, C] class logits.
+
+    Supported layouts:
+      [B, C]       — already aggregated (e.g. SpikingJelly pre-summed output)
+      [T, B, C]    — timestep-first stack (e.g. Norse, SNNTorch, Brian2)
+    """
+    if spk_rec.dim() == 2:
+        return spk_rec
+    if spk_rec.dim() == 3:
+        return spk_rec.sum(dim=0)
+    raise ValueError(
+        f"aggregate_spike_output: unsupported spike recording shape {tuple(spk_rec.shape)}. "
+        "Expected [B, C] or [T, B, C]."
+    )
+
+
 class SNNTrainer:
 
     def __init__(self, model, train_loader, cfg: Settings, device: torch.device):
@@ -110,7 +127,7 @@ class SNNTrainer:
                     self.model.optimizer.zero_grad(set_to_none=True)
 
                 raw_loss   = loss_val.item() * accum
-                acc        = (spk_rec.detach().argmax(dim=1) == targets).float().mean().item()
+                acc        = (aggregate_spike_output(spk_rec.detach().float()).argmax(dim=1) == targets).float().mean().item()
                 spike_rate = spk_rec.detach().float().mean().item()
 
                 self.loss_hist.append(raw_loss)

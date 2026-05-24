@@ -18,7 +18,7 @@ def main():
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model = SNN_SJ(cfg)
+    model = SNN_NORSE(cfg)
     trainer = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)
     
