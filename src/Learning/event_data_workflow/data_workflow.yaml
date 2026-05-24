@@ -8,7 +8,7 @@
 # Divides long event recordings into shorter windows before the model sees them.
 # Increases sample count and reduces per-batch memory at the cost of context length.
 temporal_slicing:
-  enabled: false              # Master switch — false keeps each recording as one sample
+  enabled: true               # Master switch — false keeps each recording as one sample
   slice_duration_us: 15000    # Window size in microseconds (15000 = 15 ms)
   overlap_us: 0               # Overlap between consecutive windows; keep at 0 to avoid duplicate samples
   min_events_per_slice: 10    # Slices with fewer events than this are dropped at index-build time, not during training
