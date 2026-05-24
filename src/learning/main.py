@@ -7,7 +7,7 @@ from learning.frameworks.snn_torch import SNN_TORCH
 from learning.frameworks.snn_norse import SNN_NORSE
 from learning.data_pipeline import main as load_data  # Import the main() function
 
-FRAMEWORK = "norse"   # switch between "torch" and "norse"
+FRAMEWORK = "torch"   # switch between "torch" and "norse"
 
 def main():
     cfg = Settings()
