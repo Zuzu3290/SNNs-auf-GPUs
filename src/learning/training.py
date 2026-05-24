@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import csv
 import time
+import logging
 from contextlib import nullcontext
 
 import torch
@@ -10,8 +11,11 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from snntorch import functional as SF
 from skeleton import Settings
 
+logger = logging.getLogger(__name__)
+
 cfg = Settings()
 device = torch.device(cfg.DEVICE)
+
 
 class SNNTrainer:
 
