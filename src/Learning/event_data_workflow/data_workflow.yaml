@@ -1,44 +1,23 @@
-# ──────────────────────────────────────────────────────────────────────────────
-# Event Data Workflow Configuration
-# Controls how raw neuromorphic recordings are cached, sliced, and loaded.
-# Edit here to tune the pipeline — no code changes needed.
-# ──────────────────────────────────────────────────────────────────────────────
+dataset:
+  name: N-MNIST          # N-MNIST | custom (set data_path for custom)
+  data_path: ""          # leave empty to use N-MNIST default download path
 
-# ─── TEMPORAL SLICING ────────────────────────────────────────────────────────
-# Divides long event recordings into shorter windows before the model sees them.
-# Increases sample count and reduces per-batch memory at the cost of context length.
 temporal_slicing:
-  enabled: false              # Master switch — false keeps each recording as one sample
-  slice_duration_us: 15000    # Window size in microseconds (15000 = 15 ms)
-  overlap_us: 0               # Overlap between consecutive windows; keep at 0 to avoid duplicate samples
-  min_events_per_slice: 10    # Slices with fewer events than this are dropped at index-build time, not during training
-  discard_incomplete: false   # When true, the final partial window (shorter than slice_duration_us) is dropped
+  enabled: false
+  slice_duration_ms: 15.0
+  overlap_ms: 0.0        # keep at 0 to avoid duplicate training samples
+  min_events_per_slice: 10
+  discard_incomplete: false
+  auto_tune: false
+  events_per_slice: null # set an int to switch to event-driven mode (ignores slice_duration_ms)
 
-  # Event-driven mode — overrides time-driven slicing when set
-  events_per_slice: null      # New slice every N events regardless of timestamp; null = use time windows
-
-  # Auto-tune — samples the dataset before index build and derives slice_duration_us automatically
-  auto_tune: false            # When true, ignores slice_duration_us and derives it from dataset statistics
-  auto_tune_samples: 50       # Number of recordings probed to compute duration and event-rate statistics
-  auto_tune_target_slices: 2  # Desired number of slices per recording; drives the suggested slice duration
-  auto_tune_min_events: 50    # Minimum events per slice enforced if the auto-tune suggestion is too small
-
-# ─── ADAPTIVE CACHE ───────────────────────────────────────────────────────────
-# Caches raw recordings before slicing so all derived slices share one cache entry.
-# Strategy (memory / disk / hybrid / no_cache) is selected automatically from live metrics.
 cache:
-  cache_path: ./cache                # Root directory for disk-backed cache files
-  memory_safety_margin_gb: 2.0      # RAM reserved for the OS before evaluating available space for caching
-  memory_cache_threshold_gb: 8.0    # Minimum free RAM (GB) required before the memory strategy is considered
-  max_cached_recordings: 500        # LRU cap — maximum recordings held in RAM; coordinator may lower this further
-  force_mode: null                  # Override auto-detection: memory | disk | hybrid | no_cache | null (auto)
+  path: "./cache"
+  memory_safety_margin_gb: 2.0
+  memory_cache_threshold_gb: 8.0
+  max_cached_recordings: 500
+  force_mode: null       # null | memory | disk | hybrid | no_cache
 
-# ─── MEMORY COORDINATOR ──────────────────────────────────────────────────────
-# Splits the available pipeline RAM budget across the three pipeline stages.
-# recording_cache_fraction + worker_fraction + prefetch_fraction must sum to 1.0.
-memory_coordinator:
-  safety_margin_gb: 2.0          # RAM withheld from the total budget before splitting across stages
-  recording_cache_fraction: 0.4  # Share allocated to BoundedRecordingCache (recording LRU in RAM)
-  worker_fraction: 0.3           # Share allocated to DataLoader worker process buffers
-  prefetch_fraction: 0.3         # Share reserved for the async GPU prefetch queue (AsyncGPUPrefetcher)
-  gpu_pressure_threshold: 0.75   # VRAM utilisation ratio above which the recording cache share is halved
+dataloader:
+  batch_size: 128
+  num_workers: 4         # overridden at runtime by PipelineMemoryCoordinator
