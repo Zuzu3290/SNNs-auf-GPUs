@@ -1,6 +1,19 @@
+framing:
+  mode: n_time_bins      # "n_time_bins" = fixed T, no padding, recommended
+                         # "time_window" = variable T per recording, requires padding
+  n_time_bins: 16        # frames per recording — only used when mode: n_time_bins
+  time_window_ms: 15.0   # window duration  — only used when mode: time_window
+
 dataset:
   name: N-MNIST          # N-MNIST | custom (set data_path for custom)
   data_path: ""          # leave empty to use N-MNIST default download path
+
+preprocessing:
+  denoise_filter_time_us: 10000  # remove noise events < this interval apart (microseconds)
+
+augmentation:
+  enabled: true
+  rotation_deg: 10              # ±degrees for RandomRotation (training split only)
 
 temporal_slicing:
   enabled: false
@@ -13,6 +26,7 @@ temporal_slicing:
 
 cache:
   path: "./cache"
+  avg_recording_bytes: 50000     # estimated bytes per raw recording — used for memory budgeting
   memory_safety_margin_gb: 2.0
   memory_cache_threshold_gb: 8.0
   max_cached_recordings: 500

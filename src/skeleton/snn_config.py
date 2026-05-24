@@ -9,46 +9,54 @@ class Settings:
         self.yaml_path = yaml_path
         self.config = self.load_yaml_config(yaml_path)
 
-        architecture = self.config.get("architecture", {})
-        training = self.config.get("training", {})
-        dataset = self.config.get("dataset", {})
-        input_cfg = self.config.get("input", {})
-        output = self.config.get("output", {})
+        architecture  = self.config.get("architecture", {})
+        training      = self.config.get("training", {})
+        frameworks    = self.config.get("frameworks", {})
+        dataset       = self.config.get("dataset", {})
+        input_cfg     = self.config.get("input", {})
+        output        = self.config.get("output", {})
 
-        # Neural network architecture
-        self.INPUT_SIZE = int(architecture.get("input_size", 10))
-        self.HIDDEN_SIZE = int(architecture.get("hidden_size", 16))
-        self.HIDDEN_LAYERS = int(architecture.get("hidden_layers", 3))
-        self.OUTPUT_SIZE = int(architecture.get("output_size", 10))
-        self.THRESHOLD = float(architecture.get("threshold", 0.5))
-        self.LEAK = float(architecture.get("leak", 1.0))
-        self.OVERRIDE = bool(architecture.get("override", False))
-        self.NETWORK_STRUCT = architecture.get("network_struct", "S")
-        self.SIMULATOR = architecture.get("simulator", "OFF")
-        self.TEMPORAL_SLICE_DURATION = int(architecture.get("temporal_slice_duration", 15000))
-        self.TEMPORAL_OVERLAP = int(architecture.get("temporal_overlap", 0))
-        self.TOTAL_TIME_WINDOW = int(architecture.get("total_time_window", 30000))
-        self.NUM_WORKERS = int(architecture.get("num_workers", 2))
+        # Conv-SNN architecture — shared across all frameworks for fair comparison
+        self.SENSOR_H    = int(architecture.get("sensor_h",     34))
+        self.SENSOR_W    = int(architecture.get("sensor_w",     34))
+        self.IN_CHANNELS = int(architecture.get("in_channels",  2))
+        self.CONV1_OUT   = int(architecture.get("conv1_out",    12))
+        self.CONV1_KERNEL= int(architecture.get("conv1_kernel", 5))
+        self.CONV2_OUT   = int(architecture.get("conv2_out",    32))
+        self.CONV2_KERNEL= int(architecture.get("conv2_kernel", 5))
+        self.POOL_KERNEL = int(architecture.get("pool_kernel",  2))
+        self.OUTPUT_SIZE = int(architecture.get("output_size",  10))
+        self.THRESHOLD   = float(architecture.get("threshold",  1.0))
+
+        # FC_IN computed from architecture — change conv/pool params above, this updates automatically
+        _h = (self.SENSOR_H - self.CONV1_KERNEL + 1) // self.POOL_KERNEL
+        _h = (_h - self.CONV2_KERNEL + 1) // self.POOL_KERNEL
+        self.FC_IN = self.CONV2_OUT * _h * _h
 
         # Training parameters
-        self.LOSS_FUNCTION = training.get("loss_function", "CrossEntropy")
-        self.OPTIMIZER = training.get("optimizer", "Adam")
-        self.EPOCHS = int(training.get("epochs", 10))
-        self.ITERA = int(training.get("iterations_per_epoch", 100))
-        self.TIMESTEPS = int(training.get("timesteps", 25))
-        self.BATCH_SIZE = int(training.get("batch_size", 128))
-        self.BETA = float(training.get("beta", 0.95))
-        self.NAP_TIMES = int(training.get("nap_times", 1))
+        self.FRAMEWORK  = training.get("framework", "torch")
+        self.EPOCHS     = int(training.get("epochs", 10))
+        self.ITERA      = int(training.get("iterations_per_epoch", 937))
+        self.TIMESTEPS  = int(training.get("timesteps", 16))
+        self.BATCH_SIZE = int(training.get("batch_size", 64))
         self.LEARNING_RATE = float(training.get("learning_rate", 0.001))
-        self.WEIGHT_DECAY = float(training.get("weight_decay", 0.0001))
-        self.NUM_CLASSES = int(training.get("num_classes", self.OUTPUT_SIZE))
-        self.DEVICE = training.get("device", "cuda")
-        self.KERNEL = training.get("kernel", "OFF")
-        self.DDP = training.get("DDP", "OFF")
-        self.NUM_WORKERS = int(training.get("num_workers", 4))
-        self.USE_AMP = bool(training.get("use_amp", True))
+        self.WEIGHT_DECAY  = float(training.get("weight_decay", 0.0001))
+        self.NUM_CLASSES   = int(training.get("num_classes", self.OUTPUT_SIZE))
+        self.DEVICE        = training.get("device", "cuda")
+        self.NUM_WORKERS   = int(training.get("num_workers", 4))
+        self.USE_AMP          = bool(training.get("use_amp", True))
         self.GRAD_ACCUM_STEPS = max(1, int(training.get("grad_accum_steps", 1)))
-        self.LR_SCHEDULER = training.get("lr_scheduler", "cosine")
+        self.LR_SCHEDULER     = training.get("lr_scheduler", "cosine")
+
+        # Playground — swap without touching Python code
+        self.LOSS_FN        = training.get("loss_fn",   "cross_entropy")
+        self.OPTIMIZER_TYPE = training.get("optimizer", "adam")
+        self.SURROGATE      = training.get("surrogate", "atan")
+
+        # Framework-specific neuron parameters — each framework reads its own section
+        self.BETA        = float(frameworks.get("snntorch",     {}).get("beta",        0.95))
+        self.TAU_MEM_INV = float(frameworks.get("norse",        {}).get("tau_mem_inv", 50.0))
+        self.TAU         = float(frameworks.get("spikingjelly", {}).get("tau",         2.0))
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
@@ -65,74 +73,32 @@ class Settings:
         self.PLOT_DIR = output.get("plot_dir", "./outputs/plots")
         self.DATA_DIR = output.get("data_dir", "./outputs/data")
 
-        # Generated network structure
-        self.network_structure = self.generate_network_structure()
-
     def load_yaml_config(self, yaml_path):
         with open(yaml_path, "r") as file:
             return yaml.safe_load(file)
-
-    def generate_network_structure(self):
-        """
-        Generates a list representing the neuron count per layer:
-        [input_layer, hidden1, hidden2, ..., output_layer]
-
-        NETWORK_STRUCT options:
-        S = stable
-        A = ascending
-        D = descending
-        """
-
-        layers = []
-
-        # Append input layer separately
-        layers.append(self.INPUT_SIZE)
-
-        # Generate hidden layers independently from input size
-        if self.OVERRIDE:
-            if self.NETWORK_STRUCT == "S" or self.NETWORK_STRUCT is None:
-                hidden_layers = [self.HIDDEN_SIZE] * self.HIDDEN_LAYERS
-
-            elif self.NETWORK_STRUCT == "A":
-                hidden_layers = []
-                current = self.HIDDEN_SIZE
-
-                for _ in range(self.HIDDEN_LAYERS):
-                    hidden_layers.append(current)
-                    current += 4
-
-            elif self.NETWORK_STRUCT == "D":
-                hidden_layers = []
-                current = self.HIDDEN_SIZE
-
-                for _ in range(self.HIDDEN_LAYERS):
-                    hidden_layers.append(current)
-                    current = max(2, current // 2)
-
-            else:
-                raise ValueError("Invalid NETWORK_STRUCT. Use 'S', 'A', or 'D'.")
-
-        else:
-            hidden_layers = [self.HIDDEN_SIZE] * self.HIDDEN_LAYERS
-
-        # Append hidden layers
-        layers.extend(hidden_layers)
-
-        # Append output layer separately
-        layers.append(self.OUTPUT_SIZE)
-    
-        return layers
 
     def display(self):
         print("=" * 60)
         print("SNN Configuration")
         print("=" * 60)
 
-        print(f"Network architecture : {self.network_structure}")
-        print(f"Epochs               : {self.EPOCHS}")
-        print(f"Device               : {self.DEVICE}")
-        print(f"Kernel               : {self.KERNEL}")
-        print(f"Threshold            : {self.THRESHOLD}")
+        print(f"Framework            : {self.FRAMEWORK}")
+        print(f"Architecture")
+        print(f"  Sensor             : {self.SENSOR_H}x{self.SENSOR_W}  ({self.IN_CHANNELS} channels)")
+        print(f"  Conv1              : {self.CONV1_OUT} filters, {self.CONV1_KERNEL}x{self.CONV1_KERNEL}")
+        print(f"  Conv2              : {self.CONV2_OUT} filters, {self.CONV2_KERNEL}x{self.CONV2_KERNEL}")
+        print(f"  Pool kernel        : {self.POOL_KERNEL}")
+        print(f"  FC_IN (auto)       : {self.FC_IN}")
+        print(f"  Threshold          : {self.THRESHOLD}")
+        print(f"Training")
+        print(f"  Epochs             : {self.EPOCHS}")
+        print(f"  Batch size         : {self.BATCH_SIZE}")
+        print(f"  Learning rate      : {self.LEARNING_RATE}")
+        print(f"  Device             : {self.DEVICE}")
+        print(f"Playground")
+        print(f"  Loss               : {self.LOSS_FN}")
+        print(f"  Optimizer          : {self.OPTIMIZER_TYPE}")
+        print(f"  Surrogate          : {self.SURROGATE}")
 
         print("=" * 60)
 

@@ -2,28 +2,37 @@ import sys
 import os
 from pathlib import Path
 
-# Add the 'src' directory to the path so we can import from 'skeleton' and 'learning'
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from skeleton import Settings
 from learning.frameworks.snn_torch import SNN_TORCH
-from learning.event_data_workflow import NeuromorphicEncoder
 from learning.frameworks.snn_norse import SNN_NORSE
+from learning.frameworks.snn_spikingjelly import SNN as SNN_SPIKINGJELLY
+from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
+
+_FRAMEWORKS = {
+    "torch":        SNN_TORCH,
+    "norse":        SNN_NORSE,
+    "spikingjelly": SNN_SPIKINGJELLY,
+}
 
 def main():
-    # 1. Initialize settings
     cfg = Settings()
 
-    encoder = NeuromorphicEncoder(cfg)
+    ModelClass = _FRAMEWORKS.get(cfg.FRAMEWORK)
+    if ModelClass is None:
+        raise ValueError(f"Unknown framework '{cfg.FRAMEWORK}'. Choose from: {list(_FRAMEWORKS)}")
+
+    encoder = NeuromorphicEncoder(cfg, framework=cfg.FRAMEWORK)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model = SNN_NORSE(cfg)
-    trainer = model.get_trainer(train_loader)
+    model     = ModelClass(cfg)
+    trainer   = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)
-    
-    print("\n✓ SpikingJelly Model ready.")
+
+    print(f"\n✓ Model ready  [{cfg.FRAMEWORK}]")
     cfg.display()
-    
+
     return model, trainer, inference
 
 if __name__ == "__main__":

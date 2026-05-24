@@ -1,34 +1,57 @@
 architecture:
-  input_size: 50
-  hidden_size: 50
-  hidden_layers: 5
-  output_size: 10
-  threshold: 0.5
-  leak: 1.0
-  override: false
-  network_struct: S
-  device: cuda
-  kernel: OFF
-  simulator: ON  
+  # Input / sensor — update sensor_h/w when switching datasets
+  sensor_h:     34    # N-MNIST is 34×34
+  sensor_w:     34
+  in_channels:  2     # event polarity channels (ON / OFF)
+
+  # Conv-SNN layers — identical across all frameworks for fair comparison
+  # fc_in is computed automatically: no need to set it manually
+  conv1_out:    12
+  conv1_kernel: 5
+  conv2_out:    32
+  conv2_kernel: 5
+  pool_kernel:  2
+
+  output_size:  10
+  threshold:    1.0   # shared LIF firing threshold — same value used by all frameworks
 
 training:
-  loss_function: CrossEntropy
-  optimizer: Adam
+  framework: norse           # torch | norse | spikingjelly  ← one line to switch everything
+
   epochs: 10
-  iterations_per_epoch: 100
-  timesteps: 25 
-  batch_size: 128
-  beta: 0.95
-  nap_times: 1
+  iterations_per_epoch: 937  # 60000 / batch_size=64 = full N-MNIST epoch
+  timesteps: 16              # fixed T — used as n_time_bins in data_workflow.yaml
+  batch_size: 64
   learning_rate: 0.001
   weight_decay: 0.0001
   num_classes: 10
+  device: cuda
+  num_workers: 4
+  use_amp: true
+  grad_accum_steps: 1
+  lr_scheduler: cosine       # cosine | none
+
+  # Playground — swap any of these without touching Python code
+  loss_fn:   cross_entropy   # cross_entropy | mse_count  (mse_count: SNNTorch only)
+  optimizer: adam            # adam | adamw | sgd
+  surrogate: atan            # atan | fast_sigmoid  (SNNTorch + SpikingJelly only)
+
+# Per-framework neuron parameters — each framework uses its own coordinate system.
+# Converting between them (e.g. beta → tau_mem_inv) is incorrect: different input models
+# produce different equilibrium voltages for the same scalar. Tune each independently.
+frameworks:
+  snntorch:
+    beta: 0.95               # membrane decay — dimensionless (0–1)
+  norse:
+    tau_mem_inv: 50.0        # inverse membrane time constant (Hz) — valid range: 20–100
+  spikingjelly:
+    tau: 2.0                 # membrane time constant ratio — dimensionless
 
 dataset:
-  dataset_name: MNIST
-  data_path:
+  dataset_name: N-MNIST
+  data_path:                 # leave empty for N-MNIST default; set path for custom dataset
 
 output:
   output_dir: ./outputs
-  plot_dir: ./outputs/plots
-  data_dir: ./outputs/data
+  plot_dir:   ./outputs/plots
+  data_dir:   ./outputs/data

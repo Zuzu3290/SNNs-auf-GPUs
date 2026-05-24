@@ -1,5 +1,3 @@
-import math
-
 import norse.torch as norse
 import torch
 import torch.nn as nn
@@ -8,6 +6,15 @@ import torch.nn.functional as F
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
 from learning.training import SNNTrainer
+
+
+def _optimizer(params, cfg: Settings):
+    lr, wd = cfg.LEARNING_RATE, cfg.WEIGHT_DECAY
+    if cfg.OPTIMIZER_TYPE == "adamw":
+        return torch.optim.AdamW(params, lr=lr, weight_decay=wd)
+    if cfg.OPTIMIZER_TYPE == "sgd":
+        return torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=wd)
+    return torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999), weight_decay=wd)
 
 
 class _NorseNet(nn.Module):
@@ -19,27 +26,19 @@ class _NorseNet(nn.Module):
     to None on the first timestep; Norse auto-creates zero tensors from that.
     """
 
-    IN_CHANNELS:  int = 2
-    CONV1_OUT:    int = 12
-    CONV1_KERNEL: int = 5
-    CONV2_OUT:    int = 32
-    CONV2_KERNEL: int = 5
-    POOL_KERNEL:  int = 2
-    FC_IN:        int = 32 * 5 * 5
-
-    def __init__(self, lif_params: norse.LIFParameters, num_classes: int):
+    def __init__(self, cfg: Settings, lif_params: norse.LIFParameters):
         super().__init__()
 
-        self.conv1   = nn.Conv2d(self.IN_CHANNELS, self.CONV1_OUT, self.CONV1_KERNEL)
+        self.conv1   = nn.Conv2d(cfg.IN_CHANNELS, cfg.CONV1_OUT, cfg.CONV1_KERNEL)
         self.lif1    = norse.LIFCell(p=lif_params)
-        self.pool1   = nn.MaxPool2d(self.POOL_KERNEL)
+        self.pool1   = nn.MaxPool2d(cfg.POOL_KERNEL)
 
-        self.conv2   = nn.Conv2d(self.CONV1_OUT, self.CONV2_OUT, self.CONV2_KERNEL)
+        self.conv2   = nn.Conv2d(cfg.CONV1_OUT, cfg.CONV2_OUT, cfg.CONV2_KERNEL)
         self.lif2    = norse.LIFCell(p=lif_params)
-        self.pool2   = nn.MaxPool2d(self.POOL_KERNEL)
+        self.pool2   = nn.MaxPool2d(cfg.POOL_KERNEL)
 
         self.flatten = nn.Flatten()
-        self.fc      = nn.Linear(self.FC_IN, num_classes)
+        self.fc      = nn.Linear(cfg.FC_IN, cfg.NUM_CLASSES)
         self.lif_out = norse.LIFCell(p=lif_params)
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
@@ -78,30 +77,17 @@ class SNN_NORSE(nn.Module):
         self.cfg    = cfg
         self.device = torch.device(cfg.DEVICE)
 
-        # TODO: temporary parameter conversion — replace with framework-specific config sections.
-        # Norse and SNNTorch use different coordinate systems for the same physical quantity:
-        #   SNNTorch: beta (dimensionless, 0–1)     Norse: tau_mem_inv (Hz, typically 10–1000)
-        # The conversion is nonlinear, so a single shared YAML value cannot fairly control both.
-        # Proper fix: add snntorch/norse sub-sections to SNN_module.yaml and expose them via
-        # Settings, so each framework reads its own independently tuned parameters.
-        dt          = 0.001                          # 1 ms — Norse default timestep
-        tau_mem_inv = -math.log(cfg.BETA) / dt       # beta=0.95 → ~51.3 Hz
-
+        # Both params come from SNN_module.yaml — no hardcoded fallbacks, no conversions.
+        # tau_mem_inv is under frameworks.norse; threshold is shared across frameworks.
         lif_params = norse.LIFParameters(
-            tau_mem_inv=torch.as_tensor(tau_mem_inv),
-            v_th=torch.as_tensor(cfg.THRESHOLD),      # v_th shares the same scale — no conversion needed
+            tau_mem_inv=torch.as_tensor(cfg.TAU_MEM_INV),
+            v_th=torch.as_tensor(cfg.THRESHOLD),
         )
 
-        self.net = _NorseNet(lif_params, cfg.NUM_CLASSES).to(self.device)
+        self.net = _NorseNet(cfg, lif_params).to(self.device)
 
-        self.optimizer = torch.optim.Adam(
-            self.net.parameters(),
-            lr=cfg.LEARNING_RATE,
-            betas=(0.9, 0.999),
-            weight_decay=cfg.WEIGHT_DECAY,
-        )
+        self.optimizer = _optimizer(self.net.parameters(), cfg)
         # CrossEntropy on spike counts — sums spikes over T, then maximises correct class logit.
-        # Simpler gradient signal than mse_count_loss; typically converges faster for classification.
         self.loss_fn = lambda spk_rec, targets: F.cross_entropy(spk_rec.sum(0), targets)
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
@@ -115,17 +101,17 @@ class SNN_NORSE(nn.Module):
 
 
 if __name__ == "__main__":
-    from learning.event_data_workflow import NeuromorphicEncoder
+    from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
 
-    encoder = NeuromorphicEncoder(Settings())
+    cfg     = Settings()
+    encoder = NeuromorphicEncoder(cfg, framework="norse")
     train_loader, test_loader = encoder.get_dataloaders()
 
-    cfg       = Settings()
     model     = SNN_NORSE(cfg)
     trainer   = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)
 
     print("\n✓ Norse model ready.")
     print(f"  - Device    : {model.device}")
-    print(f"  - FC_IN     : {_NorseNet.FC_IN}  (verify matches your sensor resolution)")
+    print(f"  - FC_IN     : {cfg.FC_IN}  (verify matches your sensor resolution)")
     print(f"  - Classes   : {cfg.NUM_CLASSES}")

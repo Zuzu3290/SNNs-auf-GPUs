@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 import logging
+import yaml
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # src/ → skeleton
@@ -24,6 +25,15 @@ import torchvision
 from skeleton import Settings
 from cache_engine import AdaptiveCacheController, PipelineMemoryCoordinator
 from temporal_slicer import create_sliced_dataset
+
+_WORKFLOW_YAML = Path(__file__).parent / "data_workflow.yaml"
+
+# Maps framework name → tensor layout expected by that framework's forward()
+_FORMAT_MAP = {
+    "torch":        "TB",   # [T, B, C, H, W]
+    "norse":        "TB",   # [T, B, C, H, W]
+    "spikingjelly": "BT",   # [B, T, C, H, W]
+}
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
@@ -41,37 +51,98 @@ t.tqdm.__init__ = _mb_init
 logger = logging.getLogger(__name__)
 
 
+class _Collate:
+    """
+    Collate for n_time_bins mode — fixed T so all tensors are the same shape.
+    torch.stack works directly; no padding needed.
+    Must be a top-level class (not a closure) to be picklable by DataLoader workers.
+    """
+    def __init__(self, data_format: str):
+        self.data_format = data_format
+
+    def __call__(self, batch):
+        samples, labels = zip(*batch)
+        x = torch.stack([torch.as_tensor(s, dtype=torch.float32) for s in samples])
+        y = torch.tensor(labels, dtype=torch.long)
+        if self.data_format == "TB":
+            x = x.permute(1, 0, 2, 3, 4).contiguous()
+        return x, y
+
+
+class _PaddedCollate:
+    """
+    Collate for time_window mode — T varies per recording so we pad to the
+    longest sequence in the batch, then permute to the requested layout.
+    Must be a top-level class (not a closure) to be picklable by DataLoader workers.
+    """
+    def __init__(self, data_format: str):
+        self.data_format = data_format
+
+    def __call__(self, batch):
+        samples, labels = zip(*batch)
+        tensors = [torch.as_tensor(s, dtype=torch.float32) for s in samples]  # each [T_i, C, H, W]
+        max_t = max(t.shape[0] for t in tensors)
+        padded = torch.zeros(len(tensors), max_t, *tensors[0].shape[1:])
+        for i, t in enumerate(tensors):
+            padded[i, :t.shape[0]] = t
+        y = torch.tensor(labels, dtype=torch.long)
+        if self.data_format == "TB":
+            padded = padded.permute(1, 0, 2, 3, 4).contiguous()
+        return padded, y
+
+
 class NeuromorphicEncoder:
     """
     Builds train and test DataLoaders for neuromorphic event-based datasets.
 
+    Framing mode and slicing are driven by data_workflow.yaml (same directory).
+    Tensor layout is resolved automatically from the framework name:
+        "torch" / "norse"  → [T, B, C, H, W]
+        "spikingjelly"     → [B, T, C, H, W]
+
     Args:
-        cfg                 : Settings object (DATA_PATH, BATCH_SIZE, etc.)
-        use_temporal_slicing: Divide each recording into temporal windows
-        slice_duration_ms   : Window size in ms (default: cfg.TEMPORAL_SLICE_DURATION / 1000)
-        auto_tune_slicing   : Analyse dataset and auto-select slice parameters
-        events_per_slice    : Switch to event-driven slicing (ignores slice_duration_ms)
+        cfg       : Settings object from SNN_module.yaml (training/model params).
+        framework : Name of the SNN framework being used — drives tensor layout.
     """
 
-    def __init__(
-        self,
-        cfg: Settings,
-        use_temporal_slicing: bool = False,
-        slice_duration_ms: float = None,
-        auto_tune_slicing: bool = False,
-        events_per_slice: int = None,
-    ):
-        self.cfg = cfg
-        self.use_temporal_slicing = use_temporal_slicing
-        self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)
-        self.auto_tune_slicing = auto_tune_slicing
-        self.events_per_slice = events_per_slice
+    def __init__(self, cfg: Settings, framework: str = "torch"):
+        self.cfg         = cfg
+        self.wf          = self._load_workflow()
+        self.data_format = _FORMAT_MAP.get(framework.lower(), "TB")
+        self.framework   = framework.lower()
+
+        framing = self.wf.get("framing", {})
+        self.frame_mode     = framing.get("mode", "n_time_bins")
+        self.n_time_bins    = int(framing.get("n_time_bins", 16))
+        self.time_window_us = int(framing.get("time_window_ms", 15.0) * 1000)
+
+        preprocessing = self.wf.get("preprocessing", {})
+        self.denoise_filter_time_us = int(preprocessing.get("denoise_filter_time_us", 10000))
+
+        augmentation = self.wf.get("augmentation", {})
+        self.augmentation_enabled = bool(augmentation.get("enabled", True))
+        self.rotation_deg         = float(augmentation.get("rotation_deg", 10))
+
+        cache_cfg = self.wf.get("cache", {})
+        self.cache_path           = cache_cfg.get("path", "./cache")
+        self.avg_recording_bytes  = int(cache_cfg.get("avg_recording_bytes", 50_000))
+
+        slicing = self.wf.get("temporal_slicing", {})
+        self.use_temporal_slicing = bool(slicing.get("enabled", False))
+        self.slice_duration_ms    = float(slicing.get("slice_duration_ms", 15.0))
+        self.slice_overlap_ms     = float(slicing.get("overlap_ms", 0.0))
+        self.events_per_slice     = slicing.get("events_per_slice", None)
+        self.auto_tune_slicing    = bool(slicing.get("auto_tune", False))
 
         self.train_loader: DataLoader
         self.test_loader: DataLoader
 
         self.coordinator = PipelineMemoryCoordinator.from_system()
         self.build()
+
+    def _load_workflow(self) -> dict:
+        with open(_WORKFLOW_YAML) as f:
+            return yaml.safe_load(f)
 
     def build(self):
         raw_train, raw_test, frame_tf = self.load_raw()
@@ -81,7 +152,6 @@ class NeuromorphicEncoder:
     def load_raw(self):
         """Load raw event datasets with no transform — caching and slicing come later."""
         data_path = self.cfg.DATA_PATH
-        time_window = self.cfg.TEMPORAL_SLICE_DURATION
 
         if not data_path:
             sensor_size = tonic.datasets.NMNIST.sensor_size
@@ -99,17 +169,21 @@ class NeuromorphicEncoder:
 
         self.sensor_size = sensor_size
         H, W, C = sensor_size
-        logger.info(f"[PIPELINE] Dataset : {self.dataset_label}  |  Sensor H={H} W={W} C={C}")
-        logger.info(f"[PIPELINE] Train   : {len(raw_train)} recordings")
-        logger.info(f"[PIPELINE] Test    : {len(raw_test)} recordings")
+        logger.info(f"[PIPELINE] Dataset    : {self.dataset_label}  |  Sensor H={H} W={W} C={C}")
+        logger.info(f"[PIPELINE] Frame mode : {self.frame_mode}")
+        logger.info(f"[PIPELINE] Framework  : {self.framework}  →  layout {self.data_format}")
+        logger.info(f"[PIPELINE] Train      : {len(raw_train)} recordings")
+        logger.info(f"[PIPELINE] Test       : {len(raw_test)} recordings")
 
         self.validate_first_sample(raw_train, "train")
         self.validate_first_sample(raw_test, "test")
 
-        frame_tf = transforms.Compose([
-            transforms.Denoise(filter_time=10000),
-            transforms.ToFrame(sensor_size=sensor_size, time_window=time_window),
-        ])
+        if self.frame_mode == "n_time_bins":
+            to_frame = transforms.ToFrame(sensor_size=sensor_size, n_time_bins=self.n_time_bins)
+        else:  # time_window
+            to_frame = transforms.ToFrame(sensor_size=sensor_size, time_window=self.time_window_us)
+
+        frame_tf = transforms.Compose([transforms.Denoise(filter_time=self.denoise_filter_time_us), to_frame])
         return raw_train, raw_test, frame_tf
 
     def apply_pipeline(self, raw_train, raw_test, frame_tf):
@@ -120,18 +194,22 @@ class NeuromorphicEncoder:
         Caching always wraps raw datasets so all slices from one recording
         share a single cache entry.
         """
-        max_recs = self.coordinator.max_recordings(avg_recording_bytes=50_000)
+        max_recs = self.coordinator.max_recordings(avg_recording_bytes=self.avg_recording_bytes)
+        cache_path = self.cache_path if Path(self.cache_path).is_absolute() else str(PROJECT_ROOT / self.cache_path.lstrip("./"))
         controller = AdaptiveCacheController(
-            cache_path=str(PROJECT_ROOT / "cache"),
+            cache_path=cache_path,
             max_cached_recordings=max_recs,
             verbose=True,
         )
 
-        train_tf = transforms.Compose([
-            frame_tf,
-            torch.from_numpy,
-            torchvision.transforms.RandomRotation([-10, 10]),
-        ])
+        if self.augmentation_enabled:
+            train_tf = transforms.Compose([
+                frame_tf,
+                torch.from_numpy,
+                torchvision.transforms.RandomRotation([-self.rotation_deg, self.rotation_deg]),
+            ])
+        else:
+            train_tf = frame_tf
         test_tf = frame_tf
 
         if self.use_temporal_slicing:
@@ -170,12 +248,16 @@ class NeuromorphicEncoder:
             if v is not None  # prefetch_factor must be omitted (not None) when num_workers=0
         }
 
-        pad = tonic.collation.PadTensors(batch_first=False)
+        # n_time_bins → fixed T, stack directly.  time_window → variable T, pad to max in batch.
+        if self.frame_mode == "n_time_bins":
+            collate = _Collate(self.data_format)
+        else:
+            collate = _PaddedCollate(self.data_format)
 
         self.train_loader = DataLoader(
             train_data,
             batch_size=batch_size,
-            collate_fn=pad,
+            collate_fn=collate,
             shuffle=True,
             drop_last=True,
             **dl_cfg,
@@ -183,7 +265,7 @@ class NeuromorphicEncoder:
         self.test_loader = DataLoader(
             test_data,
             batch_size=batch_size,
-            collate_fn=pad,
+            collate_fn=collate,
             **dl_cfg,
         )
 
