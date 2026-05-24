@@ -18,7 +18,7 @@ architecture:
 training:
   framework: norse           # torch | norse | spikingjelly  ← one line to switch everything
 
-  epochs: 10
+  epochs: 5
   iterations_per_epoch: 937  # 60000 / batch_size=64 = full N-MNIST epoch
   timesteps: 16              # fixed T — used as n_time_bins in data_workflow.yaml
   batch_size: 64
