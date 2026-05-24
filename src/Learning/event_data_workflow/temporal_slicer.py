@@ -57,13 +57,18 @@ class TemporalSlicedDataset(Dataset):
         self.transform = transform
         self.verbose = verbose
 
-        if self.config.overlap_us > 0 and self.verbose:
-            overlap_pct = 100 * self.config.overlap_us / self.config.slice_duration_us
-            logger.warning(
-                f"[TEMPORAL SLICER] overlap={self.config.overlap_us/1000:.1f}ms "
-                f"({overlap_pct:.0f}% of slice). Adjacent slices share events — "
-                "set overlap_us=0 to eliminate duplicate training samples."
-            )
+        if self.config.overlap_us > 0:
+            if self.config.events_per_slice is not None:
+                logger.warning(
+                    "[TEMPORAL SLICER] overlap_us is set but ignored in event-driven mode."
+                )
+            elif self.verbose:
+                overlap_pct = 100 * self.config.overlap_us / self.config.slice_duration_us
+                logger.warning(
+                    f"[TEMPORAL SLICER] overlap={self.config.overlap_us/1000:.1f}ms "
+                    f"({overlap_pct:.0f}% of slice). Adjacent slices share events — "
+                    "set overlap_us=0 to eliminate duplicate training samples."
+                )
 
         self.build_slice_index()
 
@@ -96,7 +101,7 @@ class TemporalSlicedDataset(Dataset):
                 if len(events) == 0:
                     continue
 
-                t = events['t'] if hasattr(events, 'dtype') else events[:, 2]
+                t = events['t'] if isinstance(events, np.ndarray) else events[:, 2]
 
                 if self.config.events_per_slice is not None:
                     bounds = self.event_driven_bounds(len(t))
@@ -180,7 +185,7 @@ class TemporalSlicedDataset(Dataset):
 
         events, target = self.dataset[original_idx]
 
-        if hasattr(events, 'dtype'):  # structured array (x, y, t, p)
+        if isinstance(events, np.ndarray):  # structured array (x, y, t, p)
             sliced_events = events[start_idx:end_idx].copy()
             if len(sliced_events) > 0:
                 sliced_events['t'] -= sliced_events['t'][0]
@@ -229,7 +234,7 @@ class AdaptiveTemporalSlicer:
                 if len(events) == 0:
                     continue
 
-                if hasattr(events, 'dtype'):
+                if isinstance(events, np.ndarray):
                     t_min, t_max = events['t'][0], events['t'][-1]
                 else:
                     t_min, t_max = events[0, 2], events[-1, 2]
@@ -284,7 +289,7 @@ class AdaptiveTemporalSlicer:
         if self.stats is None:
             self.analyze()
 
-        suggested_ms = self.stats['mean_duration_ms'] / target_slices_per_sample
+        suggested_ms = self.stats['median_duration_ms'] / target_slices_per_sample
         suggested_us = int(suggested_ms * 1000)
 
         expected_events = suggested_ms * self.stats['mean_event_rate']
@@ -314,8 +319,11 @@ def create_sliced_dataset(
     slice_duration_ms: float = 15.0,
     overlap_ms: float = 0.0,
     min_events: int = 10,
+    discard_incomplete: bool = False,
     events_per_slice: Optional[int] = None,
     auto_tune: bool = False,
+    auto_tune_samples: int = 50,
+    auto_tune_target_slices: int = 2,
     transform=None,
     verbose: bool = True
 ) -> TemporalSlicedDataset:
@@ -330,9 +338,9 @@ def create_sliced_dataset(
             events_per_slice=events_per_slice,
         )
     elif auto_tune:
-        analyzer = AdaptiveTemporalSlicer(dataset, num_samples_to_analyze=50)
+        analyzer = AdaptiveTemporalSlicer(dataset, num_samples_to_analyze=auto_tune_samples)
         config = analyzer.suggest_slice_config(
-            target_slices_per_sample=2,
+            target_slices_per_sample=auto_tune_target_slices,
             min_events_per_slice=min_events,
         )
     else:
@@ -340,7 +348,7 @@ def create_sliced_dataset(
             slice_duration_us=int(slice_duration_ms * 1000),
             overlap_us=int(overlap_ms * 1000),
             min_events_per_slice=min_events,
-            discard_incomplete=False,
+            discard_incomplete=discard_incomplete,
         )
 
     return TemporalSlicedDataset(dataset, config, transform=transform, verbose=verbose)
