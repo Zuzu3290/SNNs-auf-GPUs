@@ -8,7 +8,6 @@ from contextlib import nullcontext
 
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from snntorch import functional as SF
 from skeleton import Settings
 
 logger = logging.getLogger(__name__)
@@ -111,7 +110,7 @@ class SNNTrainer:
                     self.model.optimizer.zero_grad(set_to_none=True)
 
                 raw_loss   = loss_val.item() * accum
-                acc        = SF.accuracy_rate(spk_rec, targets)
+                acc        = (spk_rec.detach().argmax(dim=1) == targets).float().mean().item()
                 spike_rate = spk_rec.detach().float().mean().item()
 
                 self.loss_hist.append(raw_loss)

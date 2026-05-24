@@ -6,7 +6,7 @@ from learning.inference import SNNTester
 from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
 from learning.training import SNNTrainer
 
-class SNN(nn.Module):
+class SNN_SJ(nn.Module):
     IN_CHANNELS:    int   = 2
     CONV1_OUT:      int   = 12
     CONV1_KERNEL:   int   = 5
