@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from skeleton import Settings
 from learning.frameworks.snn_torch import SNN_TORCH
 from learning.event_data_workflow import NeuromorphicEncoder
+from learning.frameworks.snn_norse import SNN_NORSE
 
 def main():
     # 1. Initialize settings
@@ -16,7 +17,7 @@ def main():
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model = SNN_TORCH(cfg)
+    model = SNN_NORSE(cfg)
     trainer = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)
     

@@ -81,28 +81,13 @@ class PipelineMemoryCoordinator:
         self.verbose = verbose
 
     @classmethod
-    def from_system(
-        cls,
-        safety_margin_gb: float = 2.0,
-        recording_cache_fraction: float = 0.4,
-        worker_fraction: float = 0.3,
-        prefetch_fraction: float = 0.3,
-        gpu_pressure_threshold: float = 0.75,
-        verbose: bool = True,
-    ) -> "PipelineMemoryCoordinator":
+    def from_system(cls, safety_margin_gb: float = 2.0, verbose: bool = True) -> "PipelineMemoryCoordinator":
         """Build coordinator from live system metrics."""
         vm = psutil.virtual_memory()
-        usable_gb = max(1.0, vm.available / (1024 ** 3) - safety_margin_gb)
-        budget = PipelineMemoryBudget(
-            total_gb=usable_gb,
-            recording_cache_fraction=recording_cache_fraction,
-            worker_fraction=worker_fraction,
-            prefetch_fraction=prefetch_fraction,
-        )
-        coord = cls(budget, verbose=verbose)
-        coord.GPU_PRESSURE_THRESHOLD = gpu_pressure_threshold
+        total_gb = max(1.0, vm.available / (1024 ** 3) - safety_margin_gb)
+        coord = cls(PipelineMemoryBudget(total_gb=total_gb), verbose=verbose)
         if verbose:
-            logger.info(f"[MEMORY COORDINATOR] Usable pipeline budget: {usable_gb:.1f} GB")
+            logger.info(f"[MEMORY COORDINATOR] Pipeline budget: {total_gb:.1f} GB")
             coord.log_allocation()
         return coord
 
@@ -310,7 +295,6 @@ class AdaptiveCacheController:
 
         sample_indices = torch.randperm(len(dataset))[:min(num_samples_to_probe, len(dataset))]
         total_bytes = 0
-        successful = 0
 
         for idx in sample_indices:
             try:
@@ -321,13 +305,12 @@ class AdaptiveCacheController:
                     total_bytes += events.element_size() * events.numel()
                 else:
                     total_bytes += sys.getsizeof(events)
-                successful += 1
             except Exception as e:
                 if self.verbose:
                     logger.warning(f"[CACHE CONTROLLER] Could not probe sample {idx}: {e}")
                 continue
 
-        avg_bytes_per_sample = total_bytes / max(1, successful)
+        avg_bytes_per_sample = total_bytes / len(sample_indices)
         estimated_total_gb = (avg_bytes_per_sample * len(dataset)) / (1024**3)
 
         return estimated_total_gb
