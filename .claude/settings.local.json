@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(git -C \"c:\\\\Users\\\\hasee\\\\Documents\\\\HKA\\\\Electrical Engineering & IT\\\\Summer 2026 semester\\\\SNN_Project\\\\SNNs-auf-GPUs\" show 94f99746:src/old_pipeline/frameworks/snn_norse.py)"
     ]
   }
 }

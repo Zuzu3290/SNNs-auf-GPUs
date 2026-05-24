@@ -27,7 +27,7 @@ training:
   num_classes: 10
   device: cuda
   num_workers: 4
-  use_amp: true
+  use_amp: false  # Norse LIF surrogate gradients underflow in float16 → silent GradScaler skips → no learning
   grad_accum_steps: 1
   lr_scheduler: cosine       # cosine | none
 

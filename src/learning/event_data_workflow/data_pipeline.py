@@ -69,6 +69,25 @@ class _Collate:
         return x, y
 
 
+class _FramedDataset(torch.utils.data.Dataset):
+    """
+    Applies frame_tf inside __getitem__ so DiskCachedDataset stores the already-framed
+    tensor, not raw event structs.  Matches old pipeline pattern:
+        DiskCachedDataset(NMNIST(transform=frame_tf), transform=aug_tf)
+    Must be a top-level class (not a closure) to be picklable by DataLoader workers.
+    """
+    def __init__(self, dataset, transform):
+        self.dataset   = dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        events, label = self.dataset[idx]
+        return self.transform(events), label
+
+
 class _PaddedCollate:
     """
     Collate for time_window mode — T varies per recording so we pad to the
@@ -257,14 +276,23 @@ class NeuromorphicEncoder:
         )
 
         if self.augmentation_enabled:
-            train_tf = transforms.Compose([
+            aug_only_tf = transforms.Compose([
+                torch.from_numpy,
+                torchvision.transforms.RandomRotation([-self.rotation_deg, self.rotation_deg]),
+            ])
+        else:
+            aug_only_tf = torch.from_numpy
+
+        # Full transform (frame + aug) used only for temporal slicing, where the cache
+        # stores raw events so slicing can operate on timestamps.
+        if self.augmentation_enabled:
+            full_train_tf = transforms.Compose([
                 frame_tf,
                 torch.from_numpy,
                 torchvision.transforms.RandomRotation([-self.rotation_deg, self.rotation_deg]),
             ])
         else:
-            train_tf = frame_tf
-        test_tf = frame_tf
+            full_train_tf = frame_tf
 
         if self.use_temporal_slicing:
             # Layer 1: cache raw events (slicing needs raw timestamps)
@@ -277,20 +305,24 @@ class NeuromorphicEncoder:
                 slice_duration_ms=self.slice_duration_ms,
                 auto_tune=self.auto_tune_slicing,
                 events_per_slice=self.events_per_slice,
-                transform=train_tf,
+                transform=full_train_tf,
                 verbose=True,
             )
             test_data = create_sliced_dataset(
                 cached_test,
                 slice_duration_ms=self.slice_duration_ms,
-                transform=test_tf,
+                transform=frame_tf,
                 verbose=True,
             )
             logger.info(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
         else:
-            # No slicing: cache with transforms baked in
-            train_data = controller.wrap_dataset(raw_train, transform=train_tf, split="train")
-            test_data  = controller.wrap_dataset(raw_test,  transform=test_tf,  split="test")
+            # No slicing: bake frame_tf into the dataset so the cache stores framed tensors,
+            # not raw event structs.  Matches old pipeline: DiskCachedDataset(framed_ds, aug_tf).
+            # ToFrame (expensive) runs once per sample; aug (RandomRotation) re-runs each epoch.
+            framed_train = _FramedDataset(raw_train, frame_tf)
+            framed_test  = _FramedDataset(raw_test,  frame_tf)
+            train_data = controller.wrap_dataset(framed_train, transform=aug_only_tf, split="train")
+            test_data  = controller.wrap_dataset(framed_test,  transform=None,        split="test")
 
         return train_data, test_data
 
