@@ -82,7 +82,7 @@ if __name__ == "__main__":
  
     cfg       = Settings()
     model     = SNN_TORCH(cfg)
-    trainer   = model.get_trainer(train_loader, test_loader)
+    trainer   = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)
  
     print("\n\u2713 Model ready.")

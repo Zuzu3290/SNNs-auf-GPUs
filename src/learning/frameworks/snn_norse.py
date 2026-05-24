@@ -1,5 +1,3 @@
-import math
-
 import norse.torch as norse
 import torch
 import torch.nn as nn
@@ -72,24 +70,23 @@ class _NorseNet(nn.Module):
 
 class SNN_NORSE(nn.Module):
 
+    # Norse-native parameters — tuned independently from SNNTorch's beta.
+    # tau_mem_inv (Hz) = inverse membrane time constant. 50 Hz → tau = 20 ms (biologically standard).
+    # Do NOT derive this from SNNTorch's beta: the two frameworks use different input models
+    # (additive current vs equilibrium target) so the same scalar input produces different
+    # equilibrium voltages. Tune each framework in its own units.
+    TAU_MEM_INV: float = 50.0   # Hz — optimal range for N-MNIST: 20–100 Hz
+    DT:          float = 0.001  # seconds per simulation step (1 ms)
+
     def __init__(self, cfg: Settings):
         super().__init__()
 
         self.cfg    = cfg
         self.device = torch.device(cfg.DEVICE)
 
-        # TODO: temporary parameter conversion — replace with framework-specific config sections.
-        # Norse and SNNTorch use different coordinate systems for the same physical quantity:
-        #   SNNTorch: beta (dimensionless, 0–1)     Norse: tau_mem_inv (Hz, typically 10–1000)
-        # The conversion is nonlinear, so a single shared YAML value cannot fairly control both.
-        # Proper fix: add snntorch/norse sub-sections to SNN_module.yaml and expose them via
-        # Settings, so each framework reads its own independently tuned parameters.
-        dt          = 0.001                          # 1 ms — Norse default timestep
-        tau_mem_inv = -math.log(cfg.BETA) / dt       # beta=0.95 → ~51.3 Hz
-
         lif_params = norse.LIFParameters(
-            tau_mem_inv=torch.as_tensor(tau_mem_inv),
-            v_th=torch.as_tensor(cfg.THRESHOLD),      # v_th shares the same scale — no conversion needed
+            tau_mem_inv=torch.as_tensor(self.TAU_MEM_INV),
+            v_th=torch.as_tensor(cfg.THRESHOLD),
         )
 
         self.net = _NorseNet(lif_params, cfg.NUM_CLASSES).to(self.device)

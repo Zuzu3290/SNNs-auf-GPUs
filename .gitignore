@@ -20,6 +20,9 @@ venv/
 __pycache__/
 *.pyc
 *.pyo
+cache/
+checkpoints/
+outputs/
 
 # IDE
 .vscode/
