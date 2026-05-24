@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # src/ → skeleton
 sys.path.insert(0, str(Path(__file__).parent))                # sibling modules
 
+import yaml
 import torch
 from torch.utils.data import DataLoader
 import tonic
@@ -25,8 +26,9 @@ from skeleton import Settings
 from cache_engine import AdaptiveCacheController, PipelineMemoryCoordinator
 from temporal_slicer import create_sliced_dataset
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
-DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
+PROJECT_ROOT    = Path(__file__).parent.parent.parent.parent
+DATA_DIR        = PROJECT_ROOT / "tmp" / "data"
+_WORKFLOW_YAML  = Path(__file__).parent / "data_workflow.yaml"
 
 import tqdm as t
 orig_tqdm_init = t.tqdm.__init__
@@ -41,36 +43,57 @@ t.tqdm.__init__ = _mb_init
 logger = logging.getLogger(__name__)
 
 
+def _load_workflow_config() -> dict:
+    with open(_WORKFLOW_YAML) as f:
+        return yaml.safe_load(f)
+
+
 class NeuromorphicEncoder:
     """
     Builds train and test DataLoaders for neuromorphic event-based datasets.
 
+    High-level switches are available as constructor args; all fine-grained
+    tuning parameters are read from data_workflow.yaml in this directory.
+
     Args:
         cfg                 : Settings object (DATA_PATH, BATCH_SIZE, etc.)
-        use_temporal_slicing: Divide each recording into temporal windows
-        slice_duration_ms   : Window size in ms (default: cfg.TEMPORAL_SLICE_DURATION / 1000)
-        auto_tune_slicing   : Analyse dataset and auto-select slice parameters
-        events_per_slice    : Switch to event-driven slicing (ignores slice_duration_ms)
+        use_temporal_slicing: Override the yaml enabled flag (None = read from yaml)
+        slice_duration_ms   : Override yaml slice_duration_us (None = read from yaml)
+        auto_tune_slicing   : Override yaml auto_tune flag
+        events_per_slice    : Override yaml events_per_slice
     """
 
     def __init__(
         self,
         cfg: Settings,
-        use_temporal_slicing: bool = False,
+        use_temporal_slicing: bool = None,
         slice_duration_ms: float = None,
-        auto_tune_slicing: bool = False,
+        auto_tune_slicing: bool = None,
         events_per_slice: int = None,
     ):
         self.cfg = cfg
-        self.use_temporal_slicing = use_temporal_slicing
-        self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)
-        self.auto_tune_slicing = auto_tune_slicing
-        self.events_per_slice = events_per_slice
+        self.wf  = _load_workflow_config()
+
+        ts = self.wf["temporal_slicing"]
+        mc = self.wf["memory_coordinator"]
+        ca = self.wf["cache"]
+
+        # Constructor args take precedence; fall back to yaml values
+        self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else ts["enabled"]
+        self.slice_duration_ms    = slice_duration_ms    or (ts["slice_duration_us"] / 1000.0)
+        self.auto_tune_slicing    = auto_tune_slicing    if auto_tune_slicing    is not None else ts["auto_tune"]
+        self.events_per_slice     = events_per_slice     if events_per_slice     is not None else ts["events_per_slice"]
 
         self.train_loader: DataLoader
         self.test_loader: DataLoader
 
-        self.coordinator = PipelineMemoryCoordinator.from_system()
+        self.coordinator = PipelineMemoryCoordinator.from_system(
+            safety_margin_gb=mc["safety_margin_gb"],
+            recording_cache_fraction=mc["recording_cache_fraction"],
+            worker_fraction=mc["worker_fraction"],
+            prefetch_fraction=mc["prefetch_fraction"],
+            gpu_pressure_threshold=mc["gpu_pressure_threshold"],
+        )
         self.build()
 
     def build(self):
@@ -120,12 +143,19 @@ class NeuromorphicEncoder:
         Caching always wraps raw datasets so all slices from one recording
         share a single cache entry.
         """
+        ca  = self.wf["cache"]
+        ts  = self.wf["temporal_slicing"]
+
         max_recs = self.coordinator.max_recordings(avg_recording_bytes=50_000)
-        controller = AdaptiveCacheController(
-            cache_path=str(PROJECT_ROOT / "cache"),
+        self.cache_controller = AdaptiveCacheController(
+            cache_path=ca["cache_path"],
+            memory_safety_margin_gb=ca["memory_safety_margin_gb"],
+            memory_cache_threshold_gb=ca["memory_cache_threshold_gb"],
             max_cached_recordings=max_recs,
             verbose=True,
         )
+        controller  = self.cache_controller
+        force_mode  = ca["force_mode"] or None
 
         train_tf = transforms.Compose([
             frame_tf,
@@ -136,14 +166,21 @@ class NeuromorphicEncoder:
 
         if self.use_temporal_slicing:
             # Layer 1: cache raw events (slicing needs raw timestamps)
-            cached_train = controller.wrap_dataset(raw_train, split="train")
-            cached_test  = controller.wrap_dataset(raw_test,  split="test")
+            strategy_train = controller.determine_strategy(raw_train, force_mode=force_mode)
+            strategy_test  = controller.determine_strategy(raw_test,  force_mode=force_mode)
+            cached_train = controller.wrap_dataset(raw_train, split="train", strategy=strategy_train)
+            cached_test  = controller.wrap_dataset(raw_test,  split="test",  strategy=strategy_test)
 
             # Layer 2: stateless slicing with transforms applied per slice
             train_data = create_sliced_dataset(
                 cached_train,
                 slice_duration_ms=self.slice_duration_ms,
+                overlap_ms=ts["overlap_us"] / 1000.0,
+                min_events=ts["min_events_per_slice"],
+                discard_incomplete=ts["discard_incomplete"],
                 auto_tune=self.auto_tune_slicing,
+                auto_tune_samples=ts["auto_tune_samples"],
+                auto_tune_target_slices=ts["auto_tune_target_slices"],
                 events_per_slice=self.events_per_slice,
                 transform=train_tf,
                 verbose=True,
@@ -151,14 +188,20 @@ class NeuromorphicEncoder:
             test_data = create_sliced_dataset(
                 cached_test,
                 slice_duration_ms=self.slice_duration_ms,
+                overlap_ms=ts["overlap_us"] / 1000.0,
+                min_events=ts["min_events_per_slice"],
+                discard_incomplete=ts["discard_incomplete"],
+                events_per_slice=self.events_per_slice,
                 transform=test_tf,
                 verbose=True,
             )
             logger.info(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
         else:
-            # No slicing: cache with transforms baked in
-            train_data = controller.wrap_dataset(raw_train, transform=train_tf, split="train")
-            test_data  = controller.wrap_dataset(raw_test,  transform=test_tf,  split="test")
+            # No slicing: determine strategy once, cache with transforms baked in
+            strategy_train = controller.determine_strategy(raw_train, force_mode=force_mode)
+            strategy_test  = controller.determine_strategy(raw_test,  force_mode=force_mode)
+            train_data = controller.wrap_dataset(raw_train, transform=train_tf, split="train", strategy=strategy_train)
+            test_data  = controller.wrap_dataset(raw_test,  transform=test_tf,  split="test",  strategy=strategy_test)
 
         return train_data, test_data
 
@@ -197,11 +240,8 @@ class NeuromorphicEncoder:
 
     def clear_cache(self):
         """Clear all disk cache directories."""
-        import shutil
-        cache_path = PROJECT_ROOT / "cache"
-        if cache_path.exists():
-            shutil.rmtree(cache_path)
-            logger.info("[PIPELINE] Cache cleared")
+        self.cache_controller.clear_cache()
+        logger.info("[PIPELINE] Cache cleared")
 
     def validate_first_sample(self, dataset, split: str) -> None:
         try:
@@ -211,7 +251,7 @@ class NeuromorphicEncoder:
             logger.info(f"[VALIDATION] {split.capitalize()} dataset: first sample OK")
         except Exception as exc:
             logger.error(f"[ERROR] {split} validation failed — {exc}")
-            sys.exit(1)
+            raise RuntimeError(f"{split} dataset validation failed: {exc}") from exc
 
 
 def main() -> tuple[DataLoader, DataLoader]:
