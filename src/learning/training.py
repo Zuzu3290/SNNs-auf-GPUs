@@ -10,7 +10,11 @@ import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
-from learning.frameworks.activity_reg import get_hidden_spike_recordings, activity_regularization
+from learning.frameworks.activity_reg import (
+    get_hidden_spike_recordings,
+    activity_regularization,
+    stdp_regularization,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -175,9 +179,10 @@ class SNNTrainer:
                             F.softmax(clean_logits.detach(),    dim=1),
                             reduction="batchmean",
                         )
-                        act_penalty = torch.tensor(0.0, device=self.device)
+                        hidden      = get_hidden_spike_recordings(self.model)
+                        act_penalty = torch.zeros(1, device=self.device)
+                        stdp_penalty = torch.zeros(1, device=self.device)
                         if self.cfg.ACTIVITY_REG_ENABLED:
-                            hidden      = get_hidden_spike_recordings(self.model)
                             act_penalty = activity_regularization(
                                 hidden,
                                 min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
@@ -185,19 +190,35 @@ class SNNTrainer:
                                 lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
                                 lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
                             )
-                        loss_val = (ce_loss + self.cfg.TRADES_LAMBDA * kl_loss + act_penalty) / accum
+                        if self.cfg.STDP_ENABLED:
+                            stdp_penalty = stdp_regularization(
+                                hidden,
+                                output_spikes = spk_rec,
+                                tau    = self.cfg.STDP_TAU,
+                                A_plus = self.cfg.STDP_A_PLUS,
+                                A_minus= self.cfg.STDP_A_MINUS,
+                            )
+                        loss_val = (ce_loss + self.cfg.TRADES_LAMBDA * kl_loss + act_penalty + stdp_penalty) / accum
                 else:
                     with autocast_ctx:
                         spk_rec   = self.model(data)
                         task_loss = self.model.loss_fn(spk_rec, targets)
+                        hidden    = get_hidden_spike_recordings(self.model)
                         if self.cfg.ACTIVITY_REG_ENABLED:
-                            hidden      = get_hidden_spike_recordings(self.model)
-                            task_loss   = task_loss + activity_regularization(
+                            task_loss = task_loss + activity_regularization(
                                 hidden,
                                 min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
                                 max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
                                 lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
                                 lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
+                            )
+                        if self.cfg.STDP_ENABLED:
+                            task_loss = task_loss + stdp_regularization(
+                                hidden,
+                                output_spikes = spk_rec,
+                                tau    = self.cfg.STDP_TAU,
+                                A_plus = self.cfg.STDP_A_PLUS,
+                                A_minus= self.cfg.STDP_A_MINUS,
                             )
                         loss_val = task_loss / accum
 

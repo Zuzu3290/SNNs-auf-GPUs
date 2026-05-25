@@ -15,7 +15,7 @@ training:
   loss_function: CrossEntropy
   optimizer: Adam
   epochs: 5
-  iterations_per_epoch: 100
+  iterations_per_epoch: 300
   timesteps: 25
   batch_size: 128
   beta: 0.95
@@ -25,7 +25,7 @@ training:
   num_classes: 10
   # TRADES robustness training — penalises the network for changing its prediction under input corruption.
   # Loss = CrossEntropy(clean) + lambda * KL(clean || adversarial).
-  trades_enabled: false          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
+  trades_enabled: true          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
 
   trades_epsilon: 0.05          # Perturbation budget: max allowed input corruption per element.
                                 # Range: 0.001 (near-imperceptible) → 0.3 (heavy corruption).
@@ -41,6 +41,11 @@ training:
   activity_reg_max_rate: 0.50   # Penalize neurons firing more than 50% of timesteps (saturation prevention).
   activity_reg_lambda_low: 0.1  # Penalty weight for dead neurons.
   activity_reg_lambda_high: 0.1 # Penalty weight for saturated neurons.
+
+  stdp_enabled: true            # STDP causal correlation loss alongside BPTT.
+  stdp_tau: 20.0                # Trace decay time constant in timesteps. Higher = longer memory of past spikes.
+  stdp_a_plus: 0.01             # LTP strength — how strongly to reinforce causal (pre→post) spike order.
+  stdp_a_minus: 0.01            # LTD strength — how strongly to penalise anticausal (post→pre) spike order.
 dataset:
   dataset_name: MNIST
   data_path:
