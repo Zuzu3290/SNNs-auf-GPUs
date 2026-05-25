@@ -17,19 +17,6 @@ cfg = Settings()
 device = torch.device(cfg.DEVICE)
 
 
-def apply_temporal_smoothing(data: torch.Tensor, kernel_size: int) -> torch.Tensor:
-    """Suppress transient sensor noise by averaging adjacent timesteps along dim 0.
-
-    Dim 0 is always treated as the time axis. All remaining dims are treated as
-    independent signals, so this works for any input shape [T, ...].
-    """
-    T = data.shape[0]
-    trailing = data.shape[1:]
-    x = data.reshape(T, -1).T.unsqueeze(1).float()
-    weight = torch.ones(1, 1, kernel_size, device=data.device, dtype=x.dtype) / kernel_size
-    smoothed = F.conv1d(x, weight, padding=kernel_size // 2)
-    return smoothed.squeeze(1).T.reshape(T, *trailing).to(data.dtype)
-
 
 def generate_trades_adversarial(
     model: torch.nn.Module,
@@ -160,11 +147,11 @@ class SNNTrainer:
                 data    = data.to(self.device, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True)
 
-                if self.cfg.TEMPORAL_SMOOTHING:
-                    data = apply_temporal_smoothing(data, self.cfg.TEMPORAL_SMOOTHING_KERNEL)
-
                 if self.cfg.TRADES_ENABLED:
+                    reset = getattr(self.model, "reset_state", None)
                     with torch.no_grad():
+                        if reset is not None:
+                            reset()
                         clean_prob = F.softmax(
                             aggregate_spike_output(self.model(data).float()), dim=1
                         )
@@ -173,7 +160,11 @@ class SNNTrainer:
                         self.cfg.TRADES_EPSILON, self.cfg.TRADES_STEPS,
                     )
                     with autocast_ctx:
+                        if reset is not None:
+                            reset()
                         spk_rec      = self.model(data)
+                        if reset is not None:
+                            reset()
                         spk_rec_adv  = self.model(adv_data)
                         clean_logits = aggregate_spike_output(spk_rec.float())
                         adv_logits   = aggregate_spike_output(spk_rec_adv.float())

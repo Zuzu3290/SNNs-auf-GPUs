@@ -76,16 +76,21 @@ class PipelineMemoryCoordinator:
 
     GPU_PRESSURE_THRESHOLD = 0.75
 
-    def __init__(self, budget: PipelineMemoryBudget, verbose: bool = True):
+    def __init__(self, budget: PipelineMemoryBudget, verbose: bool = True, device=None):
         self.budget = budget
         self.verbose = verbose
+        self._device_idx = (
+            (device.index or 0)
+            if device is not None and getattr(device, "type", "") == "cuda"
+            else 0
+        )
 
     @classmethod
-    def from_system(cls, safety_margin_gb: float = 2.0, verbose: bool = True) -> "PipelineMemoryCoordinator":
+    def from_system(cls, safety_margin_gb: float = 2.0, verbose: bool = True, device=None) -> "PipelineMemoryCoordinator":
         """Build coordinator from live system metrics."""
         vm = psutil.virtual_memory()
         total_gb = max(1.0, vm.available / (1024 ** 3) - safety_margin_gb)
-        coord = cls(PipelineMemoryBudget(total_gb=total_gb), verbose=verbose)
+        coord = cls(PipelineMemoryBudget(total_gb=total_gb), verbose=verbose, device=device)
         if verbose:
             logger.info(f"[MEMORY COORDINATOR] Pipeline budget: {total_gb:.1f} GB")
             coord.log_allocation()
@@ -95,8 +100,12 @@ class PipelineMemoryCoordinator:
         """GPU memory utilisation as 0–1. Returns 0 if no GPU."""
         if not torch.cuda.is_available():
             return 0.0
-        total = torch.cuda.get_device_properties(0).total_memory
-        return torch.cuda.memory_allocated(0) / total
+        total = torch.cuda.get_device_properties(self._device_idx).total_memory
+        return torch.cuda.memory_allocated(self._device_idx) / total
+
+    def max_cache_bytes(self) -> int:
+        """Byte budget for BoundedRecordingCache derived from the effective cache GB."""
+        return int(self.effective_cache_gb() * (1024 ** 3))
 
     def is_gpu_under_pressure(self) -> bool:
         return self.gpu_pressure() > self.GPU_PRESSURE_THRESHOLD
@@ -168,12 +177,23 @@ class BoundedRecordingCache(Dataset):
     - Each DataLoader worker holds its own warm cache with persistent_workers=True
     """
 
-    def __init__(self, dataset: Dataset, max_recordings: int = 500, transform=None):
+    def __init__(self, dataset: Dataset, max_recordings: int = 500, max_bytes: int = 0, transform=None):
         self.dataset = dataset
         self.max_recordings = max_recordings
+        self.max_bytes = max_bytes  # 0 = no byte cap (count-only eviction)
         self.transform = transform
         self._cache: OrderedDict = OrderedDict()
+        self._cache_bytes: int = 0
         self._lock = threading.Lock()
+
+    @staticmethod
+    def estimate_item_bytes(raw) -> int:
+        events, _ = raw
+        if hasattr(events, "nbytes"):
+            return int(events.nbytes)
+        if hasattr(events, "element_size") and hasattr(events, "numel"):
+            return int(events.element_size() * events.numel())
+        return 0
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -188,12 +208,19 @@ class BoundedRecordingCache(Dataset):
 
         if raw is None:
             raw = self.dataset[idx]
+            item_bytes = self.estimate_item_bytes(raw)
             with self._lock:
                 if idx not in self._cache:
                     self._cache[idx] = raw
                     self._cache.move_to_end(idx)
+                    self._cache_bytes += item_bytes
                     while len(self._cache) > self.max_recordings:
-                        self._cache.popitem(last=False)
+                        _, evicted = self._cache.popitem(last=False)
+                        self._cache_bytes -= self.estimate_item_bytes(evicted)
+                    if self.max_bytes > 0:
+                        while self._cache_bytes > self.max_bytes and self._cache:
+                            _, evicted = self._cache.popitem(last=False)
+                            self._cache_bytes -= self.estimate_item_bytes(evicted)
 
         if self.transform is not None:
             events, target = raw
@@ -217,6 +244,7 @@ class BoundedRecordingCache(Dataset):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._lock = threading.Lock()
+        self._cache_bytes = sum(self.estimate_item_bytes(v) for v in self._cache.values())
 
 
 class AdaptiveCacheController:
@@ -240,13 +268,19 @@ class AdaptiveCacheController:
         memory_safety_margin_gb: float = 2.0,
         memory_cache_threshold_gb: float = 8.0,
         max_cached_recordings: int = 500,
-        verbose: bool = True
+        verbose: bool = True,
+        device=None,
     ):
         self.cache_path = Path(cache_path)
         self.memory_safety_margin = memory_safety_margin_gb
         self.memory_threshold = memory_cache_threshold_gb
         self.max_cached_recordings = max_cached_recordings
         self.verbose = verbose
+        self._device_idx = (
+            (device.index or 0)
+            if device is not None and getattr(device, "type", "") == "cuda"
+            else 0
+        )
 
         self.cache_path.mkdir(parents=True, exist_ok=True)
 
@@ -268,8 +302,8 @@ class AdaptiveCacheController:
         gpu_total = 0.0
         gpu_available = 0.0
         if torch.cuda.is_available():
-            gpu_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            gpu_available = (gpu_total - torch.cuda.memory_allocated(0) / (1024**3))
+            gpu_total = torch.cuda.get_device_properties(self._device_idx).total_memory / (1024**3)
+            gpu_available = (gpu_total - torch.cuda.memory_allocated(self._device_idx) / (1024**3))
 
         return CacheMetrics(
             total_ram_gb=total_ram,
@@ -472,11 +506,16 @@ class AdaptiveCacheController:
             logger.info(f"[CACHE CONTROLLER] Reason: {strategy.reason}")
 
         if strategy.mode == "memory":
+            max_bytes = int(strategy.memory_threshold_gb * (1024 ** 3))
             if self.verbose:
-                logger.info(f"[CACHE CONTROLLER] Using BoundedRecordingCache → max {self.max_cached_recordings} recordings in RAM")
+                logger.info(
+                    f"[CACHE CONTROLLER] Using BoundedRecordingCache → "
+                    f"max {self.max_cached_recordings} recordings, {strategy.memory_threshold_gb:.1f} GB"
+                )
             return BoundedRecordingCache(
                 dataset,
                 max_recordings=self.max_cached_recordings,
+                max_bytes=max_bytes,
                 transform=transform,
             )
 
@@ -490,6 +529,7 @@ class AdaptiveCacheController:
             )
 
         elif strategy.mode == "hybrid":
+            max_bytes = int(strategy.memory_threshold_gb * (1024 ** 3))
             if self.verbose:
                 logger.info("[CACHE CONTROLLER] Using Hybrid → disk cache + bounded recording buffer")
             disk_cached = DiskCachedDataset(
@@ -500,6 +540,7 @@ class AdaptiveCacheController:
             return BoundedRecordingCache(
                 disk_cached,
                 max_recordings=self.max_cached_recordings,
+                max_bytes=max_bytes,
             )
 
         else:  # no_cache

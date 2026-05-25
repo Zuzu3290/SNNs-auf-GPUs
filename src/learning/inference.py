@@ -35,7 +35,7 @@ class SNNTester:
             f1          = (2 * precision * recall / (precision + recall)
                            if (precision + recall) > 0 else 0.0)
             specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-            class_acc   = (tp + tn) / total
+            class_acc   = (tp + tn) / total if total > 0 else 0.0
  
             rows.append({
                 "class":       c,

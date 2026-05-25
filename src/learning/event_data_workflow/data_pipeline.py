@@ -41,6 +41,15 @@ t.tqdm.__init__ = _mb_init
 logger = logging.getLogger(__name__)
 
 
+def dataset_is_picklable(obj) -> bool:
+    import pickle
+    try:
+        pickle.dumps(obj)
+        return True
+    except Exception:
+        return False
+
+
 class NeuromorphicEncoder:
     """
     Builds train and test DataLoaders for neuromorphic event-based datasets.
@@ -70,7 +79,9 @@ class NeuromorphicEncoder:
         self.train_loader: DataLoader
         self.test_loader: DataLoader
 
-        self.coordinator = PipelineMemoryCoordinator.from_system()
+        self.coordinator = PipelineMemoryCoordinator.from_system(
+            device=torch.device(cfg.DEVICE)
+        )
         self.build()
 
     def build(self):
@@ -125,6 +136,7 @@ class NeuromorphicEncoder:
             cache_path=str(PROJECT_ROOT / "cache"),
             max_cached_recordings=max_recs,
             verbose=True,
+            device=torch.device(self.cfg.DEVICE),
         )
 
         train_tf = transforms.Compose([
@@ -155,6 +167,12 @@ class NeuromorphicEncoder:
                 verbose=True,
             )
             logger.info(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
+            if len(train_data) == 0 or len(test_data) == 0:
+                raise RuntimeError(
+                    f"[PIPELINE] Temporal slicing produced an empty dataset — "
+                    f"train: {len(train_data)} samples, test: {len(test_data)} samples. "
+                    "Reduce min_events_per_slice or increase slice_duration_ms in your config."
+                )
         else:
             # No slicing: cache with transforms baked in
             train_data = controller.wrap_dataset(raw_train, transform=train_tf, split="train")
@@ -169,6 +187,16 @@ class NeuromorphicEncoder:
             k: v for k, v in self.coordinator.dataloader_config().items()
             if v is not None  # prefetch_factor must be omitted (not None) when num_workers=0
         }
+
+        if dl_cfg.get("persistent_workers") and not dataset_is_picklable(train_data):
+            logger.warning(
+                "[PIPELINE] Dataset is not picklable — disabling persistent_workers "
+                "and multiprocessing to prevent DataLoader hang. "
+                "Remove lambda functions from transforms to re-enable multiprocessing."
+            )
+            dl_cfg["persistent_workers"] = False
+            dl_cfg["num_workers"] = 0
+            dl_cfg.pop("prefetch_factor", None)
 
         pad = tonic.collation.PadTensors(batch_first=False)
 

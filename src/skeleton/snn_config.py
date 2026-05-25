@@ -53,8 +53,6 @@ class Settings:
         self.TRADES_EPSILON           = float(training.get("trades_epsilon", 0.05))
         self.TRADES_LAMBDA            = float(training.get("trades_lambda", 6.0))
         self.TRADES_STEPS             = int(training.get("trades_steps", 10))
-        self.TEMPORAL_SMOOTHING       = bool(training.get("temporal_smoothing", False))
-        self.TEMPORAL_SMOOTHING_KERNEL = int(training.get("temporal_smoothing_kernel", 3))
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
