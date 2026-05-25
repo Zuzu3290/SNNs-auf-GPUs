@@ -13,7 +13,7 @@ architecture:
   pool_kernel:  2
 
   output_size:  10
-  threshold:    1.0   # canonical default across all three frameworks
+  threshold:    0.5   # !! norse might require 0.5, not sure yet !! canonical default across all three frameworks
 
 training:
   framework: norse           # torch | norse | spikingjelly  ← one line to switch everything

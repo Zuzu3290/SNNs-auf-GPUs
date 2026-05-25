@@ -47,6 +47,48 @@ Copy the template block below, fill in every field, paste at the **top** of the 
 
 ---
 
+## EXP-004 · 2026-05-25 · Norse — New Pipeline, threshold:1.0 (FAILED — dead neuron)
+
+**Strategy:** First Norse run on the fully fixed `pipeline-fixes-improvments` pipeline. Goal was to establish a new Norse baseline with the improved caching, corrected `force_mode` wiring, and a standardized `threshold: 1.0` across all three frameworks (up from 0.5 in EXP-002). All other params kept at EXP-002 values. Adaptive cache (`force_mode: null`) selected MEMORY mode — first real test of in-memory caching on Colab.
+
+| Param | Value |
+|---|---|
+| framework | norse |
+| threshold | 1.0 ← **changed from 0.5 (EXP-002) — ROOT CAUSE OF FAILURE** |
+| tau_mem_inv (Norse) | 50.0 Hz |
+| timesteps (n_time_bins) | 16 |
+| batch_size | 64 |
+| iterations_per_epoch | 937 (full epoch) |
+| epochs | 3 |
+| learning_rate | 0.001 |
+| weight_decay | 0.0001 |
+| lr_scheduler | cosine |
+| use_amp | false |
+| loss_fn | cross_entropy |
+| optimizer | adam |
+| surrogate | atan |
+| num_workers | 0 (YAML had 4; pipeline capped to 0 — Colab safety) |
+| cache force_mode | null (adaptive → controller selected MEMORY, 8.8 GB available, dataset ~4.13 GB) |
+| augmentation | ON ±10° rotation |
+| denoise filter | 10000 µs |
+| probe measured | 72 KB/sample (uint8 framed tensor — auto-probed at startup) |
+
+| Epoch | Train Loss | Train Acc | Spike Rate | LR | Duration (s) |
+|---|---|---|---|---|---|
+| 1 | 2.3026 | 9.88% | 0.0000 | ~0.001 | ~1050 (download + cold cache fill) |
+| 2 | 2.3026 | 9.92% | 0.0002 | — | ~539 (85.6% cache warm, MEMORY mode) |
+
+**Test accuracy:** N/A (training terminated — random-chance loss, no improvement)  
+**Notes:**  
+- **FAILED: dead neuron problem.** Loss 2.3026 = −log(1/10), exactly random chance for 10 classes. Spike rate effectively zero every epoch — neurons never fired, surrogate gradient was zero throughout, no weight updates occurred.  
+- **Root cause (high confidence): `threshold: 1.0` kills Norse.** Norse's weight initialization produces lower effective membrane drive than SNNTorch. With `threshold=0.5` (EXP-002), Norse trains to 97.31%. Doubling the threshold to 1.0 means no neuron's membrane potential ever reaches the fire threshold → dead neurons throughout the network → surrogate gradient (atan) evaluates to zero everywhere → gradient-free forward passes, loss never decreases.  
+- **Possible contributing factor (uncertain):** `threshold=1.0` was applied to ALL LIF layers including `lif_out`. If the output layer never fires, the count-based readout `spk_rec.sum(0)` is all zeros → softmax on zeros → uniform distribution → 10% accuracy. The hidden layers may have been partially active but output layer silence alone is sufficient to cause this failure mode.  
+- **Why SNNTorch is fine at 1.0 but Norse is not:** SNNTorch uses a beta-decay leaky integrate-and-fire model with different default weight scales. Norse uses a biophysical LIF parameterized by `tau_mem_inv` (inverse time constant in Hz). The two frameworks have different input drive at initialization — comparing them at the same threshold is physically incorrect. Thresholds must be tuned per framework independently.  
+- **Cache performance confirmed:** MEMORY mode worked correctly. Epoch 2 at 539s vs epoch 1 at 1050s — speedup came from warm cache, not from training (loss was identical). Probe correctly measured 72 KB/sample (uint8 format, not float32 — explains why dataset fit in ~4 GB vs the expected ~8.7 GB float32 estimate).  
+- **Fix applied:** Threshold moved from shared `architecture` block to per-framework blocks. `frameworks.norse.threshold: 0.5`, `frameworks.snntorch.threshold: 1.0`, `frameworks.spikingjelly.threshold: 1.0`. `snn_config.py` now reads `THRESHOLD` from the active framework's section. Re-run as EXP-005 to confirm recovery.
+
+---
+
 ## EXP-003 · 2026-05-25 · Norse — New Pipeline, force_mode:null, num_workers:4, cosine LR
 
 **Strategy:** Deliberate test case. Starting from our validated working config (EXP-002 params: `force_mode:disk`, `num_workers:0`, `lr_scheduler:none`, `use_amp:false`), we intentionally changed five params to match the new main-branch pipeline defaults: `use_amp→true`, `lr_scheduler→cosine`, `num_workers→4`, `force_mode→null`. Only `iterations_per_epoch:937` (our fix — main branch had no reliable value) and `threshold:0.5` were kept unchanged. Primary goal: measure Colab speed/stability under adaptive cache with 4 workers, and also empirically test whether `use_amp:true` actually breaks Norse on this architecture.
