@@ -51,6 +51,33 @@ t.tqdm.__init__ = _mb_init
 logger = logging.getLogger(__name__)
 
 
+def _probe_sample_bytes(dataset, n: int = 5, fallback: int = 50_000) -> int:
+    """
+    Measure average bytes per item by accessing up to n real samples from the dataset.
+    Works for any dataset/dtype/shape — no hardcoded assumptions.
+    Falls back to `fallback` only if all probes fail (e.g. empty dataset).
+    """
+    total, count = 0, 0
+    for i in range(min(n, len(dataset))):
+        try:
+            item, _ = dataset[i]
+            if hasattr(item, 'nbytes'):            # numpy array
+                total += int(item.nbytes)
+            elif hasattr(item, 'element_size'):    # torch tensor
+                total += item.element_size() * item.numel()
+            else:
+                total += sys.getsizeof(item)
+            count += 1
+        except Exception:
+            continue
+    measured = (total // count) if count > 0 else fallback
+    logger.info(
+        f"[PIPELINE] Sample size probe: {measured // 1024} KB/sample "
+        f"(from {count} sample{'s' if count != 1 else ''})"
+    )
+    return measured
+
+
 class _Collate:
     """
     Collate for n_time_bins mode — fixed T so all tensors are the same shape.
@@ -143,8 +170,11 @@ class NeuromorphicEncoder:
         self.rotation_deg         = float(augmentation.get("rotation_deg", 10))
 
         cache_cfg = self.wf.get("cache", {})
-        self.cache_path           = cache_cfg.get("path", "./cache")
-        self.avg_recording_bytes  = int(cache_cfg.get("avg_recording_bytes", 50_000))
+        self.cache_path                 = cache_cfg.get("path", "./cache")
+        self.avg_recording_bytes        = int(cache_cfg.get("avg_recording_bytes", 50_000))
+        self.memory_safety_margin_gb    = float(cache_cfg.get("memory_safety_margin_gb", 2.0))
+        self.memory_cache_threshold_gb  = float(cache_cfg.get("memory_cache_threshold_gb", 8.0))
+        self.force_mode                 = cache_cfg.get("force_mode", None)  # null | disk | memory | hybrid
 
         slicing = self.wf.get("temporal_slicing", {})
         self.use_temporal_slicing = bool(slicing.get("enabled", False))
@@ -165,32 +195,52 @@ class NeuromorphicEncoder:
 
     def _print_config(self):
         cfg = self.cfg
-        sep = "=" * 60
+        W = 64
+        sep  = "=" * W
+        sep2 = "-" * W
+
         print(sep)
-        print("Pipeline Configuration")
+        print(f"  PIPELINE CONFIG  —  {self.framework.upper()}  [{self.data_format}]")
         print(sep)
 
-        print(f"  Framework          : {self.framework}  →  layout [{self.data_format}]")
+        # ── Dataset ─────────────────────────────────────────────────────────
         print(f"  Dataset            : {cfg.DATASET_NAME}")
         print(f"  Device             : {cfg.DEVICE}")
 
-        print(f"\n  -- Framing --")
+        # ── Framing ─────────────────────────────────────────────────────────
+        print(sep2)
         if self.frame_mode == "n_time_bins":
-            print(f"  Mode               : n_time_bins  (fixed T={self.n_time_bins})")
+            print(f"  Framing mode       : n_time_bins  →  fixed T = {self.n_time_bins}")
         else:
-            print(f"  Mode               : time_window  ({self.time_window_us / 1000:.1f} ms per frame, variable T)")
+            print(f"  Framing mode       : time_window  →  {self.time_window_us / 1000:.1f} ms/frame  (variable T)")
 
-        print(f"\n  -- Architecture --")
-        print(f"  Sensor             : {cfg.SENSOR_H}x{cfg.SENSOR_W}  ({cfg.IN_CHANNELS} ch)")
-        print(f"  Conv1              : {cfg.CONV1_OUT} filters  {cfg.CONV1_KERNEL}x{cfg.CONV1_KERNEL}")
-        print(f"  Conv2              : {cfg.CONV2_OUT} filters  {cfg.CONV2_KERNEL}x{cfg.CONV2_KERNEL}")
-        print(f"  Pool kernel        : {cfg.POOL_KERNEL}")
-        print(f"  FC_IN (auto)       : {cfg.FC_IN}")
+        # ── Architecture ────────────────────────────────────────────────────
+        print(sep2)
+        print(f"  Sensor             : {cfg.SENSOR_H} × {cfg.SENSOR_W}  ({cfg.IN_CHANNELS} polarity channels)")
+        print(f"  Conv1              : out={cfg.CONV1_OUT}  kernel={cfg.CONV1_KERNEL}×{cfg.CONV1_KERNEL}")
+        print(f"  Conv2              : out={cfg.CONV2_OUT}  kernel={cfg.CONV2_KERNEL}×{cfg.CONV2_KERNEL}")
+        print(f"  Pool kernel        : {cfg.POOL_KERNEL}×{cfg.POOL_KERNEL}")
+        print(f"  FC_IN (auto)       : {cfg.FC_IN}   ← computed from conv/pool dims, not hardcoded")
+        print(f"  Output classes     : {cfg.OUTPUT_SIZE}")
         print(f"  Threshold          : {cfg.THRESHOLD}")
 
-        print(f"\n  -- Training --")
+        # ── Neuron params ────────────────────────────────────────────────────
+        print(sep2)
+        if self.framework == "torch":
+            print(f"  SNNTorch  beta     : {cfg.BETA}   (membrane decay per timestep, 0–1)")
+        elif self.framework == "norse":
+            print(f"  Norse  tau_mem_inv : {cfg.TAU_MEM_INV} Hz  (inverse membrane time constant, valid 20–100)")
+        elif self.framework == "spikingjelly":
+            print(f"  SpikingJelly  tau  : {cfg.TAU}   (membrane time constant ratio)")
+
+        # ── Training ────────────────────────────────────────────────────────
+        print(sep2)
+        eff_batch   = cfg.BATCH_SIZE * cfg.GRAD_ACCUM_STEPS
+        total_itera = cfg.EPOCHS * cfg.ITERA
         print(f"  Epochs             : {cfg.EPOCHS}")
-        print(f"  Batch size         : {cfg.BATCH_SIZE}")
+        print(f"  Iterations/epoch   : {cfg.ITERA}   (= 60k samples / batch_size {cfg.BATCH_SIZE})")
+        print(f"  Total iterations   : {total_itera}")
+        print(f"  Batch size         : {cfg.BATCH_SIZE}   effective = {eff_batch}  (×{cfg.GRAD_ACCUM_STEPS} grad_accum)")
         print(f"  Timesteps          : {cfg.TIMESTEPS}")
         print(f"  Learning rate      : {cfg.LEARNING_RATE}")
         print(f"  Weight decay       : {cfg.WEIGHT_DECAY}")
@@ -198,21 +248,24 @@ class NeuromorphicEncoder:
         print(f"  Loss               : {cfg.LOSS_FN}")
         print(f"  Optimizer          : {cfg.OPTIMIZER_TYPE}")
         print(f"  Surrogate          : {cfg.SURROGATE}")
-        print(f"  AMP                : {cfg.USE_AMP}")
+        print(f"  AMP                : {cfg.USE_AMP}{'   ← safe for this framework' if not cfg.USE_AMP else '   ← watch for float16 underflow in deep SNNs'}")
+        print(f"  num_workers        : {cfg.NUM_WORKERS}{'   ← single-process (Colab-safe)' if cfg.NUM_WORKERS == 0 else '   ← multiprocess prefetch'}")
 
-        print(f"\n  -- Neuron params ({self.framework}) --")
-        if self.framework == "torch":
-            print(f"  beta               : {cfg.BETA}")
-        elif self.framework == "norse":
-            print(f"  tau_mem_inv        : {cfg.TAU_MEM_INV} Hz")
-        elif self.framework == "spikingjelly":
-            print(f"  tau                : {cfg.TAU}")
+        # ── Preprocessing / augmentation ─────────────────────────────────────
+        print(sep2)
+        print(f"  Denoise filter     : {self.denoise_filter_time_us} µs  (removes noise events closer than this)")
+        aug_str = f"ON  ±{self.rotation_deg}° rotation (training only)" if self.augmentation_enabled else "OFF"
+        print(f"  Augmentation       : {aug_str}")
+        sli_str = f"ON  {self.slice_duration_ms} ms slices" if self.use_temporal_slicing else "OFF  (n_time_bins framing used)"
+        print(f"  Temporal slicing   : {sli_str}")
 
-        print(f"\n  -- Preprocessing --")
-        print(f"  Denoise filter     : {self.denoise_filter_time_us} us")
-        print(f"  Augmentation       : {'ON  rotation=+-' + str(self.rotation_deg) + 'deg' if self.augmentation_enabled else 'OFF'}")
-        print(f"  Temporal slicing   : {'ON  ' + str(self.slice_duration_ms) + ' ms' if self.use_temporal_slicing else 'OFF'}")
+        # ── Cache config ──────────────────────────────────────────────────────
+        print(sep2)
+        fm = self.force_mode if self.force_mode else "null  (adaptive — will probe RAM at startup)"
+        print(f"  Cache force_mode   : {fm}")
         print(f"  Cache path         : {self.cache_path}")
+        print(f"  Memory safety margin : {self.memory_safety_margin_gb} GB  (reserved for OS + model)")
+        print(f"  Memory cache threshold: {self.memory_cache_threshold_gb} GB  (min free RAM to consider memory mode)")
 
         print(sep)
 
@@ -221,6 +274,7 @@ class NeuromorphicEncoder:
         raw_train, raw_test, frame_tf = self.load_raw()
         train_data, test_data = self.apply_pipeline(raw_train, raw_test, frame_tf)
         self.create_loaders(train_data, test_data)
+        self._print_ready_banner()
 
     def load_raw(self):
         """Load raw event datasets with no transform — caching and slicing come later."""
@@ -267,14 +321,6 @@ class NeuromorphicEncoder:
         Caching always wraps raw datasets so all slices from one recording
         share a single cache entry.
         """
-        max_recs = self.coordinator.max_recordings(avg_recording_bytes=self.avg_recording_bytes)
-        cache_path = self.cache_path if Path(self.cache_path).is_absolute() else str(PROJECT_ROOT / self.cache_path.lstrip("./"))
-        controller = AdaptiveCacheController(
-            cache_path=cache_path,
-            max_cached_recordings=max_recs,
-            verbose=True,
-        )
-
         if self.augmentation_enabled:
             aug_only_tf = transforms.Compose([
                 torch.from_numpy,
@@ -294,10 +340,33 @@ class NeuromorphicEncoder:
         else:
             full_train_tf = frame_tf
 
+        # Build the dataset that the cache will actually wrap — before creating the controller —
+        # so we can probe the real per-sample byte size and give the coordinator an accurate budget.
+        # Slicing path: cache stores raw events (timestamps needed for slicing).
+        # No-slicing path: _FramedDataset bakes ToFrame in; cache stores framed [T,C,H,W] tensors.
+        if self.use_temporal_slicing:
+            probe_dataset = raw_train
+        else:
+            framed_train = _FramedDataset(raw_train, frame_tf)
+            framed_test  = _FramedDataset(raw_test,  frame_tf)
+            probe_dataset = framed_train
+
+        avg_bytes = _probe_sample_bytes(probe_dataset, fallback=self.avg_recording_bytes)
+        max_recs  = self.coordinator.max_recordings(avg_recording_bytes=avg_bytes)
+
+        cache_path = self.cache_path if Path(self.cache_path).is_absolute() else str(PROJECT_ROOT / self.cache_path.lstrip("./"))
+        controller = AdaptiveCacheController(
+            cache_path=cache_path,
+            memory_safety_margin_gb=self.memory_safety_margin_gb,
+            memory_cache_threshold_gb=self.memory_cache_threshold_gb,
+            max_cached_recordings=max_recs,
+            verbose=True,
+        )
+
         if self.use_temporal_slicing:
             # Layer 1: cache raw events (slicing needs raw timestamps)
-            cached_train = controller.wrap_dataset(raw_train, split="train")
-            cached_test  = controller.wrap_dataset(raw_test,  split="test")
+            cached_train = controller.wrap_dataset(raw_train, split="train", force_mode=self.force_mode)
+            cached_test  = controller.wrap_dataset(raw_test,  split="test",  force_mode=self.force_mode)
 
             # Layer 2: stateless slicing with transforms applied per slice
             train_data = create_sliced_dataset(
@@ -316,13 +385,10 @@ class NeuromorphicEncoder:
             )
             logger.info(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
         else:
-            # No slicing: bake frame_tf into the dataset so the cache stores framed tensors,
-            # not raw event structs.  Matches old pipeline: DiskCachedDataset(framed_ds, aug_tf).
-            # ToFrame (expensive) runs once per sample; aug (RandomRotation) re-runs each epoch.
-            framed_train = _FramedDataset(raw_train, frame_tf)
-            framed_test  = _FramedDataset(raw_test,  frame_tf)
-            train_data = controller.wrap_dataset(framed_train, transform=aug_only_tf, split="train")
-            test_data  = controller.wrap_dataset(framed_test,  transform=None,        split="test")
+            # ToFrame (expensive) runs once per sample via _FramedDataset; cache stores the result.
+            # Augmentation (RandomRotation) re-runs on every access — fresh rotation each epoch.
+            train_data = controller.wrap_dataset(framed_train, transform=aug_only_tf, split="train", force_mode=self.force_mode)
+            test_data  = controller.wrap_dataset(framed_test,  transform=None,        split="test",  force_mode=self.force_mode)
 
         return train_data, test_data
 
@@ -366,6 +432,51 @@ class NeuromorphicEncoder:
         logger.info(f"[PIPELINE] Train batches : {len(self.train_loader)}")
         logger.info(f"[PIPELINE] Test batches  : {len(self.test_loader)}")
         logger.info(f"[PIPELINE] Batch size    : {batch_size}")
+
+        # Human-readable DataLoader summary
+        W = 64
+        print("-" * W)
+        print("  DataLoader config (final — after YAML cap):")
+        print(f"    Train batches      : {len(self.train_loader)}")
+        print(f"    Test  batches      : {len(self.test_loader)}")
+        print(f"    batch_size         : {batch_size}")
+        print(f"    num_workers        : {dl_cfg.get('num_workers', 0)}")
+        print(f"    pin_memory         : {dl_cfg.get('pin_memory', False)}")
+        print(f"    persistent_workers : {dl_cfg.get('persistent_workers', False)}")
+        if "prefetch_factor" in dl_cfg:
+            print(f"    prefetch_factor    : {dl_cfg['prefetch_factor']}")
+        collate_name = "Padded (variable T)" if self.frame_mode == "time_window" else "Fixed-T stack"
+        print(f"    collate            : {collate_name}  →  layout [{self.data_format}]")
+        if self.frame_mode == "n_time_bins":
+            T = self.n_time_bins
+        else:
+            T = "variable"
+        C, H, W_s = self.cfg.IN_CHANNELS, self.cfg.SENSOR_H, self.cfg.SENSOR_W
+        if self.data_format == "TB":
+            shape = f"[T={T}, B={batch_size}, C={C}, H={H}, W={W_s}]"
+        else:
+            shape = f"[B={batch_size}, T={T}, C={C}, H={H}, W={W_s}]"
+        print(f"    batch tensor shape : {shape}")
+
+    def _print_ready_banner(self):
+        W = 64
+        sep = "=" * W
+        print(sep)
+        print("  PIPELINE READY")
+        print(sep)
+        print(f"  Framework          : {self.framework.upper()}")
+        print(f"  Train batches      : {len(self.train_loader)}  × batch {self.cfg.BATCH_SIZE}  = {len(self.train_loader) * self.cfg.BATCH_SIZE} samples/epoch")
+        print(f"  Test  batches      : {len(self.test_loader)}")
+        print(f"  Epochs planned     : {self.cfg.EPOCHS}  ({len(self.train_loader) * self.cfg.EPOCHS} total iterations)")
+        fm = self.force_mode.upper() if self.force_mode else "ADAPTIVE"
+        print(f"  Cache mode         : {fm}")
+        if self.force_mode == "disk" or (not self.force_mode):
+            print(f"  Epoch 1 speed      : SLOW  (ToFrame runs for every sample → disk write)")
+            print(f"  Epoch 2+ speed     : FAST  (load framed tensor from cache → augment only)")
+        elif self.force_mode == "memory":
+            print(f"  Epoch 1 speed      : SLOW  (ToFrame runs for every cold-cache sample)")
+            print(f"  Epoch 2+ speed     : VERY FAST  (framed tensors in RAM)")
+        print(sep)
 
     def get_dataloaders(self) -> tuple[DataLoader, DataLoader]:
         """Return (train_loader, test_loader) for use in the training loop."""

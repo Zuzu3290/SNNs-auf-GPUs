@@ -1,8 +1,15 @@
 import sys
 import os
+import logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",   # clean output — no timestamp prefix cluttering the log
+    force=True,
+)
 
 from skeleton import Settings
 from learning.frameworks.snn_torch import SNN_TORCH

@@ -26,14 +26,23 @@ temporal_slicing:
 
 cache:
   path: "./cache"
-  avg_recording_bytes: 50000     # estimated bytes per raw recording — used for memory budgeting
+  avg_recording_bytes: 50000     # fallback only — pipeline auto-probes real sample size at startup
+                                 # used only if probing fails (empty dataset, corrupt first sample)
   memory_safety_margin_gb: 2.0
   memory_cache_threshold_gb: 8.0
   max_cached_recordings: 500
   force_mode: null       # null | memory | disk | hybrid | no_cache
-                         # null = adaptive: probes RAM at startup and chooses strategy automatically
-                         # disk = DiskCachedDataset: safe on Colab (12GB). Use null on machines >32GB RAM.
+                         #
+                         # null  = adaptive (recommended on workstations ≥32GB RAM)
+                         #         probes available RAM, GPU pressure, dataset size → picks best strategy
+                         #         → memory mode on 64GB workstation: epoch 2+ in ~5-15s (full dataset in RAM)
+                         #         → hybrid mode on 32GB: disk + hot RAM buffer
+                         #
+                         # disk  = force DiskCachedDataset regardless of available RAM (use on Colab ≤16GB)
+                         #         safe: workers don't duplicate cache; epoch 2+ ~120-160s
+                         #
+                         # memory = force in-memory LRU cache (only if you are certain RAM is sufficient)
+                         # hybrid = force disk + RAM buffer (explicit override for hybrid)
+                         # no_cache = disable caching entirely (slow: ToFrame reruns every epoch)
 
-dataloader:
-  batch_size: 128
-  num_workers: 4         # overridden at runtime by PipelineMemoryCoordinator
+# batch_size and num_workers live in SNN_module.yaml (training section) — not here.

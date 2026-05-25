@@ -13,12 +13,12 @@ architecture:
   pool_kernel:  2
 
   output_size:  10
-  threshold:    0.5   # old pipeline value — change to 1.0 after validation test
+  threshold:    1.0   # canonical default across all three frameworks
 
 training:
   framework: norse           # torch | norse | spikingjelly  ← one line to switch everything
 
-  epochs: 5
+  epochs: 3
   iterations_per_epoch: 937  # 60000 / batch_size=64 = full N-MNIST epoch
   timesteps: 16              # fixed T — used as n_time_bins in data_workflow.yaml
   batch_size: 64
@@ -26,8 +26,8 @@ training:
   weight_decay: 0.0001
   num_classes: 10
   device: cuda
-  num_workers: 4
-  use_amp: true
+  num_workers: 0
+  use_amp: false
   grad_accum_steps: 1
   lr_scheduler: cosine
 

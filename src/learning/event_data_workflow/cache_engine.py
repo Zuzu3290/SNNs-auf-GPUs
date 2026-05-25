@@ -152,6 +152,20 @@ class PipelineMemoryCoordinator:
             logger.info(f"  GPU pressure    : {gp * 100:.0f}%{note}")
 
 
+class _TransformDataset(Dataset):
+    """Applies transform on every __getitem__ with no caching — used by no_cache mode."""
+    def __init__(self, dataset: Dataset, transform):
+        self.dataset   = dataset
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int):
+        events, target = self.dataset[idx]
+        return self.transform(events), target
+
+
 class BoundedRecordingCache(Dataset):
     """
         cached_raw = BoundedRecordingCache(raw_dataset, max_recordings=500)
@@ -298,7 +312,7 @@ class AdaptiveCacheController:
 
         for idx in sample_indices:
             try:
-                events, target = dataset[int(idx)]
+                events, _ = dataset[int(idx)]
                 if hasattr(events, 'nbytes'):
                     total_bytes += events.nbytes
                 elif hasattr(events, 'element_size'):
@@ -338,16 +352,26 @@ class AdaptiveCacheController:
             self._log_diagnostics(metrics, dataset_size_gb)
 
         if force_mode:
+            logger.info(f"[CACHE] force_mode='{force_mode}' set in YAML — skipping adaptive selection")
             return self._create_forced_strategy(force_mode, metrics, dataset_size_gb)
 
         available_for_cache = metrics.available_ram_gb - self.memory_safety_margin
+        logger.info(f"[CACHE] Adaptive strategy selection:")
+        logger.info(f"[CACHE]   Available RAM      : {available_for_cache:.1f} GB  "
+                    f"({metrics.available_ram_gb:.1f} GB total − {self.memory_safety_margin:.1f} GB margin)")
+        logger.info(f"[CACHE]   Dataset size       : ~{dataset_size_gb:.2f} GB  (probed from samples)")
+        logger.info(f"[CACHE]   Memory threshold   : {self.memory_threshold:.1f} GB  (min RAM to consider memory mode)")
 
         # GPU pressure guard: if GPU is using >75% of VRAM, CUDA's pinned-memory
         # allocator competes directly with the recording cache for physical RAM.
         # Skip all RAM-heavy strategies and go straight to disk.
         if metrics.gpu_memory_gb > 0:
             gpu_used_fraction = 1.0 - (metrics.gpu_available_gb / metrics.gpu_memory_gb)
+            logger.info(f"[CACHE]   GPU pressure      : {gpu_used_fraction*100:.0f}%  "
+                        f"({metrics.gpu_memory_gb - metrics.gpu_available_gb:.1f}/{metrics.gpu_memory_gb:.1f} GB used)")
             if gpu_used_fraction > 0.75 and metrics.disk_exists:
+                logger.info(f"[CACHE]   → GPU >75% used — skipping memory/hybrid to avoid CUDA/RAM competition")
+                logger.info(f"[CACHE]   → DISK selected")
                 return CacheStrategy(
                     mode="disk",
                     memory_cache_enabled=False,
@@ -356,9 +380,15 @@ class AdaptiveCacheController:
                     reason=(f"GPU under pressure ({gpu_used_fraction*100:.0f}% VRAM used) — "
                             "disk cache chosen to avoid CUDA/RAM competition")
                 )
+        else:
+            logger.info(f"[CACHE]   GPU pressure      : N/A  (no GPU detected)")
 
-        if (available_for_cache >= self.memory_threshold and
-                dataset_size_gb < available_for_cache * 0.7):
+        ram_ok      = available_for_cache >= self.memory_threshold
+        fits_in_ram = dataset_size_gb < available_for_cache * 0.7
+        logger.info(f"[CACHE]   RAM check          : {available_for_cache:.1f} >= {self.memory_threshold:.1f} GB  → {'PASS' if ram_ok else 'FAIL'}")
+        logger.info(f"[CACHE]   Fits in 70%% RAM   : {dataset_size_gb:.2f} GB < {available_for_cache * 0.7:.2f} GB  → {'PASS' if fits_in_ram else 'FAIL'}")
+        if (ram_ok and fits_in_ram):
+            logger.info(f"[CACHE]   → MEMORY selected  (full dataset in RAM, fastest epoch 2+)")
             return CacheStrategy(
                 mode="memory",
                 memory_cache_enabled=True,
@@ -367,9 +397,12 @@ class AdaptiveCacheController:
                 reason=f"Sufficient RAM available ({available_for_cache:.1f}GB free, dataset ~{dataset_size_gb:.1f}GB)"
             )
 
-        if (metrics.total_ram_gb >= 32.0 and
-                metrics.disk_exists and
-                metrics.disk_available_gb > dataset_size_gb * 1.5):
+        large_ram   = metrics.total_ram_gb >= 32.0
+        disk_ok     = metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.5
+        logger.info(f"[CACHE]   Large RAM (≥32GB) : {metrics.total_ram_gb:.1f} GB  → {'YES' if large_ram else 'NO'}")
+        logger.info(f"[CACHE]   Disk available    : {metrics.disk_available_gb:.1f} GB  (need ≥{dataset_size_gb * 1.5:.1f} GB)  → {'YES' if disk_ok else 'NO'}")
+        if (large_ram and disk_ok):
+            logger.info(f"[CACHE]   → HYBRID selected  (RAM buffer + disk backup)")
             return CacheStrategy(
                 mode="hybrid",
                 memory_cache_enabled=True,
@@ -378,7 +411,10 @@ class AdaptiveCacheController:
                 reason=f"Large RAM ({metrics.total_ram_gb:.1f}GB) with disk backup - using hybrid strategy"
             )
 
-        if metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.2:
+        disk_fallback = metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.2
+        logger.info(f"[CACHE]   Disk fallback     : need ≥{dataset_size_gb * 1.2:.1f} GB  → {'YES' if disk_fallback else 'NO'}")
+        if disk_fallback:
+            logger.info(f"[CACHE]   → DISK selected  (limited RAM, disk available)")
             return CacheStrategy(
                 mode="disk",
                 memory_cache_enabled=False,
@@ -387,6 +423,7 @@ class AdaptiveCacheController:
                 reason=f"Limited RAM ({available_for_cache:.1f}GB) but disk available ({metrics.disk_available_gb:.1f}GB)"
             )
 
+        logger.info(f"[CACHE]   → NO_CACHE  (insufficient RAM and disk — ToFrame reruns every epoch!)")
         return CacheStrategy(
             mode="no_cache",
             memory_cache_enabled=False,
@@ -399,7 +436,7 @@ class AdaptiveCacheController:
         self,
         mode: str,
         metrics: CacheMetrics,
-        dataset_size_gb: float
+        dataset_size_gb: float,
     ) -> CacheStrategy:
         """Create strategy based on forced mode"""
         strategies = {
@@ -439,7 +476,8 @@ class AdaptiveCacheController:
         dataset: Dataset,
         transform: Optional[object] = None,
         split: str = "train",
-        strategy: Optional[CacheStrategy] = None
+        strategy: Optional[CacheStrategy] = None,
+        force_mode: Optional[Literal["memory", "disk", "hybrid", "no_cache"]] = None,
     ) -> Dataset:
         """
         Wrap dataset with appropriate caching mechanism based on strategy.
@@ -462,7 +500,7 @@ class AdaptiveCacheController:
             )
 
         if strategy is None:
-            strategy = self.determine_strategy(dataset)
+            strategy = self.determine_strategy(dataset, force_mode=force_mode)
 
         cache_dir = self.cache_path / split
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -492,19 +530,25 @@ class AdaptiveCacheController:
         elif strategy.mode == "hybrid":
             if self.verbose:
                 logger.info("[CACHE CONTROLLER] Using Hybrid → disk cache + bounded recording buffer")
+            # Disk stores pre-transform tensors; transform applied by BoundedRecordingCache so
+            # augmentation (RandomRotation etc.) re-runs each access — no stale tensors across epochs.
             disk_cached = DiskCachedDataset(
                 dataset,
-                transform=transform,
+                transform=None,
                 cache_path=str(cache_dir)
             )
             return BoundedRecordingCache(
                 disk_cached,
                 max_recordings=self.max_cached_recordings,
+                transform=transform,
             )
 
         else:  # no_cache
             if self.verbose:
                 logger.info("[CACHE CONTROLLER] No caching → On-the-fly processing (may be slower)")
+            if transform is not None:
+                # Still apply the transform (e.g. augmentation) on every access even without caching.
+                return _TransformDataset(dataset, transform)
             return dataset
 
     def _log_diagnostics(self, metrics: CacheMetrics, dataset_size_gb: float):
