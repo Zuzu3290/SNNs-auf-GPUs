@@ -47,6 +47,60 @@ Copy the template block below, fill in every field, paste at the **top** of the 
 
 ---
 
+## EXP-005 · 2026-05-25 · SNNTorch — Individual-optimal config (mse_count + subtract reset + AMP)
+
+**Strategy:** First run of SNNTorch with its **library-optimal** parameters (Table A of FRAMEWORK_CONFIG_ANALYSIS.md), not the fair-comparison defaults. Goal is to measure SNNTorch's peak accuracy on this Conv-SNN when freed from cross-framework parity constraints. Direct head-to-head against EXP-001 (same SNNTorch + same architecture but fair-comparison config: cross_entropy + hard reset + no AMP). The gap = how much SNNTorch is held back by fairness constraints.
+
+**Changes vs EXP-001:**
+
+| Param | EXP-001 (fair) | EXP-005 (optimal) | Why optimal for SNNTorch |
+|---|---|---|---|
+| `threshold` | 0.5 | **1.0** | SNNTorch amplifies inputs 20× at the membrane (beta=0.95 → V_eq = 20·I); threshold=1.0 keeps neurons selective rather than hyper-active. Norse would die at 1.0 (EXP-004) but SNNTorch thrives here. |
+| `loss_fn` | cross_entropy | **mse_count** | SNNTorch's canonical loss; trains explicit per-class spike-rate targets (80% correct, 20% incorrect) |
+| `reset_mode` | (zero — was default) | **subtract** | SNNTorch's native soft-reset; preserves overshoot voltage → input magnitude encoded in spike count |
+| `use_amp` | false | **true** | Faster training; SNNTorch's atan surrogate has bounded gradients safe in float16 (unverified — first test) |
+| `epochs` | 5 | 5 | Matched for fair head-to-head |
+
+| Param | Value |
+|---|---|
+| framework | torch |
+| threshold | 1.0 ← raised from 0.5 (EXP-001) — SNNTorch tolerates this due to 20× input amplification |
+| beta (SNNTorch) | 0.95 |
+| reset_mode | subtract |
+| timesteps (n_time_bins) | 16 |
+| batch_size | 64 |
+| iterations_per_epoch | 937 (full epoch) |
+| epochs | 5 |
+| learning_rate | 0.001 |
+| weight_decay | 0.0001 |
+| lr_scheduler | cosine |
+| use_amp | true ← first verification on SNNTorch |
+| loss_fn | mse_count (correct_rate=0.8, incorrect_rate=0.2) |
+| optimizer | adam |
+| surrogate | atan (hardcoded) |
+| num_workers | 0 |
+| cache force_mode | null (adaptive — likely disk on GTX 1650 4GB VRAM) |
+| augmentation | ON ±10° rotation |
+
+| Epoch | Train Loss | Train Acc | Spike Rate | LR | Duration (s) |
+|---|---|---|---|---|---|
+| 1 | | | | | |
+| 2 | | | | | |
+| 3 | | | | | |
+| 4 | | | | | |
+| 5 | | | | | |
+
+**Test accuracy:**  
+**Energy/sample:**  
+**Avg latency/sample:**  
+**Notes:**  
+- **Baseline to beat:** EXP-001 = 98.25% test acc, 86.81 pJ/sample, 0.327 ms/sample (fair-comparison SNNTorch)
+- **Hypothesis:** mse_count + soft reset should give SNNTorch a small edge over cross_entropy + hard reset (a few tenths of a percent) — large gap would indicate the fair-comparison constraints were significantly limiting.
+- **AMP verification:** If accuracy regresses noticeably vs EXP-001, suspect AMP first — disable and re-run as EXP-005b.
+- **Hardware note:** Running on GTX 1650 (4 GB VRAM) + 15.7 GB RAM; expect adaptive cache to select disk mode (GPU pressure threshold or RAM constraint).
+
+---
+
 ## EXP-004 · 2026-05-25 · Norse — New Pipeline, threshold:1.0 (FAILED — dead neuron)
 
 **Strategy:** First Norse run on the fully fixed `pipeline-fixes-improvments` pipeline. Goal was to establish a new Norse baseline with the improved caching, corrected `force_mode` wiring, and a standardized `threshold: 1.0` across all three frameworks (up from 0.5 in EXP-002). All other params kept at EXP-002 values. Adaptive cache (`force_mode: null`) selected MEMORY mode — first real test of in-memory caching on Colab.

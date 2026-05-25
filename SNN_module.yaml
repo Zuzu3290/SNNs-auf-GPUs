@@ -13,16 +13,21 @@ architecture:
   pool_kernel:  2
 
   output_size:  10
-  threshold:    0.5   # !! norse might require 0.5, not sure yet !! canonical default across all three frameworks
-  reset_mode:   zero  # zero (hard reset: V→0) | subtract (soft reset: V−=threshold)
-                      # Norse only supports 'zero' (library limitation) — using 'subtract' with framework=norse will crash.
-                      # 'zero' is the fair-comparison default (all 3 frameworks behave the same).
-                      # See src/learning/FRAMEWORK_CONFIG_ANALYSIS.md §5 for details.
+  threshold:    1.0   # Voltage at which a neuron fires. NOT portable across frameworks — same value = very different behavior.
+                      # SNNTorch (beta=0.95): amplifies input 20× at membrane → 1.0 is comfortably reachable (this is SNNTorch's individual-optimal range).
+                      # Norse (tau_mem_inv=50): no amplification → 1.0 KILLS Norse (EXP-004 confirmed: dead neurons, 9% acc). Use 0.3–0.5 for Norse.
+                      # SpikingJelly (tau=2.0): no amplification → 1.0 is borderline; 0.5 safer.
+                      # Fair comparison: 0.5 across all three (conservative for everyone).
+                      # See src/learning/FRAMEWORK_CONFIG_ANALYSIS.md §1 for the full math.
+  reset_mode:   subtract  # zero (hard reset: V→0) | subtract (soft reset: V−=threshold)
+                          # Norse only supports 'zero' (library limitation) — using 'subtract' with framework=norse will crash.
+                          # 'zero' is the fair-comparison default; 'subtract' is SNNTorch's native (best for SNNTorch peak performance).
+                          # See src/learning/FRAMEWORK_CONFIG_ANALYSIS.md §5 for details.
 
 training:
-  framework: norse           # torch | norse | spikingjelly  ← one line to switch everything
+  framework: torch           # torch | norse | spikingjelly  ← one line to switch everything
 
-  epochs: 3
+  epochs: 5
   iterations_per_epoch: 937  # 60000 / batch_size=64 = full N-MNIST epoch
   timesteps: 16              # fixed T — used as n_time_bins in data_workflow.yaml
   batch_size: 64
@@ -31,12 +36,12 @@ training:
   num_classes: 10
   device: cuda
   num_workers: 0
-  use_amp: false
+  use_amp: true
   grad_accum_steps: 1
   lr_scheduler: cosine
 
   # Playground — swap any of these without touching Python code
-  loss_fn:   cross_entropy   # cross_entropy (all 3) | mse_count (SNNTorch only — crashes on Norse/SpikingJelly by design)
+  loss_fn:   mse_count       # cross_entropy (all 3) | mse_count (SNNTorch only — crashes on Norse/SpikingJelly by design)
   optimizer: adam            # adam | adamw | sgd
   # surrogate: atan          # INACTIVE — surrogate is hardcoded per framework (SNNTorch=atan, Norse=SuperSpike, SpikingJelly=ATan)
                              # See src/learning/FRAMEWORK_CONFIG_ANALYSIS.md §2 for why each framework was pinned to its choice.
