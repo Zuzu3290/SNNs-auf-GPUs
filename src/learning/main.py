@@ -18,7 +18,7 @@ def main():
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model = SNN_NORSE(cfg)
+    model = SNN_SJ(cfg)
     trainer              = model.get_trainer(train_loader)
     inference            = model.get_inference(test_loader)
     adversarial_evaluator = model.get_adversarial_evaluator(test_loader)
@@ -48,5 +48,6 @@ if __name__ == "__main__":
     print("\n✓ Testing complete!")
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
     print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")
+    print(f"  Avg Firing Rate : {test_results['avg_firing_rate_hz']:.2f} Hz")
 
     adversarial_evaluator.evaluate()

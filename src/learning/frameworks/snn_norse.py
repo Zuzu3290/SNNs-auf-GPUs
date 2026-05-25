@@ -1,4 +1,4 @@
-# import math  # was used for LIFParameters tau_mem_inv conversion
+import math
 
 import norse.torch as norse
 import torch
@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
 from learning.training import SNNTrainer
+from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
 
 
 class _NorseNet(nn.Module):
@@ -27,24 +28,20 @@ class _NorseNet(nn.Module):
     POOL_KERNEL:  int = 2
     FC_IN:        int = 32 * 5 * 5
 
-    # def __init__(self, lif_params: norse.LIFParameters, num_classes: int):
-    def __init__(self, num_classes: int):
+    def __init__(self, lif_params: norse.LIFParameters, num_classes: int):
         super().__init__()
 
         self.conv1   = nn.Conv2d(self.IN_CHANNELS, self.CONV1_OUT, self.CONV1_KERNEL)
-        # self.lif1  = norse.LIFCell(p=lif_params)
-        self.lif1    = norse.IzhikevichCell(spiking_method=norse.tonic_spiking)
+        self.lif1    = norse.LIFCell(p=lif_params)
         self.pool1   = nn.MaxPool2d(self.POOL_KERNEL)
 
         self.conv2   = nn.Conv2d(self.CONV1_OUT, self.CONV2_OUT, self.CONV2_KERNEL)
-        # self.lif2  = norse.LIFCell(p=lif_params)
-        self.lif2    = norse.IzhikevichCell(spiking_method=norse.tonic_spiking)
+        self.lif2    = norse.LIFCell(p=lif_params)
         self.pool2   = nn.MaxPool2d(self.POOL_KERNEL)
 
         self.flatten = nn.Flatten()
         self.fc      = nn.Linear(self.FC_IN, num_classes)
-        # self.lif_out = norse.LIFCell(p=lif_params)
-        self.lif_out = norse.IzhikevichCell(spiking_method=norse.tonic_spiking)
+        self.lif_out = norse.LIFCell(p=lif_params)
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """
@@ -82,23 +79,18 @@ class SNN_NORSE(nn.Module):
         self.cfg    = cfg
         self.device = torch.device(cfg.DEVICE)
 
-        # --- Previous: LIFParameters for LIFCell ---
-        # TODO: temporary parameter conversion — replace with framework-specific config sections.
-        # Norse and SNNTorch use different coordinate systems for the same physical quantity:
-        #   SNNTorch: beta (dimensionless, 0–1)     Norse: tau_mem_inv (Hz, typically 10–1000)
-        # The conversion is nonlinear, so a single shared YAML value cannot fairly control both.
-        # Proper fix: add snntorch/norse sub-sections to SNN_module.yaml and expose them via
-        # Settings, so each framework reads its own independently tuned parameters.
-        # dt          = 0.001
-        # tau_mem_inv = -math.log(cfg.BETA) / dt
-        # lif_params = norse.LIFParameters(
-        #     tau_mem_inv=torch.as_tensor(tau_mem_inv),
-        #     v_th=torch.as_tensor(cfg.THRESHOLD),
-        # )
-        # self.net = _NorseNet(lif_params, cfg.NUM_CLASSES).to(self.device)
+        # Convert beta (SNNTorch convention, 0–1) to tau_mem_inv (Norse convention, Hz).
+        # tau_mem_inv = -ln(beta) / dt  where dt=0.001s gives ~51 Hz for beta=0.95.
+        # TODO: add a norse-specific section to SNN_module.yaml so tau_mem_inv can be
+        # tuned independently from the SNNTorch beta value.
+        dt          = 0.001
+        tau_mem_inv = -math.log(cfg.BETA) / dt
+        lif_params  = norse.LIFParameters(
+            tau_mem_inv = torch.as_tensor(tau_mem_inv, dtype=torch.float32),
+            v_th        = torch.as_tensor(cfg.THRESHOLD, dtype=torch.float32),
+        )
 
-        # --- Current: IzhikevichCell with tonic_spiking behavior ---
-        self.net = _NorseNet(cfg.NUM_CLASSES).to(self.device)
+        self.net = _NorseNet(lif_params, cfg.NUM_CLASSES).to(self.device)
 
         self.optimizer = torch.optim.Adam(
             self.net.parameters(),
@@ -110,7 +102,11 @@ class SNN_NORSE(nn.Module):
         # Simpler gradient signal than mse_count_loss; typically converges faster for classification.
         self.loss_fn = lambda spk_rec, targets: F.cross_entropy(spk_rec.sum(0), targets)
 
+        # net.lif1 and net.lif2 are the hidden LIFCell layers inside _NorseNet
+        register_activity_hooks(self, {'lif1': self.net.lif1, 'lif2': self.net.lif2})
+
     def forward(self, data: torch.Tensor) -> torch.Tensor:
+        clear_hidden_spikes(self)
         return self.net(data)
 
     def get_trainer(self, train_loader) -> SNNTrainer:

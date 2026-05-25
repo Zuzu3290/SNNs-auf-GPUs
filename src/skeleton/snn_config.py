@@ -54,6 +54,12 @@ class Settings:
         self.TRADES_LAMBDA            = float(training.get("trades_lambda", 6.0))
         self.TRADES_STEPS             = int(training.get("trades_steps", 10))
 
+        self.ACTIVITY_REG_ENABLED     = bool(training.get("activity_reg_enabled", False))
+        self.ACTIVITY_REG_MIN_RATE    = float(training.get("activity_reg_min_rate", 0.01))
+        self.ACTIVITY_REG_MAX_RATE    = float(training.get("activity_reg_max_rate", 0.50))
+        self.ACTIVITY_REG_LAMBDA_LOW  = float(training.get("activity_reg_lambda_low", 0.1))
+        self.ACTIVITY_REG_LAMBDA_HIGH = float(training.get("activity_reg_lambda_high", 0.1))
+
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
         self.DATA_PATH = dataset.get("data_path", "./data")

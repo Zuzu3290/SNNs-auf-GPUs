@@ -8,6 +8,7 @@ from skeleton.snn_config import Settings
 from learning.inference import SNNTester
 from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
 from learning.training import SNNTrainer
+from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
 
 
 class SNN_TORCH(nn.Module):
@@ -54,16 +55,20 @@ class SNN_TORCH(nn.Module):
             weight_decay=cfg.WEIGHT_DECAY,
         )
         self.loss_fn = SF.mse_count_loss(correct_rate=0.8, incorrect_rate=0.2)
-        
+
+        # net[1] = lif1 (after conv1), net[4] = lif2 (after conv2)
+        register_activity_hooks(self, {'lif1': self.net[1], 'lif2': self.net[4]})
+
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """Iterate over timesteps and collect output spikes."""
+        clear_hidden_spikes(self)
         spk_rec = []
         utils.reset(self.net)  # reset LIF hidden states between batches
- 
+
         for step in range(data.size(0)):   # dim 0 = timesteps [T, B, C, H, W]
             spk_out, *_ = self.net(data[step])  # Alpha returns (spk, syn, mem)
             spk_rec.append(spk_out)
- 
+
         return torch.stack(spk_rec)
     
     def get_trainer(self, train_loader) -> SNNTrainer:

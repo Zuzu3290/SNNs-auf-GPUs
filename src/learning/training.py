@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
+from learning.frameworks.activity_reg import get_hidden_spike_recordings, activity_regularization
 
 logger = logging.getLogger(__name__)
 
@@ -174,11 +175,31 @@ class SNNTrainer:
                             F.softmax(clean_logits.detach(),    dim=1),
                             reduction="batchmean",
                         )
-                        loss_val = (ce_loss + self.cfg.TRADES_LAMBDA * kl_loss) / accum
+                        act_penalty = torch.tensor(0.0, device=self.device)
+                        if self.cfg.ACTIVITY_REG_ENABLED:
+                            hidden      = get_hidden_spike_recordings(self.model)
+                            act_penalty = activity_regularization(
+                                hidden,
+                                min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
+                                max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
+                                lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
+                                lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
+                            )
+                        loss_val = (ce_loss + self.cfg.TRADES_LAMBDA * kl_loss + act_penalty) / accum
                 else:
                     with autocast_ctx:
-                        spk_rec  = self.model(data)
-                        loss_val = self.model.loss_fn(spk_rec, targets) / accum
+                        spk_rec   = self.model(data)
+                        task_loss = self.model.loss_fn(spk_rec, targets)
+                        if self.cfg.ACTIVITY_REG_ENABLED:
+                            hidden      = get_hidden_spike_recordings(self.model)
+                            task_loss   = task_loss + activity_regularization(
+                                hidden,
+                                min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
+                                max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
+                                lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
+                                lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
+                            )
+                        loss_val = task_loss / accum
 
                 self.scaler.scale(loss_val).backward()
                 step_count += 1
@@ -221,11 +242,17 @@ class SNNTrainer:
 
             train_spike = epoch_spike / n
 
+            # Convert mean spike fraction to Hz: (spikes/timestep) / (seconds/timestep)
+            window_s        = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
+            timesteps       = getattr(self.cfg, 'TIMESTEPS', 25)
+            firing_rate_hz  = train_spike * timesteps / window_s
+
             self.epoch_log.append({
                 "epoch":            epoch + 1,
                 "train_loss":       round(train_loss,     4),
                 "train_accuracy":   round(train_acc,      4),
                 "spike_rate":       round(train_spike,    4),
+                "firing_rate_hz":   round(firing_rate_hz, 2),
                 "learning_rate":    round(current_lr,     6),
                 "epoch_duration_s": round(epoch_duration, 2),
             })
@@ -234,6 +261,7 @@ class SNNTrainer:
             print(f"  • Train Loss     : {train_loss:.4f}")
             print(f"  • Train Accuracy : {train_acc * 100:.2f}%")
             print(f"  • Spike Rate     : {train_spike:.4f}")
+            print(f"  • Firing Rate    : {firing_rate_hz:.2f} Hz")
             print(f"  • LR             : {current_lr:.6f}")
             print(f"  • Duration       : {epoch_duration:.2f}s")
 

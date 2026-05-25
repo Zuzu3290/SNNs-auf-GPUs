@@ -86,6 +86,9 @@ class SNNTester:
                 possible_spikes = T * B * self.num_classes
                 spike_rate      = batch_spikes / possible_spikes
                 energy_pj       = batch_spikes * ENERGY_PER_SPIKE_PJ
+
+                window_s       = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
+                firing_rate_hz = spike_rate * T / window_s
  
                 logits = aggregate_spike_output(spk_rec.float())
                 preds  = logits.argmax(dim=1).cpu()
@@ -109,15 +112,16 @@ class SNNTester:
                     "spikes_activated":      batch_spikes,
                     "possible_spikes":       possible_spikes,
                     "spike_rate":            round(spike_rate, 4),
+                    "firing_rate_hz":        round(firing_rate_hz, 2),
                     "latency_ms":            round(latency_ms, 3),
                     "latency_per_sample_ms": round(latency_ms / B, 3),
                     "energy_pJ":             round(energy_pj, 2),
                 })
- 
+
                 print(f"  Batch {batch_idx:>3} | "
                       f"Acc: {acc * 100:.2f}% | "
                       f"Spikes: {batch_spikes:>6} | "
-                      f"Rate: {spike_rate:.3f} | "
+                      f"Rate: {spike_rate:.3f} ({firing_rate_hz:.1f} Hz) | "
                       f"Latency: {latency_ms:.1f}ms | "
                       f"Energy: {energy_pj:.1f}pJ")
  
@@ -128,6 +132,9 @@ class SNNTester:
         avg_latency_ms         = total_latency_ms / len(self.batch_log)
         avg_latency_per_sample = total_latency_ms / total_samples
         avg_spikes_per_sample  = total_spikes / total_samples
+        avg_spike_rate         = total_spikes / (len(self.batch_log) * self.cfg.TIMESTEPS * self.num_classes) if self.batch_log else 0.0
+        window_s               = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
+        avg_firing_rate_hz     = avg_spike_rate * self.cfg.TIMESTEPS / window_s
         class_metrics          = self._class_metrics(cm)
         gt_dist                = {c: int((all_targets == c).sum()) for c in range(self.num_classes)}
         pred_dist              = {c: int((all_preds   == c).sum()) for c in range(self.num_classes)}
@@ -137,6 +144,7 @@ class SNNTester:
         print(f"  • Total Samples           : {total_samples}")
         print(f"  • Total Spikes Activated  : {total_spikes:,}")
         print(f"  • Avg Spikes / Sample     : {avg_spikes_per_sample:.2f}")
+        print(f"  • Avg Firing Rate         : {avg_firing_rate_hz:.2f} Hz")
         print(f"  • Avg Batch Latency       : {avg_latency_ms:.2f} ms")
         print(f"  • Avg Latency / Sample    : {avg_latency_per_sample:.3f} ms")
         print(f"  • Total Energy Estimate   : {total_energy_pj:.1f} pJ")

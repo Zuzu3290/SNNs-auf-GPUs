@@ -14,9 +14,9 @@ architecture:
 training:
   loss_function: CrossEntropy
   optimizer: Adam
-  epochs: 1
-  iterations_per_epoch: 200
-  timesteps: 25 
+  epochs: 5
+  iterations_per_epoch: 100
+  timesteps: 25
   batch_size: 128
   beta: 0.95
   nap_times: 1
@@ -25,7 +25,7 @@ training:
   num_classes: 10
   # TRADES robustness training — penalises the network for changing its prediction under input corruption.
   # Loss = CrossEntropy(clean) + lambda * KL(clean || adversarial).
-  trades_enabled: true          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
+  trades_enabled: false          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
 
   trades_epsilon: 0.05          # Perturbation budget: max allowed input corruption per element.
                                 # Range: 0.001 (near-imperceptible) → 0.3 (heavy corruption).
@@ -35,6 +35,12 @@ training:
 
   trades_steps: 10              # PGD iterations used to find worst-case input per batch. Recommended: 10 for training.
                                 # Range: 1 (fast, weaker adversarial) → 40 (slow, strongest adversarial).
+
+  activity_reg_enabled: true    # Two-sided per-neuron activity regularization on hidden LIF layers.
+  activity_reg_min_rate: 0.01   # Penalize neurons firing less than 1% of timesteps  (dead neuron prevention).
+  activity_reg_max_rate: 0.50   # Penalize neurons firing more than 50% of timesteps (saturation prevention).
+  activity_reg_lambda_low: 0.1  # Penalty weight for dead neurons.
+  activity_reg_lambda_high: 0.1 # Penalty weight for saturated neurons.
 dataset:
   dataset_name: MNIST
   data_path:
