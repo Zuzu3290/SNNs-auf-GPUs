@@ -27,6 +27,7 @@ class Settings:
         self.POOL_KERNEL = int(architecture.get("pool_kernel",  2))
         self.OUTPUT_SIZE = int(architecture.get("output_size",  10))
         self.THRESHOLD   = float(architecture.get("threshold",  1.0))
+        self.RESET_MODE  = str(architecture.get("reset_mode",   "zero"))  # "zero" | "subtract"; Norse only supports "zero"
 
         # FC_IN computed from architecture — change conv/pool params above, this updates automatically
         _h = (self.SENSOR_H - self.CONV1_KERNEL + 1) // self.POOL_KERNEL

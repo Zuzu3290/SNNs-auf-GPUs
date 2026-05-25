@@ -134,8 +134,8 @@ class PipelineMemoryCoordinator:
             "pin_memory": gpu,
             "persistent_workers": max_workers > 0,
         }
-        if self.verbose:
-            logger.info(f"[MEMORY COORDINATOR] DataLoader config: {cfg}")
+        # No print: final DataLoader config is shown by data_pipeline.py after YAML cap.
+        # The pre-cap suggestion here is misleading when training.num_workers in YAML is lower.
         return cfg
 
     def prefetch_queue_size(self) -> int:
@@ -261,6 +261,11 @@ class AdaptiveCacheController:
         self.memory_threshold = memory_cache_threshold_gb
         self.max_cached_recordings = max_cached_recordings
         self.verbose = verbose
+        # Tracks last selected strategy per split so callers can show actual mode in summaries.
+        self.last_strategies: dict[str, CacheStrategy] = {}
+        # Print full system diagnostics only on the first determine_strategy() call.
+        # RAM/Disk/GPU don't change meaningfully between train and test split calls (~1s apart).
+        self._diagnostics_printed = False
 
         self.cache_path.mkdir(parents=True, exist_ok=True)
 
@@ -348,27 +353,35 @@ class AdaptiveCacheController:
         metrics = self.get_system_metrics()
         dataset_size_gb = self.estimate_dataset_memory_footprint(dataset)
 
+        is_first_call = not self._diagnostics_printed
         if self.verbose:
-            self._log_diagnostics(metrics, dataset_size_gb)
+            if is_first_call:
+                self._log_diagnostics(metrics, dataset_size_gb)
+                self._diagnostics_printed = True
 
         if force_mode:
             logger.info(f"[CACHE] force_mode='{force_mode}' set in YAML — skipping adaptive selection")
             return self._create_forced_strategy(force_mode, metrics, dataset_size_gb)
 
         available_for_cache = metrics.available_ram_gb - self.memory_safety_margin
-        logger.info(f"[CACHE] Adaptive strategy selection:")
-        logger.info(f"[CACHE]   Available RAM      : {available_for_cache:.1f} GB  "
-                    f"({metrics.available_ram_gb:.1f} GB total − {self.memory_safety_margin:.1f} GB margin)")
+
+        if is_first_call:
+            logger.info(f"[CACHE] Adaptive strategy selection:")
+            logger.info(f"[CACHE]   Available RAM      : {available_for_cache:.1f} GB  "
+                        f"({metrics.available_ram_gb:.1f} GB total − {self.memory_safety_margin:.1f} GB margin)")
+            logger.info(f"[CACHE]   Memory threshold   : {self.memory_threshold:.1f} GB  (min RAM to consider memory mode)")
+        else:
+            logger.info(f"[CACHE] Adaptive strategy selection (subsequent call — RAM/threshold unchanged):")
         logger.info(f"[CACHE]   Dataset size       : ~{dataset_size_gb:.2f} GB  (probed from samples)")
-        logger.info(f"[CACHE]   Memory threshold   : {self.memory_threshold:.1f} GB  (min RAM to consider memory mode)")
 
         # GPU pressure guard: if GPU is using >75% of VRAM, CUDA's pinned-memory
         # allocator competes directly with the recording cache for physical RAM.
         # Skip all RAM-heavy strategies and go straight to disk.
         if metrics.gpu_memory_gb > 0:
             gpu_used_fraction = 1.0 - (metrics.gpu_available_gb / metrics.gpu_memory_gb)
-            logger.info(f"[CACHE]   GPU pressure      : {gpu_used_fraction*100:.0f}%  "
-                        f"({metrics.gpu_memory_gb - metrics.gpu_available_gb:.1f}/{metrics.gpu_memory_gb:.1f} GB used)")
+            if is_first_call:
+                logger.info(f"[CACHE]   GPU pressure      : {gpu_used_fraction*100:.0f}%  "
+                            f"({metrics.gpu_memory_gb - metrics.gpu_available_gb:.1f}/{metrics.gpu_memory_gb:.1f} GB used)")
             if gpu_used_fraction > 0.75 and metrics.disk_exists:
                 logger.info(f"[CACHE]   → GPU >75% used — skipping memory/hybrid to avoid CUDA/RAM competition")
                 logger.info(f"[CACHE]   → DISK selected")
@@ -380,7 +393,7 @@ class AdaptiveCacheController:
                     reason=(f"GPU under pressure ({gpu_used_fraction*100:.0f}% VRAM used) — "
                             "disk cache chosen to avoid CUDA/RAM competition")
                 )
-        else:
+        elif is_first_call:
             logger.info(f"[CACHE]   GPU pressure      : N/A  (no GPU detected)")
 
         ram_ok      = available_for_cache >= self.memory_threshold
@@ -502,6 +515,7 @@ class AdaptiveCacheController:
         if strategy is None:
             strategy = self.determine_strategy(dataset, force_mode=force_mode)
 
+        self.last_strategies[split] = strategy
         cache_dir = self.cache_path / split
         cache_dir.mkdir(parents=True, exist_ok=True)
 

@@ -11,12 +11,6 @@ from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
 from learning.training import SNNTrainer
 
 
-def _surrogate(name: str):
-    if name == "fast_sigmoid":
-        return surrogate.fast_sigmoid()
-    return surrogate.atan()
-
-
 def _optimizer(params, cfg: Settings):
     lr, wd = cfg.LEARNING_RATE, cfg.WEIGHT_DECAY
     if cfg.OPTIMIZER_TYPE == "adamw":
@@ -26,10 +20,16 @@ def _optimizer(params, cfg: Settings):
     return torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999), weight_decay=wd)
 
 
-def _loss(name: str):
-    if name == "mse_count":
+def _loss(cfg: Settings):
+    # SNNTorch forward returns [T, B, num_classes] — sum over T (dim 0) for rate decoding.
+    # No fallback: unsupported loss_fn crashes loudly so misconfig is obvious.
+    if cfg.LOSS_FN == "cross_entropy":
+        return lambda spk_rec, targets: F.cross_entropy(spk_rec.sum(0), targets)
+    if cfg.LOSS_FN == "mse_count":
         return SF.mse_count_loss(correct_rate=0.8, incorrect_rate=0.2)
-    return lambda spk_rec, targets: F.cross_entropy(spk_rec.sum(0), targets)
+    raise NotImplementedError(
+        f"loss_fn={cfg.LOSS_FN!r} not implemented for SNNTorch — use 'cross_entropy' or 'mse_count'"
+    )
 
 
 class SNN_TORCH(nn.Module):
@@ -40,25 +40,37 @@ class SNN_TORCH(nn.Module):
         self.cfg = cfg
         self.device = torch.device(cfg.DEVICE)
 
-        spike_grad  = _surrogate(cfg.SURROGATE)
+        # Surrogate is hardcoded across all 3 frameworks for fair comparison.
+        # YAML 'surrogate' param is inactive — see FRAMEWORK_CONFIG_ANALYSIS.md §2.
+        spike_grad  = surrogate.atan()
+        print("[SNNTorch] Surrogate gradient is hardcoded to 'atan' (YAML 'surrogate' inactive)")
         beta        = cfg.BETA
         threshold   = cfg.THRESHOLD
         num_classes = cfg.NUM_CLASSES
 
+        # Reset mode from YAML — SNNTorch supports both "zero" (hard) and "subtract" (soft).
+        # No fallback: unknown reset_mode crashes loudly.
+        if cfg.RESET_MODE not in ("zero", "subtract"):
+            raise NotImplementedError(
+                f"reset_mode={cfg.RESET_MODE!r} not supported for SNNTorch — use 'zero' or 'subtract'"
+            )
+        reset_mech = cfg.RESET_MODE
+        print(f"[SNNTorch] Reset mode: '{reset_mech}' (from YAML architecture.reset_mode)")
+
         self.net = nn.Sequential(
             nn.Conv2d(cfg.IN_CHANNELS, cfg.CONV1_OUT, cfg.CONV1_KERNEL),
-            snn.Leaky(beta=beta, threshold=threshold, spike_grad=spike_grad, init_hidden=True),
+            snn.Leaky(beta=beta, threshold=threshold, spike_grad=spike_grad, init_hidden=True, reset_mechanism=reset_mech),
             nn.MaxPool2d(cfg.POOL_KERNEL),
             nn.Conv2d(cfg.CONV1_OUT, cfg.CONV2_OUT, cfg.CONV2_KERNEL),
-            snn.Leaky(beta=beta, threshold=threshold, spike_grad=spike_grad, init_hidden=True),
+            snn.Leaky(beta=beta, threshold=threshold, spike_grad=spike_grad, init_hidden=True, reset_mechanism=reset_mech),
             nn.MaxPool2d(cfg.POOL_KERNEL),
             nn.Flatten(),
             nn.Linear(cfg.FC_IN, num_classes),
-            snn.Leaky(beta=beta, threshold=threshold, spike_grad=spike_grad, init_hidden=True, output=True),
+            snn.Leaky(beta=beta, threshold=threshold, spike_grad=spike_grad, init_hidden=True, output=True, reset_mechanism=reset_mech),
         ).to(self.device)
 
         self.optimizer = _optimizer(self.net.parameters(), cfg)
-        self.loss_fn   = _loss(cfg.LOSS_FN)
+        self.loss_fn   = _loss(cfg)
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """Iterate over timesteps and collect output spikes."""

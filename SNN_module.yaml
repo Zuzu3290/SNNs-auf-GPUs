@@ -14,6 +14,10 @@ architecture:
 
   output_size:  10
   threshold:    0.5   # !! norse might require 0.5, not sure yet !! canonical default across all three frameworks
+  reset_mode:   zero  # zero (hard reset: V→0) | subtract (soft reset: V−=threshold)
+                      # Norse only supports 'zero' (library limitation) — using 'subtract' with framework=norse will crash.
+                      # 'zero' is the fair-comparison default (all 3 frameworks behave the same).
+                      # See src/learning/FRAMEWORK_CONFIG_ANALYSIS.md §5 for details.
 
 training:
   framework: norse           # torch | norse | spikingjelly  ← one line to switch everything
@@ -32,9 +36,11 @@ training:
   lr_scheduler: cosine
 
   # Playground — swap any of these without touching Python code
-  loss_fn:   cross_entropy   # cross_entropy | mse_count  (mse_count: SNNTorch only)
+  loss_fn:   cross_entropy   # cross_entropy (all 3) | mse_count (SNNTorch only — crashes on Norse/SpikingJelly by design)
   optimizer: adam            # adam | adamw | sgd
-  surrogate: atan            # atan | fast_sigmoid  (SNNTorch + SpikingJelly only)
+  # surrogate: atan          # INACTIVE — surrogate is hardcoded per framework (SNNTorch=atan, Norse=SuperSpike, SpikingJelly=ATan)
+                             # See src/learning/FRAMEWORK_CONFIG_ANALYSIS.md §2 for why each framework was pinned to its choice.
+                             # To re-enable as a config param: wire cfg.SURROGATE back into snn_torch.py + snn_spikingjelly.py + add method= to Norse LIFParameters.
 
 # Per-framework neuron parameters — each framework uses its own coordinate system.
 # Converting between them (e.g. beta → tau_mem_inv) is incorrect: different input models

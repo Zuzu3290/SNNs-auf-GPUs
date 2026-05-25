@@ -223,6 +223,7 @@ class NeuromorphicEncoder:
         print(f"  FC_IN (auto)       : {cfg.FC_IN}   ← computed from conv/pool dims, not hardcoded")
         print(f"  Output classes     : {cfg.OUTPUT_SIZE}")
         print(f"  Threshold          : {cfg.THRESHOLD}")
+        print(f"  Reset mode         : {cfg.RESET_MODE}")
 
         # ── Neuron params ────────────────────────────────────────────────────
         print(sep2)
@@ -247,9 +248,9 @@ class NeuromorphicEncoder:
         print(f"  LR scheduler       : {cfg.LR_SCHEDULER}")
         print(f"  Loss               : {cfg.LOSS_FN}")
         print(f"  Optimizer          : {cfg.OPTIMIZER_TYPE}")
-        print(f"  Surrogate          : {cfg.SURROGATE}")
-        print(f"  AMP                : {cfg.USE_AMP}{'   ← safe for this framework' if not cfg.USE_AMP else '   ← watch for float16 underflow in deep SNNs'}")
-        print(f"  num_workers        : {cfg.NUM_WORKERS}{'   ← single-process (Colab-safe)' if cfg.NUM_WORKERS == 0 else '   ← multiprocess prefetch'}")
+        print(f"  Surrogate          : (hardcoded per framework — see framework init print)")
+        print(f"  AMP                : {cfg.USE_AMP}")
+        print(f"  num_workers (YAML) : {cfg.NUM_WORKERS}")
 
         # ── Preprocessing / augmentation ─────────────────────────────────────
         print(sep2)
@@ -362,6 +363,8 @@ class NeuromorphicEncoder:
             max_cached_recordings=max_recs,
             verbose=True,
         )
+        # Save controller reference so _print_ready_banner can show actually-selected cache mode.
+        self._controller = controller
 
         if self.use_temporal_slicing:
             # Layer 1: cache raw events (slicing needs raw timestamps)
@@ -429,17 +432,10 @@ class NeuromorphicEncoder:
             **dl_cfg,
         )
 
-        logger.info(f"[PIPELINE] Train batches : {len(self.train_loader)}")
-        logger.info(f"[PIPELINE] Test batches  : {len(self.test_loader)}")
-        logger.info(f"[PIPELINE] Batch size    : {batch_size}")
-
-        # Human-readable DataLoader summary
+        # DataLoader summary — train/test batch counts shown in PIPELINE READY banner instead.
         W = 64
         print("-" * W)
         print("  DataLoader config (final — after YAML cap):")
-        print(f"    Train batches      : {len(self.train_loader)}")
-        print(f"    Test  batches      : {len(self.test_loader)}")
-        print(f"    batch_size         : {batch_size}")
         print(f"    num_workers        : {dl_cfg.get('num_workers', 0)}")
         print(f"    pin_memory         : {dl_cfg.get('pin_memory', False)}")
         print(f"    persistent_workers : {dl_cfg.get('persistent_workers', False)}")
@@ -468,14 +464,27 @@ class NeuromorphicEncoder:
         print(f"  Train batches      : {len(self.train_loader)}  × batch {self.cfg.BATCH_SIZE}  = {len(self.train_loader) * self.cfg.BATCH_SIZE} samples/epoch")
         print(f"  Test  batches      : {len(self.test_loader)}")
         print(f"  Epochs planned     : {self.cfg.EPOCHS}  ({len(self.train_loader) * self.cfg.EPOCHS} total iterations)")
-        fm = self.force_mode.upper() if self.force_mode else "ADAPTIVE"
-        print(f"  Cache mode         : {fm}")
-        if self.force_mode == "disk" or (not self.force_mode):
+
+        # Show the cache mode the controller actually selected (not just "ADAPTIVE").
+        train_strategy = getattr(self, "_controller", None) and self._controller.last_strategies.get("train")
+        if train_strategy:
+            mode_label = train_strategy.mode.upper()
+            selection_note = "forced via YAML" if self.force_mode else "adaptive selection"
+            print(f"  Cache mode         : {mode_label}  ({selection_note})")
+            actual_mode = train_strategy.mode
+        else:
+            actual_mode = self.force_mode or "disk"
+            print(f"  Cache mode         : {actual_mode.upper()}")
+
+        if actual_mode == "disk":
             print(f"  Epoch 1 speed      : SLOW  (ToFrame runs for every sample → disk write)")
             print(f"  Epoch 2+ speed     : FAST  (load framed tensor from cache → augment only)")
-        elif self.force_mode == "memory":
+        elif actual_mode == "memory":
             print(f"  Epoch 1 speed      : SLOW  (ToFrame runs for every cold-cache sample)")
             print(f"  Epoch 2+ speed     : VERY FAST  (framed tensors in RAM)")
+        elif actual_mode == "hybrid":
+            print(f"  Epoch 1 speed      : SLOW  (ToFrame + disk write)")
+            print(f"  Epoch 2+ speed     : VERY FAST for hot samples (RAM), FAST for cold (disk)")
         print(sep)
 
     def get_dataloaders(self) -> tuple[DataLoader, DataLoader]:

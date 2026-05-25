@@ -17,6 +17,16 @@ def _optimizer(params, cfg: Settings):
     return torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999), weight_decay=wd)
 
 
+def _loss(cfg: Settings):
+    # Norse forward returns [T, B, num_classes] — sum over T (dim 0) for rate decoding.
+    # No fallback: unsupported loss_fn crashes loudly so misconfig is obvious.
+    if cfg.LOSS_FN == "cross_entropy":
+        return lambda spk_rec, targets: F.cross_entropy(spk_rec.float().sum(0), targets)
+    raise NotImplementedError(
+        f"loss_fn={cfg.LOSS_FN!r} not implemented for Norse — use 'cross_entropy'"
+    )
+
+
 class _NorseNet(nn.Module):
     """
     All Norse layers in one module — mirrors the role of nn.Sequential in SNN_TORCH.
@@ -77,18 +87,35 @@ class SNN_NORSE(nn.Module):
         self.cfg    = cfg
         self.device = torch.device(cfg.DEVICE)
 
-        # Both params come from SNN_module.yaml — no hardcoded fallbacks, no conversions.
+        # Reset mode from YAML — Norse only supports "zero" (hard reset, V→v_reset=0).
+        # Soft reset is a library limitation — crash loudly if requested.
+        if cfg.RESET_MODE == "subtract":
+            raise NotImplementedError(
+                "reset_mode='subtract' not supported for Norse — LIFCell only does hard reset. Use 'zero'."
+            )
+        if cfg.RESET_MODE != "zero":
+            raise NotImplementedError(
+                f"reset_mode={cfg.RESET_MODE!r} not supported for Norse — use 'zero'"
+            )
+        print("[Norse] Reset mode: 'zero' (hard reset to v_reset=0.0; Norse library limitation)")
+
+        # All params come from SNN_module.yaml — no hardcoded fallbacks, no conversions.
         # tau_mem_inv is under frameworks.norse; threshold is shared across frameworks.
         lif_params = norse.LIFParameters(
             tau_mem_inv=torch.as_tensor(cfg.TAU_MEM_INV),
             v_th=torch.as_tensor(cfg.THRESHOLD),
+            v_reset=torch.as_tensor(0.0),
         )
+
+        # Surrogate is hardcoded across all 3 frameworks for fair comparison.
+        # Norse uses its library default 'SuperSpike' (we don't pass method= to LIFParameters).
+        # YAML 'surrogate' param is inactive — see FRAMEWORK_CONFIG_ANALYSIS.md §2.
+        print("[Norse] Surrogate gradient is hardcoded to 'SuperSpike' (Norse default; YAML 'surrogate' inactive)")
 
         self.net = _NorseNet(cfg, lif_params).to(self.device)
 
         self.optimizer = _optimizer(self.net.parameters(), cfg)
-        # CrossEntropy on spike counts — sums spikes over T, then maximises correct class logit.
-        self.loss_fn = lambda spk_rec, targets: F.cross_entropy(spk_rec.float().sum(0), targets)
+        self.loss_fn   = _loss(cfg)
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         return self.net(data)

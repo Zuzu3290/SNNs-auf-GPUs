@@ -8,12 +8,6 @@ from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
 from learning.training import SNNTrainer
 
 
-def _surrogate(name: str):
-    if name == "fast_sigmoid":
-        return surrogate.Sigmoid()
-    return surrogate.ATan()
-
-
 def _optimizer(params, cfg: Settings):
     lr, wd = cfg.LEARNING_RATE, cfg.WEIGHT_DECAY
     if cfg.OPTIMIZER_TYPE == "adamw":
@@ -23,32 +17,57 @@ def _optimizer(params, cfg: Settings):
     return torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999), weight_decay=wd)
 
 
+def _loss(cfg: Settings):
+    # SpikingJelly forward returns [B, num_classes] (already summed over T).
+    # No fallback: unsupported loss_fn crashes loudly so misconfig is obvious.
+    if cfg.LOSS_FN == "cross_entropy":
+        return nn.CrossEntropyLoss()
+    raise NotImplementedError(
+        f"loss_fn={cfg.LOSS_FN!r} not implemented for SpikingJelly — use 'cross_entropy'"
+    )
+
+
 class SNN(nn.Module):
 
     def __init__(self, cfg: Settings):
         super().__init__()
         self.cfg = cfg
         self.device = torch.device(cfg.DEVICE)
-        spike_grad  = _surrogate(cfg.SURROGATE)
+        # Surrogate is hardcoded across all 3 frameworks for fair comparison.
+        # YAML 'surrogate' param is inactive — see FRAMEWORK_CONFIG_ANALYSIS.md §2.
+        spike_grad  = surrogate.ATan()
+        print("[SpikingJelly] Surrogate gradient is hardcoded to 'ATan' (YAML 'surrogate' inactive)")
         tau         = cfg.TAU
         num_classes = cfg.NUM_CLASSES
 
+        # Reset mode from YAML — SpikingJelly: v_reset=0.0 → hard reset; v_reset=None → soft reset (subtract).
+        # No fallback: unknown reset_mode crashes loudly.
+        if cfg.RESET_MODE == "zero":
+            v_reset = 0.0
+        elif cfg.RESET_MODE == "subtract":
+            v_reset = None
+        else:
+            raise NotImplementedError(
+                f"reset_mode={cfg.RESET_MODE!r} not supported for SpikingJelly — use 'zero' or 'subtract'"
+            )
+        print(f"[SpikingJelly] Reset mode: '{cfg.RESET_MODE}' (v_reset={v_reset})")
+
         self.net = nn.Sequential(
             nn.Conv2d(cfg.IN_CHANNELS, cfg.CONV1_OUT, cfg.CONV1_KERNEL),
-            neuron.LIFNode(tau=tau, surrogate_function=spike_grad),
+            neuron.LIFNode(tau=tau, v_reset=v_reset, surrogate_function=spike_grad),
             nn.MaxPool2d(cfg.POOL_KERNEL),
 
             nn.Conv2d(cfg.CONV1_OUT, cfg.CONV2_OUT, cfg.CONV2_KERNEL),
-            neuron.LIFNode(tau=tau, surrogate_function=spike_grad),
+            neuron.LIFNode(tau=tau, v_reset=v_reset, surrogate_function=spike_grad),
             nn.MaxPool2d(cfg.POOL_KERNEL),
 
             nn.Flatten(),
             nn.Linear(cfg.FC_IN, num_classes),
-            neuron.LIFNode(tau=tau, surrogate_function=spike_grad),
+            neuron.LIFNode(tau=tau, v_reset=v_reset, surrogate_function=spike_grad),
         ).to(self.device)
 
         self.optimizer = _optimizer(self.net.parameters(), cfg)
-        self.loss_fn   = nn.CrossEntropyLoss()
+        self.loss_fn   = _loss(cfg)
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """Iterate over timesteps and return the SUM of spikes."""
