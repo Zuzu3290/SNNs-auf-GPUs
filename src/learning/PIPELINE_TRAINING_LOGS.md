@@ -47,6 +47,73 @@ Copy the template block below, fill in every field, paste at the **top** of the 
 
 ---
 
+## EXP-007 · 2026-05-26 · SNNTorch — Conceptually-grounded library-canonical config (8 epochs)
+
+**Strategy:** Re-run EXP-005's library-canonical SNNTorch config but with **8 epochs** (instead of 5) and **cosine LR scheduler**, on the principle that conceptual/library-canonical choices should be presented in the final comparison MD even if EXP-001 (cross_entropy + hard reset + no AMP) gave a marginally higher accuracy. Reasoning is defensive — each design choice has principled justification, and the slight energy cost is honest output of those choices, not a bug.
+
+**Conceptual justification for each parameter:**
+
+| Param | Value | Conceptual reason |
+|---|---|---|
+| `threshold` | **1.0** | SNNTorch's library default. With beta=0.95, V_eq = 20·I; threshold=0.5 fires on I>0.025 (noise territory); threshold=1.0 fires on I>0.05 (meaningful signal only). Better noise rejection. |
+| `reset_mode` | **subtract** | SNNTorch's native soft reset. Preserves spike-magnitude info — large inputs produce multiple rapid spikes encoding magnitude. Hard reset throws this information away. |
+| `loss_fn` | **mse_count** | SNNTorch's canonical loss. Enforces rate-coded outputs: correct class fires 80% of timesteps, incorrect 20%. Stricter training criterion than cross-entropy on summed spikes (which is a deep-learning shortcut, not biologically motivated). |
+| `use_amp` | **true** | Library-supported, verified safe in EXP-005 (no underflow, no NaN). Saves training time on supported hardware. |
+| `lr_scheduler` | **cosine** | Standard best practice. Allows the final epochs to settle into a sharper minimum than constant LR. |
+| `epochs` | **8** | EXP-005 at 5 epochs had training loss still decreasing (0.0741 → 0.0691 between ep4-5). 8 epochs should converge fully. |
+| `lr` | 1e-3 | SNNTorch library standard. Proven by EXP-001 and EXP-005. |
+
+| Param | Value |
+|---|---|
+| framework | torch |
+| threshold | 1.0 (library default) |
+| beta (SNNTorch) | 0.95 |
+| reset_mode | subtract (SNNTorch native soft reset) |
+| timesteps (n_time_bins) | 16 |
+| batch_size | 64 |
+| iterations_per_epoch | 937 (full epoch) |
+| epochs | 8 |
+| learning_rate | 0.001 |
+| weight_decay | 0.0001 |
+| lr_scheduler | cosine |
+| use_amp | true |
+| loss_fn | mse_count (correct_rate=0.8, incorrect_rate=0.2) |
+| optimizer | adam |
+| surrogate | atan (hardcoded) |
+| num_workers | 0 |
+| cache force_mode | null (adaptive — likely MEMORY on Colab) |
+| augmentation | ON ±10° rotation |
+
+| Epoch | Train Loss | Train Acc | Spike Rate | LR | Duration (s) |
+|---|---|---|---|---|---|
+| 1 | | | | | |
+| 2 | | | | | |
+| 3 | | | | | |
+| 4 | | | | | |
+| 5 | | | | | |
+| 6 | | | | | |
+| 7 | | | | | |
+| 8 | | | | | |
+
+**Test accuracy:**
+**Energy/sample:**
+**Avg latency/sample:**
+**Avg spikes/sample:**
+**Per-class F1 range:**
+
+**Notes:**
+- **Baseline to beat:** EXP-005 (same config, 5 epochs) = 98.17% test acc, 128.60 pJ/sample. Expected EXP-007 to improve accuracy from extra 3 epochs.
+- **Reference comparison:** EXP-001 (cross_entropy, hard reset, no AMP, 5 ep) = 98.25%, 86.81 pJ/sample. If EXP-007 beats 98.25%, the library-canonical config wins on accuracy. Energy will still be ~50% higher.
+- **Plots to produce for the comparison MD:**
+  - Training metrics curves (loss, acc, spike rate vs epoch) — already auto-saved to `./outputs/plots/training_metrics.png`
+  - Spike raster — auto-saved to `./outputs/plots/spike_raster.png`
+  - Per-class F1 bar chart (manual or from `./outputs/data/test.csv`)
+  - Optional: energy-vs-accuracy scatter comparing all EXPs at their best epochs
+- **Story for final MD:** "SNNTorch was tuned to its library-canonical configuration (mse_count loss enforcing rate-coded outputs, soft reset preserving spike magnitude, threshold=1.0 for noise rejection, AMP for speed) over 8 epochs with cosine LR decay."
+- **Next: EXP-008** = Norse equivalent of this approach. See bottom of NEXT_STEPS.md for proposed Norse config.
+
+---
+
 ## EXP-006 · 2026-05-25 · Norse — Individual-optimal config (Norse library defaults where they work + lower LR)
 
 **Strategy:** First Norse run on the **post-refactor** pipeline (loss_fn config-driven, surrogate hardcoded to SuperSpike for Norse, reset_mode YAML param). Goal is to measure Norse's peak accuracy when configured for Norse-best (Table A) rather than fair-comparison defaults. **Key catch:** Norse's actual library default `v_th=1.0` kills the network (EXP-004 proved this) — so "Norse optimal" means library defaults *where they work* (SuperSpike surrogate, hard reset, tau_mem_inv) + empirical override on threshold (0.5 instead of library 1.0). Also drops LR from `1e-3` → `2e-4` per Table A's recommendation for Norse + SuperSpike stability (sharper gradient → smaller steps).
