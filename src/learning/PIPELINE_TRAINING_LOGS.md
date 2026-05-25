@@ -47,6 +47,71 @@ Copy the template block below, fill in every field, paste at the **top** of the 
 
 ---
 
+## EXP-006 · 2026-05-25 · Norse — Individual-optimal config (Norse library defaults where they work + lower LR)
+
+**Strategy:** First Norse run on the **post-refactor** pipeline (loss_fn config-driven, surrogate hardcoded to SuperSpike for Norse, reset_mode YAML param). Goal is to measure Norse's peak accuracy when configured for Norse-best (Table A) rather than fair-comparison defaults. **Key catch:** Norse's actual library default `v_th=1.0` kills the network (EXP-004 proved this) — so "Norse optimal" means library defaults *where they work* (SuperSpike surrogate, hard reset, tau_mem_inv) + empirical override on threshold (0.5 instead of library 1.0). Also drops LR from `1e-3` → `2e-4` per Table A's recommendation for Norse + SuperSpike stability (sharper gradient → smaller steps).
+
+**Why each value:**
+
+| Param | Value | Reasoning |
+|---|---|---|
+| `framework` | norse | The test |
+| `threshold` | 0.5 | **Library default 1.0 fails** (EXP-004 dead neurons); 0.5 is the proven Norse value (EXP-002 97.31%, EXP-004B 95.71%/3ep) |
+| `tau_mem_inv` | 50 (kept, not raised to 100) | User choice — avoid over-firing risk from higher input gain |
+| `reset_mode` | zero | Norse library limitation — only hard reset supported |
+| `loss_fn` | cross_entropy | Norse library limitation — mse_count would crash |
+| `surrogate` | SuperSpike (hardcoded) | Norse library default; sharp gradient, needs lower LR |
+| `learning_rate` | **2e-4** ← lowered from 1e-3 | Table A: SuperSpike's sharp gradient near V_th can cause oscillation at 1e-3 with Adam; 2e-4 = more stable convergence |
+| `use_amp` | false | Norse + SuperSpike + float16 = silent gradient underflow (Table A §3) |
+| `epochs` | 5 | Match EXP-001/EXP-002 for direct head-to-head |
+| `num_workers` | 0 | Colab safety — MEMORY cache + multi-worker = OOM (EXP-003 confirmed) |
+| `force_mode` | null | Adaptive will pick MEMORY on Colab (12 GB RAM, ~4 GB dataset) |
+
+| Param | Value |
+|---|---|
+| framework | norse |
+| threshold | 0.5 |
+| tau_mem_inv (Norse) | 50.0 Hz |
+| reset_mode | zero |
+| timesteps (n_time_bins) | 16 |
+| batch_size | 64 |
+| iterations_per_epoch | 937 (full epoch) |
+| epochs | 5 |
+| learning_rate | 0.0002 ← lowered from 1e-3 for Norse + SuperSpike stability |
+| weight_decay | 0.0001 |
+| lr_scheduler | cosine |
+| use_amp | false |
+| loss_fn | cross_entropy |
+| optimizer | adam |
+| surrogate | SuperSpike (Norse library default, hardcoded) |
+| num_workers | 0 |
+| cache force_mode | null (adaptive — should pick MEMORY on Colab) |
+| augmentation | ON ±10° rotation |
+
+| Epoch | Train Loss | Train Acc | Spike Rate | LR | Duration (s) |
+|---|---|---|---|---|---|
+| 1 | | | | | |
+| 2 | | | | | |
+| 3 | | | | | |
+| 4 | | | | | |
+| 5 | | | | | |
+
+**Test accuracy:**  
+**Energy/sample:**  
+**Avg latency/sample:**  
+**Notes:**  
+- **Baselines to compare:**
+  - EXP-002 (Norse, threshold 0.5, lr=1e-3, 5ep): **97.31%** test, 55.76 pJ — same config except higher LR
+  - EXP-001 (SNNTorch, threshold 0.5, 5ep): **98.25%** test, 86.81 pJ — different framework
+  - EXP-005 (SNNTorch optimal — pending): SNNTorch with its own best config
+- **Hypothesis:** Lower LR (2e-4 vs 1e-3) should give marginally better/more stable convergence. If Norse-optimal beats EXP-002 by >0.5%, the lower LR was worth it. If accuracy is similar but spike rate is more stable, that's also a Norse win.
+- **AMP verification:** `use_amp=false` is the Norse-safe setting; not testing AMP here. Switching to true would trigger silent gradient underflow risk (see Table A §3).
+- **Possible follow-ups:**
+  - EXP-006b: Same config but raise `tau_mem_inv` from 50 → 100 (Norse library default) to test if it closes the gap with SNNTorch
+  - EXP-006c: Same config but LR=5e-4 (middle of Table A's 2e-4 to 5e-4 range) for stability vs speed tradeoff
+
+---
+
 ## EXP-005 · 2026-05-25 · SNNTorch — Individual-optimal config (mse_count + subtract reset + AMP)
 
 **Strategy:** First run of SNNTorch with its **library-optimal** parameters (Table A of FRAMEWORK_CONFIG_ANALYSIS.md), not the fair-comparison defaults. Goal is to measure SNNTorch's peak accuracy on this Conv-SNN when freed from cross-framework parity constraints. Direct head-to-head against EXP-001 (same SNNTorch + same architecture but fair-comparison config: cross_entropy + hard reset + no AMP). The gap = how much SNNTorch is held back by fairness constraints.
@@ -98,6 +163,57 @@ Copy the template block below, fill in every field, paste at the **top** of the 
 - **Hypothesis:** mse_count + soft reset should give SNNTorch a small edge over cross_entropy + hard reset (a few tenths of a percent) — large gap would indicate the fair-comparison constraints were significantly limiting.
 - **AMP verification:** If accuracy regresses noticeably vs EXP-001, suspect AMP first — disable and re-run as EXP-005b.
 - **Hardware note:** Running on GTX 1650 (4 GB VRAM) + 15.7 GB RAM; expect adaptive cache to select disk mode (GPU pressure threshold or RAM constraint).
+
+---
+
+## EXP-004B · 2026-05-25 · Norse — Retry of EXP-004 with threshold:0.5 (RECOVERED)
+
+**Strategy:** Direct fix retry of EXP-004 (which failed with dead-neuron at threshold=1.0). Only one parameter changed: `threshold: 1.0 → 0.5`. Goal was to confirm the EXP-004 hypothesis that `threshold=1.0` alone killed Norse — if 0.5 trains normally with the same pipeline, the threshold is conclusively the culprit (not the new caching, not the adaptive controller, not the config-driven pipeline). Run on the same `pipeline-fixes-improvments` branch as EXP-004 but **BEFORE the big code refactor** (loss_fn config-driven across all 3, surrogate hardcoded, reset_mode YAML param, logging cleanup). Logs show old patterns: duplicate `ADAPTIVE CACHE CONTROLLER` block, "Cache mode: ADAPTIVE" instead of actual mode, "AMP: False ← safe for this framework" static annotation, etc.
+
+| Param | Value |
+|---|---|
+| framework | norse |
+| threshold | 0.5 ← **changed from 1.0 (EXP-004) — only diff** |
+| tau_mem_inv (Norse) | 50.0 Hz |
+| timesteps (n_time_bins) | 16 |
+| batch_size | 64 |
+| iterations_per_epoch | 937 (full epoch) |
+| epochs | 3 |
+| learning_rate | 0.001 |
+| weight_decay | 0.0001 |
+| lr_scheduler | cosine |
+| use_amp | false |
+| loss_fn | cross_entropy |
+| optimizer | adam |
+| surrogate | atan (still config-driven at this point — Norse ignored it, used SuperSpike default) |
+| num_workers | 0 (YAML cap from 4 — Colab-safe) |
+| cache force_mode | null (adaptive → controller selected MEMORY, 8.8 GB free / dataset ~4.13 GB) |
+| augmentation | ON ±10° rotation |
+| denoise filter | 10000 µs |
+| probe measured | 72 KB/sample |
+
+| Epoch | Train Loss | Train Acc | Spike Rate | LR | Duration (s) |
+|---|---|---|---|---|---|
+| 1 | 0.4622 | 85.03% | 0.0728 | 0.000750 | 972.49 (cold cache fill) |
+| 2 | 0.1979 | 93.98% | 0.0960 | 0.000250 | 482.78 (warm MEMORY cache) |
+| 3 | 0.1616 | 95.03% | 0.0948 | 0.000000 | 489.59 |
+
+**Final training metrics (post-epoch eval pass):** loss 0.1003, accuracy 98.44%, spike rate 0.0967  
+**Test accuracy:** 95.71%  
+**Energy/sample:** 53.82 pJ (total 538,223 pJ over 10,000 samples)  
+**Avg latency/sample:** 0.387 ms (avg batch latency 24.62 ms)  
+**Avg spikes/sample:** 15.38 (total 153,778 spikes)  
+**Per-class F1:** min 0.933 (class 8), max 0.985 (class 1) — all classes ≥ 0.933
+
+**Notes:**
+- **EXP-004 hypothesis confirmed.** Threshold=0.5 trains normally on the EXACT same pipeline that failed at threshold=1.0. The cosine LR scheduler ran to completion, neurons fired (~0.09 spike rate, matching EXP-002), loss decreased monotonically. Conclusively: **threshold=1.0 is the dead-neuron cause for Norse, not anything else in the new pipeline.**
+- **Cache adaptive selection worked correctly.** Controller picked MEMORY mode (8.8 GB free, dataset ~4.13 GB) — confirmed by epoch 2 dropping from 972s to 483s (warm cache, no re-tofame).
+- **Why 3 epochs instead of 5:** quick verification run; not meant for direct EXP-002 comparison.
+- **Vs EXP-002 (5 epochs, same config except 5 epochs): 95.71% (3 epochs) vs 97.31% (5 epochs).** Trajectory matches — extrapolating, EXP-004B at epoch 5 would likely hit ~97%.
+- **Vs EXP-001 (SNNTorch threshold 0.5, 5 epochs): 95.71% (3 epochs Norse) vs 98.25% (5 epochs SNNTorch).** Norse undershoots SNNTorch even at recovered config, consistent with our analysis: SNNTorch's 20× input amplification + soft reset gives it more headroom than Norse with hard reset at the same threshold.
+- **Energy vs EXP-002:** 53.82 pJ/sample vs 55.76 pJ/sample — essentially the same; Norse's per-neuron energy profile is stable across training depth.
+- **Per-class accuracy more uneven than EXP-002:** worst class 8 at F1=0.933 vs EXP-002's worst at F1=0.956. Probably attributable to undertrained model (3 epochs vs 5) rather than a config difference.
+- **Pre-refactor logging note:** This run shows the old log patterns we cleaned up after: duplicate diagnostics blocks, misleading "Cache mode: ADAPTIVE", static "← safe for this framework" annotation, etc. Future runs will be cleaner.
 
 ---
 
