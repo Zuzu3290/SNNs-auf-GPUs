@@ -4,6 +4,7 @@ from spikingjelly.activation_based import neuron, functional, surrogate
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
 from learning.training import SNNTrainer
+from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
 
 class SNN_SJ(nn.Module):
     IN_CHANNELS:    int   = 2
@@ -46,12 +47,16 @@ class SNN_SJ(nn.Module):
         )
         
         # CHANGE 1: Use CrossEntropyLoss (standard for integer labels like 0-9)
-        self.loss_fn = nn.CrossEntropyLoss() 
-        
+        self.loss_fn = nn.CrossEntropyLoss()
+
+        # net[1] = lif1 (after conv1), net[4] = lif2 (after conv2)
+        register_activity_hooks(self, {'lif1': self.net[1], 'lif2': self.net[4]})
+
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """Iterate over timesteps and return the SUM of spikes."""
+        clear_hidden_spikes(self)
         functional.reset_net(self.net)
-        
+
         # data shape is [T, B, C, H, W]
         # We sum the output of each timestep directly into a total count
         sum_spikes = 0
