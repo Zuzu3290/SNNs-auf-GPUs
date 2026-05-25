@@ -3,7 +3,6 @@ import torch.nn as nn
 from spikingjelly.activation_based import neuron, functional, surrogate
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
-from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
 from learning.training import SNNTrainer
 
 class SNN_SJ(nn.Module):
@@ -65,3 +64,7 @@ class SNN_SJ(nn.Module):
 
     def get_inference(self, test_loader) -> SNNTester:
         return SNNTester(self.net, test_loader, self.cfg, self.device)
+
+    def get_adversarial_evaluator(self, test_loader):
+        from learning.adversarial_robustness import AdversarialEvaluator
+        return AdversarialEvaluator(self, test_loader, self.cfg, self.device)

@@ -1,7 +1,6 @@
 import snntorch as snn
 from snntorch import surrogate
 from snntorch import functional as SF
-from snntorch import spikeplot as splt
 from snntorch import utils
 import torch
 import torch.nn as nn
@@ -67,6 +66,10 @@ class SNN_TORCH(nn.Module):
 
     def get_inference(self, test_loader) -> SNNTester:
         return SNNTester(self, test_loader, self.cfg, self.device)
+
+    def get_adversarial_evaluator(self, test_loader):
+        from learning.adversarial_robustness import AdversarialEvaluator
+        return AdversarialEvaluator(self, test_loader, self.cfg, self.device)
 
 
 

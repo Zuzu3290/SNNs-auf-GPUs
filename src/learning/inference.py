@@ -5,8 +5,8 @@ import csv
 import time
 import torch
 import numpy as np
-from snntorch import functional as SF
-from skeleton import Settings 
+from skeleton import Settings
+from learning.training import aggregate_spike_output
 
 # Energy per synaptic op — adjust for your target neuromorphic platform
 ENERGY_PER_SPIKE_PJ = 3.5
@@ -87,9 +87,10 @@ class SNNTester:
                 spike_rate      = batch_spikes / possible_spikes
                 energy_pj       = batch_spikes * ENERGY_PER_SPIKE_PJ
  
-                preds = spk_rec.sum(0).argmax(1).cpu()
-                tgts  = targets.cpu()
-                acc   = SF.accuracy_rate(spk_rec, targets)
+                logits = aggregate_spike_output(spk_rec.float())
+                preds  = logits.argmax(dim=1).cpu()
+                tgts   = targets.cpu()
+                acc    = (preds == tgts).float().mean().item()
  
                 np.add.at(cm, (tgts.numpy(), preds.numpy()), 1)
                 all_preds.append(preds)

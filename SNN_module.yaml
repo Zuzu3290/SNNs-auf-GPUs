@@ -23,6 +23,28 @@ training:
   learning_rate: 0.001
   weight_decay: 0.0001
   num_classes: 10
+  # TRADES robustness training — penalises the network for changing its prediction under input corruption.
+  # Loss = CrossEntropy(clean) + lambda * KL(clean || adversarial).
+  trades_enabled: true          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
+
+  trades_epsilon: 0.1           # Perturbation budget: max allowed input corruption per element.
+                                # Range: 0.001 (near-imperceptible) → 0.3 (heavy corruption).
+                                # Recommended: match the epsilon level where your robustness benchmark starts failing.
+
+  trades_lambda: 6.0            # Balances clean accuracy vs robustness. Higher = more robust, lower clean accuracy.
+                                # Range: 1.0 (favour clean accuracy) → 10.0 (favour robustness).
+                                # Recommended: 6.0 (original TRADES paper default).
+
+  trades_steps: 10              # PGD iterations used to find worst-case input per batch.
+                                # Range: 1 (fast, weaker adversarial) → 40 (slow, strongest adversarial).
+                                # Recommended: 10 for training. Higher values give diminishing returns past 20.
+
+  # Temporal smoothing — averages adjacent timesteps to suppress short-lived sensor noise before the forward pass.
+  temporal_smoothing: false      # Enable temporal smoothing on input event data. Negligible compute cost.
+
+  temporal_smoothing_kernel: 3  # Number of timesteps averaged together (sliding window size).
+                                # Range: 3 (light smoothing, min useful value) → T/2 where T = total timesteps.
+                                # Must be odd. Higher values remove more noise but blur fast transient events.
 
 dataset:
   dataset_name: MNIST

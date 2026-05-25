@@ -19,26 +19,25 @@ def main():
     train_loader, test_loader = encoder.get_dataloaders()
 
     model = SNN_NORSE(cfg)
-    trainer = model.get_trainer(train_loader)
-    inference = model.get_inference(test_loader)
-    
-    print("\n✓ SpikingJelly Model ready.")
+    trainer              = model.get_trainer(train_loader)
+    inference            = model.get_inference(test_loader)
+    adversarial_evaluator = model.get_adversarial_evaluator(test_loader)
+
+    print("\n✓ Norse Model ready.")
     cfg.display()
-    
-    return model, trainer, inference
+
+    return model, trainer, inference, adversarial_evaluator
 
 if __name__ == "__main__":
-    # Ensure a directory for checkpoints exists
     os.makedirs("./checkpoints", exist_ok=True)
 
-    # Initialize the system
-    model, trainer, inference = main()
-    
+    model, trainer, inference, adversarial_evaluator = main()
+
     results = trainer.train(checkpoint_dir="./checkpoints")
 
     print("\n✓ Training complete!")
-    print(f"  Final loss     : {results['loss_history'][-1]:.4f}")
-    print(f"  Final accuracy : {results['accuracy_history'][-1]:.4f}")
+    print(f"  Final loss      : {results['loss_history'][-1]:.4f}")
+    print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}")
     print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
 
     trainer.plot_training()
@@ -49,3 +48,5 @@ if __name__ == "__main__":
     print("\n✓ Testing complete!")
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
     print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")
+
+    adversarial_evaluator.evaluate()
