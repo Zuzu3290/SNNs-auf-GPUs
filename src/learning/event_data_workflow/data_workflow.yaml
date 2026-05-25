@@ -30,9 +30,9 @@ cache:
   memory_safety_margin_gb: 2.0
   memory_cache_threshold_gb: 8.0
   max_cached_recordings: 500
-  force_mode: disk       # null | memory | disk | hybrid | no_cache
-                         # disk = DiskCachedDataset: one shared cache on disk, epoch2+ fast reads,
-                         # no per-worker RAM copies → safe on Colab (12GB). Use null on machines >32GB RAM.
+  force_mode: null       # null | memory | disk | hybrid | no_cache
+                         # null = adaptive: probes RAM at startup and chooses strategy automatically
+                         # disk = DiskCachedDataset: safe on Colab (12GB). Use null on machines >32GB RAM.
 
 dataloader:
   batch_size: 128

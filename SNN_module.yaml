@@ -26,10 +26,10 @@ training:
   weight_decay: 0.0001
   num_classes: 10
   device: cuda
-  num_workers: 0        # 0 = single-process loading, safe on Colab (no worker OOM). Increase on high-RAM machines.
-  use_amp: false  # Norse LIF surrogate gradients underflow in float16 → silent GradScaler skips → no learning
+  num_workers: 4
+  use_amp: true
   grad_accum_steps: 1
-  lr_scheduler: none         # none = old pipeline behavior; switch to cosine after validation test
+  lr_scheduler: cosine
 
   # Playground — swap any of these without touching Python code
   loss_fn:   cross_entropy   # cross_entropy | mse_count  (mse_count: SNNTorch only)
