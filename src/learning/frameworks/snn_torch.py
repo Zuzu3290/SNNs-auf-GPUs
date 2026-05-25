@@ -27,19 +27,24 @@ class SNN_TORCH(nn.Module):
         self.cfg = cfg
         self.device = torch.device(cfg.DEVICE)
 
-        beta        = cfg.BETA
+        # snn.Alpha requires alpha > beta: alpha = membrane decay (slow), beta = synaptic decay (fast)
+        alpha       = cfg.BETA                  # membrane decay  (e.g. 0.95)
+        beta        = max(0.5, cfg.BETA - 0.1)  # synaptic decay, must be < alpha
         num_classes = cfg.NUM_CLASSES
 
         self.net = nn.Sequential(
             nn.Conv2d(self.IN_CHANNELS, self.CONV1_OUT, self.CONV1_KERNEL),
-            snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True),
+            # snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True),
+            snn.Alpha(alpha=alpha, beta=beta, spike_grad=spike_grad, init_hidden=True),
             nn.MaxPool2d(self.POOL_KERNEL),
             nn.Conv2d(self.CONV1_OUT, self.CONV2_OUT, self.CONV2_KERNEL),
-            snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True),
+            # snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True),
+            snn.Alpha(alpha=alpha, beta=beta, spike_grad=spike_grad, init_hidden=True),
             nn.MaxPool2d(self.POOL_KERNEL),
             nn.Flatten(),
             nn.Linear(self.FC_IN, num_classes),
-            snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True, output=True),
+            # snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True, output=True),
+            snn.Alpha(alpha=alpha, beta=beta, spike_grad=spike_grad, init_hidden=True, output=True),
         ).to(self.device)
 
         self.optimizer = torch.optim.Adam(
@@ -56,7 +61,7 @@ class SNN_TORCH(nn.Module):
         utils.reset(self.net)  # reset LIF hidden states between batches
  
         for step in range(data.size(0)):   # dim 0 = timesteps [T, B, C, H, W]
-            spk_out, _ = self.net(data[step])
+            spk_out, *_ = self.net(data[step])  # Alpha returns (spk, syn, mem)
             spk_rec.append(spk_out)
  
         return torch.stack(spk_rec)

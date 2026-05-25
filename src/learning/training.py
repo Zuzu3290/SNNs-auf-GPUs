@@ -145,7 +145,7 @@ class SNNTrainer:
 
             for i, (data, targets) in enumerate(self.train_loader):
                 data    = data.to(self.device, non_blocking=True)
-                targets = targets.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True).long()
 
                 if self.cfg.TRADES_ENABLED:
                     reset = getattr(self.model, "reset_state", None)
