@@ -1,4 +1,4 @@
-import math
+# import math  # was used for LIFParameters tau_mem_inv conversion
 
 import norse.torch as norse
 import torch
@@ -27,20 +27,24 @@ class _NorseNet(nn.Module):
     POOL_KERNEL:  int = 2
     FC_IN:        int = 32 * 5 * 5
 
-    def __init__(self, lif_params: norse.LIFParameters, num_classes: int):
+    # def __init__(self, lif_params: norse.LIFParameters, num_classes: int):
+    def __init__(self, num_classes: int):
         super().__init__()
 
         self.conv1   = nn.Conv2d(self.IN_CHANNELS, self.CONV1_OUT, self.CONV1_KERNEL)
-        self.lif1    = norse.LIFCell(p=lif_params)
+        # self.lif1  = norse.LIFCell(p=lif_params)
+        self.lif1    = norse.IzhikevichCell(spiking_method=norse.tonic_spiking)
         self.pool1   = nn.MaxPool2d(self.POOL_KERNEL)
 
         self.conv2   = nn.Conv2d(self.CONV1_OUT, self.CONV2_OUT, self.CONV2_KERNEL)
-        self.lif2    = norse.LIFCell(p=lif_params)
+        # self.lif2  = norse.LIFCell(p=lif_params)
+        self.lif2    = norse.IzhikevichCell(spiking_method=norse.tonic_spiking)
         self.pool2   = nn.MaxPool2d(self.POOL_KERNEL)
 
         self.flatten = nn.Flatten()
         self.fc      = nn.Linear(self.FC_IN, num_classes)
-        self.lif_out = norse.LIFCell(p=lif_params)
+        # self.lif_out = norse.LIFCell(p=lif_params)
+        self.lif_out = norse.IzhikevichCell(spiking_method=norse.tonic_spiking)
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """
@@ -78,21 +82,23 @@ class SNN_NORSE(nn.Module):
         self.cfg    = cfg
         self.device = torch.device(cfg.DEVICE)
 
+        # --- Previous: LIFParameters for LIFCell ---
         # TODO: temporary parameter conversion — replace with framework-specific config sections.
         # Norse and SNNTorch use different coordinate systems for the same physical quantity:
         #   SNNTorch: beta (dimensionless, 0–1)     Norse: tau_mem_inv (Hz, typically 10–1000)
         # The conversion is nonlinear, so a single shared YAML value cannot fairly control both.
         # Proper fix: add snntorch/norse sub-sections to SNN_module.yaml and expose them via
         # Settings, so each framework reads its own independently tuned parameters.
-        dt          = 0.001                          # 1 ms — Norse default timestep
-        tau_mem_inv = -math.log(cfg.BETA) / dt       # beta=0.95 → ~51.3 Hz
+        # dt          = 0.001
+        # tau_mem_inv = -math.log(cfg.BETA) / dt
+        # lif_params = norse.LIFParameters(
+        #     tau_mem_inv=torch.as_tensor(tau_mem_inv),
+        #     v_th=torch.as_tensor(cfg.THRESHOLD),
+        # )
+        # self.net = _NorseNet(lif_params, cfg.NUM_CLASSES).to(self.device)
 
-        lif_params = norse.LIFParameters(
-            tau_mem_inv=torch.as_tensor(tau_mem_inv),
-            v_th=torch.as_tensor(cfg.THRESHOLD),      # v_th shares the same scale — no conversion needed
-        )
-
-        self.net = _NorseNet(lif_params, cfg.NUM_CLASSES).to(self.device)
+        # --- Current: IzhikevichCell with tonic_spiking behavior ---
+        self.net = _NorseNet(cfg.NUM_CLASSES).to(self.device)
 
         self.optimizer = torch.optim.Adam(
             self.net.parameters(),

@@ -23,16 +23,19 @@ class SNN_SJ(nn.Module):
 
         self.net = nn.Sequential(
             nn.Conv2d(self.IN_CHANNELS, self.CONV1_OUT, self.CONV1_KERNEL),
-            neuron.LIFNode(tau=tau, surrogate_function=spike_grad),
+            # neuron.LIFNode(tau=tau, surrogate_function=spike_grad),
+            neuron.IzhikevichNode(tau=tau, surrogate_function=spike_grad),
             nn.MaxPool2d(self.POOL_KERNEL),
-            
+
             nn.Conv2d(self.CONV1_OUT, self.CONV2_OUT, self.CONV2_KERNEL),
-            neuron.LIFNode(tau=tau, surrogate_function=spike_grad),
+            # neuron.LIFNode(tau=tau, surrogate_function=spike_grad),
+            neuron.IzhikevichNode(tau=tau, surrogate_function=spike_grad),
             nn.MaxPool2d(self.POOL_KERNEL),
-            
+
             nn.Flatten(),
             nn.Linear(self.FC_IN, num_classes),
-            neuron.LIFNode(tau=tau, surrogate_function=spike_grad),
+            # neuron.LIFNode(tau=tau, surrogate_function=spike_grad),
+            neuron.IzhikevichNode(tau=tau, surrogate_function=spike_grad),
         ).to(self.device)
 
         self.optimizer = torch.optim.Adam(
