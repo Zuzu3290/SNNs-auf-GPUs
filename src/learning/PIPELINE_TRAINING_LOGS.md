@@ -47,6 +47,91 @@ Copy the template block below, fill in every field, paste at the **top** of the 
 
 ---
 
+## EXP-008 · 2026-05-26 · Norse — Best-for-our-network config (tau_mem_inv=100, 8 epochs, cosine)
+
+**Strategy:** Norse counterpart to EXP-007 — pick the parameters that give Norse its best performance on OUR specific small Conv-SNN, while respecting Norse's library constraints. Three of four "hard" params are forced by the framework: `use_amp=false` (SuperSpike float16 underflow), `loss_fn=cross_entropy` (library limitation), `reset_mode=zero` (library limitation), `threshold=0.5` (1.0 kills Norse per EXP-004). The real tuning knob is **`tau_mem_inv`**, plus standard practice on `lr_scheduler` and `epochs`.
+
+**Conceptual + empirical justification for each parameter:**
+
+| Param | Value | Reason (conceptual + empirical) |
+|---|---|---|
+| `framework` | norse | — |
+| `threshold` | 0.5 | EXP-004 proved 1.0 = dead neurons. 0.5 is the safe Norse-canonical value. |
+| **`tau_mem_inv`** | **100** ← change from 50 | Norse library default. Conceptually: per-step input gain = dt·tau_mem_inv = 0.1 (vs 0.05 at 50). 2× more activity → better gradient flow through our shallow 3-LIF net. Our previous tau=50 was *under*-driving the neurons (EXP-002 spike rate only 0.094). |
+| `reset_mode` | zero | Norse library limitation (no soft reset) |
+| `loss_fn` | cross_entropy | Norse library limitation (no mse_count) |
+| `use_amp` | false | Norse + SuperSpike + float16 = silent gradient underflow (Table A §3) |
+| `lr` | **1e-3** | Library standard + empirically validated (EXP-002 → 97.31% at lr=1e-3, no oscillation). Matches EXP-007's LR for clean head-to-head. EXP-006's 2e-4 was too low (undertrained). |
+| `lr_scheduler` | **cosine** ← change from none | Standard fine-tuning practice; matches EXP-007 |
+| `epochs` | **8** | Match EXP-007 for fair head-to-head |
+| `weight_decay` | 1e-4 | Standard |
+| `batch_size` | 64 | Standard |
+| `surrogate` | SuperSpike (hardcoded) | Norse library default |
+
+**YAML changes from current EXP-007 config (apply AFTER EXP-007 completes):**
+```yaml
+training:
+  framework: norse              # was: torch
+  learning_rate: 0.001          # was: 0.001 (no change actually)
+  use_amp: false                # was: true
+  loss_fn: cross_entropy        # was: mse_count
+architecture:
+  threshold: 0.5                # was: 1.0
+  reset_mode: zero              # was: subtract
+frameworks:
+  norse:
+    tau_mem_inv: 100.0          # was: 50.0  ← the only NEW change vs EXP-002
+```
+
+| Param | Value |
+|---|---|
+| framework | norse |
+| threshold | 0.5 |
+| tau_mem_inv (Norse) | 100.0 Hz ← Norse library default |
+| reset_mode | zero |
+| timesteps (n_time_bins) | 16 |
+| batch_size | 64 |
+| iterations_per_epoch | 937 (full epoch) |
+| epochs | 8 |
+| learning_rate | 0.001 |
+| weight_decay | 0.0001 |
+| lr_scheduler | cosine |
+| use_amp | false |
+| loss_fn | cross_entropy |
+| optimizer | adam |
+| surrogate | SuperSpike (Norse library default, hardcoded) |
+| num_workers | 0 |
+| cache force_mode | null (adaptive — likely MEMORY on Colab) |
+| augmentation | ON ±10° rotation |
+
+| Epoch | Train Loss | Train Acc | Spike Rate | LR | Duration (s) |
+|---|---|---|---|---|---|
+| 1 | | | | | |
+| 2 | | | | | |
+| 3 | | | | | |
+| 4 | | | | | |
+| 5 | | | | | |
+| 6 | | | | | |
+| 7 | | | | | |
+| 8 | | | | | |
+
+**Test accuracy:**
+**Energy/sample:**
+**Avg latency/sample:**
+**Avg spikes/sample:**
+**Per-class F1 range:**
+
+**Notes:**
+- **Baselines to compare:**
+  - EXP-002 (Norse, lr=1e-3, tau=50, 5 ep, no scheduler) → 97.31%, 55.76 pJ — same except tau, scheduler, epochs
+  - EXP-006 (Norse, lr=2e-4, tau=50, 5 ep, cosine) → 94.05% (undertrained — different LR)
+  - EXP-007 (SNNTorch library-canonical) — direct head-to-head for the comparison MD
+- **Hypothesis:** tau=100 doubles input gain → more activity (~0.15-0.20 spike rate vs EXP-002's 0.094) → better gradient propagation → +0.5-1.0% accuracy over EXP-002. Combined with 8 epochs + cosine, expect ~97.8-98.3% test acc.
+- **Risk to watch:** If spike rate jumps too high (>0.25), accuracy might plateau or drop — too much firing = noise. If that happens, drop tau back to 75 (middle ground).
+- **Plots to produce + save:** Same as EXP-007. **Rename outputs/plots/training_metrics.png → exp008_*.png BEFORE EXP-009 (if any).**
+
+---
+
 ## EXP-007 · 2026-05-26 · SNNTorch — Conceptually-grounded library-canonical config (8 epochs)
 
 **Strategy:** Re-run EXP-005's library-canonical SNNTorch config but with **8 epochs** (instead of 5) and **cosine LR scheduler**, on the principle that conceptual/library-canonical choices should be presented in the final comparison MD even if EXP-001 (cross_entropy + hard reset + no AMP) gave a marginally higher accuracy. Reasoning is defensive — each design choice has principled justification, and the slight energy cost is honest output of those choices, not a bug.

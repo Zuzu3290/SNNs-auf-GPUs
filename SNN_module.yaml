@@ -13,35 +13,35 @@ architecture:
   pool_kernel:  2
 
   output_size:  10
-  threshold:    1.0   # Voltage at which a neuron fires. NOT portable across frameworks — same value = very different behavior.
+  threshold:    0.5   # Voltage at which a neuron fires. NOT portable across frameworks — same value = very different behavior.
                       # SNNTorch (beta=0.95): amplifies input 20× at membrane → 1.0 is comfortably reachable (this is SNNTorch's individual-optimal range).
                       # Norse (tau_mem_inv=50): no amplification → 1.0 KILLS Norse (EXP-004 confirmed: dead neurons, 9% acc). Use 0.3–0.5 for Norse.
                       # SpikingJelly (tau=2.0): no amplification → 1.0 is borderline; 0.5 safer.
                       # Fair comparison: 0.5 across all three (conservative for everyone).
                       # See src/learning/FRAMEWORK_CONFIG_ANALYSIS.md §1 for the full math.
-  reset_mode:   subtract  # zero (hard reset: V→0) | subtract (soft reset: V−=threshold)
+  reset_mode:   zero      # zero (hard reset: V→0) | subtract (soft reset: V−=threshold)
                           # Norse only supports 'zero' (library limitation) — using 'subtract' with framework=norse will crash.
                           # 'zero' is the fair-comparison default; 'subtract' is SNNTorch's native (best for SNNTorch peak performance).
                           # See src/learning/FRAMEWORK_CONFIG_ANALYSIS.md §5 for details.
 
 training:
-  framework: torch           # torch | norse | spikingjelly  ← one line to switch everything
+  framework: norse           # torch | norse | spikingjelly  ← one line to switch everything
 
   epochs: 8
   iterations_per_epoch: 937  # 60000 / batch_size=64 = full N-MNIST epoch
   timesteps: 16              # fixed T — used as n_time_bins in data_workflow.yaml
   batch_size: 64
-  learning_rate: 0.001       # SNNTorch + atan: standard library setting, proven (EXP-001, EXP-005)
+  learning_rate: 0.001       # Norse: empirically validated (EXP-002 → 97.31%); matches EXP-007's lr for direct comparison
   weight_decay: 0.0001
   num_classes: 10
   device: cuda
   num_workers: 0             # Colab: must stay 0 with MEMORY cache (workers would each copy cache → OOM, EXP-003 confirmed)
-  use_amp: true              # SNNTorch + atan: bounded gradients in float16 — verified safe in EXP-005
+  use_amp: false             # Norse + SuperSpike + float16 = silent gradient underflow (Table A §3)
   grad_accum_steps: 1
   lr_scheduler: cosine
 
   # Playground — swap any of these without touching Python code
-  loss_fn:   mse_count       # cross_entropy (all 3) | mse_count (SNNTorch only — crashes on Norse/SpikingJelly by design)
+  loss_fn:   cross_entropy   # cross_entropy (all 3) | mse_count (SNNTorch only — crashes on Norse/SpikingJelly by design)
   optimizer: adam            # adam | adamw | sgd
   # surrogate: atan          # INACTIVE — surrogate is hardcoded per framework (SNNTorch=atan, Norse=SuperSpike, SpikingJelly=ATan)
                              # See src/learning/FRAMEWORK_CONFIG_ANALYSIS.md §2 for why each framework was pinned to its choice.
@@ -54,7 +54,8 @@ frameworks:
   snntorch:
     beta: 0.95               # membrane decay — dimensionless (0–1)
   norse:
-    tau_mem_inv: 50.0        # inverse membrane time constant (Hz) — valid range: 20–100
+    tau_mem_inv: 100.0       # inverse membrane time constant (Hz) — Norse library default; valid range: 20–100
+                             # EXP-002 at 50 = 0.094 spike rate (under-driven); 100 doubles per-step input gain for healthier activity on our small net
   spikingjelly:
     tau: 2.0                 # membrane time constant ratio — dimensionless
 
