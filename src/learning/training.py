@@ -7,6 +7,7 @@ import logging
 from contextlib import nullcontext
 
 import torch
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
 
@@ -14,6 +15,51 @@ logger = logging.getLogger(__name__)
 
 cfg = Settings()
 device = torch.device(cfg.DEVICE)
+
+
+def apply_temporal_smoothing(data: torch.Tensor, kernel_size: int) -> torch.Tensor:
+    """Suppress transient sensor noise by averaging adjacent timesteps along dim 0.
+
+    Dim 0 is always treated as the time axis. All remaining dims are treated as
+    independent signals, so this works for any input shape [T, ...].
+    """
+    T = data.shape[0]
+    trailing = data.shape[1:]
+    x = data.reshape(T, -1).T.unsqueeze(1).float()
+    weight = torch.ones(1, 1, kernel_size, device=data.device, dtype=x.dtype) / kernel_size
+    smoothed = F.conv1d(x, weight, padding=kernel_size // 2)
+    return smoothed.squeeze(1).T.reshape(T, *trailing).to(data.dtype)
+
+
+def generate_trades_adversarial(
+    model: torch.nn.Module,
+    data: torch.Tensor,
+    clean_prob: torch.Tensor,
+    epsilon: float,
+    steps: int,
+) -> torch.Tensor:
+    """Find the worst-case input within the epsilon-ball by maximising KL divergence
+    from the clean prediction.
+
+    Uses torch.autograd.grad so model parameter gradients are never accumulated,
+    keeping gradient accumulation in the outer training loop intact.
+    clean_prob must be a detached softmax probability tensor [B, C].
+    """
+    alpha = 2.0 * epsilon / steps
+    adv = torch.clamp(
+        data + 0.001 * torch.randn_like(data),
+        data - epsilon,
+        data + epsilon,
+    ).detach()
+
+    for _ in range(steps):
+        adv = adv.requires_grad_(True)
+        adv_logits = aggregate_spike_output(model(adv).float())
+        kl   = F.kl_div(F.log_softmax(adv_logits, dim=1), clean_prob, reduction="batchmean")
+        grad = torch.autograd.grad(kl, adv)[0]
+        adv  = torch.clamp((adv + alpha * grad.sign()).detach(), data - epsilon, data + epsilon)
+
+    return adv
 
 
 def aggregate_spike_output(spk_rec: torch.Tensor) -> torch.Tensor:
@@ -114,9 +160,34 @@ class SNNTrainer:
                 data    = data.to(self.device, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True)
 
-                with autocast_ctx:
-                    spk_rec  = self.model(data)
-                    loss_val = self.model.loss_fn(spk_rec, targets) / accum
+                if self.cfg.TEMPORAL_SMOOTHING:
+                    data = apply_temporal_smoothing(data, self.cfg.TEMPORAL_SMOOTHING_KERNEL)
+
+                if self.cfg.TRADES_ENABLED:
+                    with torch.no_grad():
+                        clean_prob = F.softmax(
+                            aggregate_spike_output(self.model(data).float()), dim=1
+                        )
+                    adv_data = generate_trades_adversarial(
+                        self.model, data, clean_prob,
+                        self.cfg.TRADES_EPSILON, self.cfg.TRADES_STEPS,
+                    )
+                    with autocast_ctx:
+                        spk_rec      = self.model(data)
+                        spk_rec_adv  = self.model(adv_data)
+                        clean_logits = aggregate_spike_output(spk_rec.float())
+                        adv_logits   = aggregate_spike_output(spk_rec_adv.float())
+                        ce_loss  = F.cross_entropy(clean_logits, targets)
+                        kl_loss  = F.kl_div(
+                            F.log_softmax(adv_logits,           dim=1),
+                            F.softmax(clean_logits.detach(),    dim=1),
+                            reduction="batchmean",
+                        )
+                        loss_val = (ce_loss + self.cfg.TRADES_LAMBDA * kl_loss) / accum
+                else:
+                    with autocast_ctx:
+                        spk_rec  = self.model(data)
+                        loss_val = self.model.loss_fn(spk_rec, targets) / accum
 
                 self.scaler.scale(loss_val).backward()
                 step_count += 1
@@ -224,7 +295,9 @@ class SNNTrainer:
         from snntorch import spikeplot as splt
         os.makedirs(save_dir, exist_ok=True)
 
-        spk_sample = self.last_spk_rec[:, 0, :]   # [T, num_classes] — first sample in last batch
+        # Normalise to [T, C]: for [T, B, C] take sample 0; for [B, C] treat each batch row as a timestep
+        spk = self.last_spk_rec
+        spk_sample = spk[:, 0, :] if spk.dim() == 3 else spk
         fig, ax = plt.subplots(figsize=(10, 3))
         splt.raster(spk_sample, ax, s=40, c="black")
         ax.set_title("Output Neuron Spike Raster  (last batch · sample 0)")

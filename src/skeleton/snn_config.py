@@ -49,6 +49,12 @@ class Settings:
         self.USE_AMP = bool(training.get("use_amp", True))
         self.GRAD_ACCUM_STEPS = max(1, int(training.get("grad_accum_steps", 1)))
         self.LR_SCHEDULER = training.get("lr_scheduler", "cosine")
+        self.TRADES_ENABLED           = bool(training.get("trades_enabled", False))
+        self.TRADES_EPSILON           = float(training.get("trades_epsilon", 0.05))
+        self.TRADES_LAMBDA            = float(training.get("trades_lambda", 6.0))
+        self.TRADES_STEPS             = int(training.get("trades_steps", 10))
+        self.TEMPORAL_SMOOTHING       = bool(training.get("temporal_smoothing", False))
+        self.TEMPORAL_SMOOTHING_KERNEL = int(training.get("temporal_smoothing_kernel", 3))
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
