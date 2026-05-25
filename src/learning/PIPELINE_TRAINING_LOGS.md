@@ -90,25 +90,71 @@ Copy the template block below, fill in every field, paste at the **top** of the 
 
 | Epoch | Train Loss | Train Acc | Spike Rate | LR | Duration (s) |
 |---|---|---|---|---|---|
-| 1 | | | | | |
-| 2 | | | | | |
-| 3 | | | | | |
-| 4 | | | | | |
-| 5 | | | | | |
+| 1 | 0.8260 | 73.37% | 0.0389 | 0.000181 | 989.63 (cold cache fill) |
+| 2 | 0.3154 | 90.65% | 0.0611 | 0.000131 | 507.99 |
+| 3 | 0.2493 | 92.52% | 0.0671 | 0.000069 | 492.32 |
+| 4 | 0.2255 | 93.20% | 0.0717 | 0.000019 | 490.93 |
+| 5 | 0.2145 | 93.57% | 0.0712 | 0.000000 | 493.29 |
 
-**Test accuracy:**  
-**Energy/sample:**  
-**Avg latency/sample:**  
-**Notes:**  
-- **Baselines to compare:**
-  - EXP-002 (Norse, threshold 0.5, lr=1e-3, 5ep): **97.31%** test, 55.76 pJ — same config except higher LR
-  - EXP-001 (SNNTorch, threshold 0.5, 5ep): **98.25%** test, 86.81 pJ — different framework
-  - EXP-005 (SNNTorch optimal — pending): SNNTorch with its own best config
-- **Hypothesis:** Lower LR (2e-4 vs 1e-3) should give marginally better/more stable convergence. If Norse-optimal beats EXP-002 by >0.5%, the lower LR was worth it. If accuracy is similar but spike rate is more stable, that's also a Norse win.
-- **AMP verification:** `use_amp=false` is the Norse-safe setting; not testing AMP here. Switching to true would trigger silent gradient underflow risk (see Table A §3).
-- **Possible follow-ups:**
-  - EXP-006b: Same config but raise `tau_mem_inv` from 50 → 100 (Norse library default) to test if it closes the gap with SNNTorch
-  - EXP-006c: Same config but LR=5e-4 (middle of Table A's 2e-4 to 5e-4 range) for stability vs speed tradeoff
+**Final training metrics:** loss 0.2593, accuracy 92.19%, spike rate 0.0722
+**Test accuracy:** 94.05%
+**Energy/sample:** 41.03 pJ (total 410,287.5 pJ over 10,000 samples)
+**Avg latency/sample:** 0.373 ms (avg batch latency 23.74 ms)
+**Avg spikes/sample:** 11.72 (total 117,225 spikes)
+**Per-class F1:** min 0.904 (class 8), max 0.981 (class 1)
+**Run platform:** Colab T4, 12.67 GB RAM
+**Cache mode:** MEMORY selected by adaptive controller (RAM check passed, dataset ~4.13 GB fits in 6.17 GB budget)
+
+**Notes:**
+
+### Headline finding: Lower LR (2e-4) UNDERTRAINED the network — Table A's recommendation HURT us
+
+| Metric | EXP-002 (lr=1e-3) | EXP-006 (lr=2e-4) | Δ |
+|---|---|---|---|
+| Test accuracy | **97.31%** | 94.05% | **−3.26% (much worse)** |
+| Energy/sample | 55.76 pJ | **41.03 pJ** | −26% (lower energy, but at heavy accuracy cost) |
+| Spike rate | 0.094 | 0.072 | −23% (less firing) |
+| Epoch 1 train acc | 86.82% | **73.37%** | −13.45% gap from the start |
+| Epoch 5 train acc | 96.81% | 93.57% | −3.24% — never caught up |
+
+### Why the "optimal" config lost (LR too low for 5-epoch cosine schedule)
+
+- **Cosine schedule decayed LR to ~0 by epoch 5** while the network was still learning. Starting LR=2e-4 + cosine = effective LR very small throughout training. Total weight updates were ~5× smaller than EXP-002.
+- **Epoch 1 accuracy gap (13.45%) never closed.** EXP-002 already at 86.82% after epoch 1; EXP-006 still at 73.37%. The lower LR didn't help convergence — it just slowed it.
+- **Table A's "Norse + SuperSpike wants lower LR for stability"** is **conditional** — it applies when 1e-3 causes oscillation/divergence in deeper or more sensitive networks. Our shallow 3-LIF Conv-SNN converges fine at 1e-3 (proven by EXP-002 → 97.31%). The "stability fix" was a solution to a problem we didn't have.
+
+### Parallel with EXP-005 — both "individual optimal" configs LOST to fair-comparison baselines
+
+| Framework | Fair-comparison config | "Individual optimal" config | Winner |
+|---|---|---|---|
+| SNNTorch | EXP-001: 98.25%, 86.81 pJ | EXP-005: 98.17%, 128.60 pJ | **EXP-001** (better acc + much better energy) |
+| Norse | EXP-002: 97.31%, 55.76 pJ | EXP-006: 94.05%, 41.03 pJ | **EXP-002** (much better acc; EXP-006 only wins on energy due to undertraining) |
+
+**This is a major finding for the comparison MD:** "library-canonical" defaults aren't task-universal. Empirical baselines beat theory-driven configs on N-MNIST. Both Table A recommendations (mse_count for SNNTorch; lower LR for Norse) were wrong for this specific task/architecture/epoch budget.
+
+### Energy/accuracy tradeoff at a glance
+
+| Run | Acc | Energy | Energy/acc-% |
+|---|---|---|---|
+| EXP-001 (SNNTorch fair) | 98.25% | 86.81 pJ | 0.88 pJ per acc% |
+| EXP-002 (Norse fair) | 97.31% | 55.76 pJ | 0.57 pJ per acc% |
+| EXP-005 (SNNTorch optimal) | 98.17% | 128.60 pJ | 1.31 pJ per acc% |
+| EXP-006 (Norse optimal/lr=2e-4) | 94.05% | 41.03 pJ | 0.44 pJ per acc% (but undertrained) |
+
+If you wanted **pure energy minimization** EXP-006's lr=2e-4 wins per-spike, but accuracy is too far off the Pareto front to be useful. EXP-002 (Norse fair-comparison) remains the most efficient *competitive* config.
+
+### Implications for final comparison MD
+
+1. **Report EXP-001 + EXP-002 as the primary baselines** — they're the best-performing configs for each framework on this task, despite not being "library optimal."
+2. **Use EXP-005 + EXP-006 as cautionary examples** of "what happens when you follow library guidance blindly without empirical validation." Both demonstrate that paper-recommended settings need task-specific verification.
+3. **Document the LR-schedule interaction** — cosine + low starting LR + short epoch budget = severe undertraining. Either raise starting LR or extend epochs or use a different schedule.
+
+### Possible follow-ups
+
+- **EXP-006b:** Same config but raise `tau_mem_inv` from 50 → 100 (Norse library default for input-gain boost — original Table A suggestion not yet tested)
+- **EXP-006c:** Same config but **`lr=5e-4`** (middle of Table A range; might give the stability benefit without undertraining)
+- **EXP-006d:** Same config but **`epochs=10`** — give the lower LR time to actually converge before declaring it broken
+- **EXP-006e:** Match EXP-002 exactly (`lr=1e-3`, `epochs=5`) on the **post-refactor pipeline** to confirm the cleaner pipeline doesn't itself change results — would be the cleanest Norse baseline going forward
 
 ---
 
@@ -149,20 +195,72 @@ Copy the template block below, fill in every field, paste at the **top** of the 
 
 | Epoch | Train Loss | Train Acc | Spike Rate | LR | Duration (s) |
 |---|---|---|---|---|---|
-| 1 | | | | | |
-| 2 | | | | | |
-| 3 | | | | | |
-| 4 | | | | | |
-| 5 | | | | | |
+| 1 | 0.1422 | 91.15% | 0.2366 | 0.000905 | 964.42 (cold cache fill) |
+| 2 | 0.0902 | 96.97% | 0.2366 | 0.000655 | 490.74 |
+| 3 | 0.0815 | 97.57% | 0.2352 | 0.000345 | 478.49 |
+| 4 | 0.0741 | 97.85% | 0.2351 | 0.000095 | 480.82 |
+| 5 | 0.0691 | 97.94% | 0.2361 | 0.000000 | 484.85 |
 
-**Test accuracy:**  
-**Energy/sample:**  
-**Avg latency/sample:**  
-**Notes:**  
-- **Baseline to beat:** EXP-001 = 98.25% test acc, 86.81 pJ/sample, 0.327 ms/sample (fair-comparison SNNTorch)
-- **Hypothesis:** mse_count + soft reset should give SNNTorch a small edge over cross_entropy + hard reset (a few tenths of a percent) — large gap would indicate the fair-comparison constraints were significantly limiting.
-- **AMP verification:** If accuracy regresses noticeably vs EXP-001, suspect AMP first — disable and re-run as EXP-005b.
-- **Hardware note:** Running on GTX 1650 (4 GB VRAM) + 15.7 GB RAM; expect adaptive cache to select disk mode (GPU pressure threshold or RAM constraint).
+**Final training metrics:** loss 0.0641, accuracy 98.44%, spike rate 0.2346
+**Test accuracy:** 98.17%
+**Energy/sample:** 128.60 pJ (total 1,286,026 pJ over 10,000 samples)
+**Avg latency/sample:** 0.329 ms (avg batch latency 20.99 ms)
+**Avg spikes/sample:** 36.74 (total 367,436 spikes)
+**Per-class F1:** min 0.969 (class 9), max 0.991 (class 1) — all classes ≥ 0.969 F1
+**Run platform:** Colab T4 GPU (not local GTX 1650 as planned), 12.67 GB RAM
+**Cache mode:** MEMORY selected by adaptive controller (RAM check passed, dataset ~4.13 GB fits in 6.16 GB budget)
+
+**Notes:**
+
+### Headline finding: "individual optimal" config did NOT beat the fair-comparison baseline
+
+| Metric | EXP-001 (fair) | EXP-005 (optimal) | Δ |
+|---|---|---|---|
+| Test accuracy | 98.25% | **98.17%** | **−0.08% (worse)** |
+| Energy/sample | 86.81 pJ | **128.60 pJ** | **+48% (much worse)** |
+| Latency/sample | 0.327 ms | 0.329 ms | ~same |
+| Spike rate | ~0.142 | **0.236** | **+66% (much higher firing)** |
+| Avg spikes/sample | ~20 | 36.74 | +84% |
+
+### Why the "optimal" config is actually worse on this task
+
+1. **`mse_count_loss` literally trains the network to fire MORE.** It targets `correct_rate=0.8, incorrect_rate=0.2` — meaning every correct-class output neuron is incentivized to fire at 80% of timesteps. EXP-001's `cross_entropy` on summed spikes has no explicit rate target, lets the network find its own (which converged to ~0.142 rate). Result: mse_count produces a network that's accurate but spike-heavy → high energy.
+
+2. **`reset_mode: subtract` (soft reset) reinforces multi-firing.** When V overshoots threshold by a lot, soft reset preserves the residual → the neuron can fire repeatedly in quick succession. Combined with mse_count's high-firing target, the network produces ~67% more spikes than EXP-001 for the same accuracy.
+
+3. **`threshold: 1.0` did NOT reduce firing as expected** — soft reset + mse_count dominate the threshold's selectivity effect. The high-firing regime is created by the loss + reset choice, not the threshold.
+
+### AMP=true verified safe for SNNTorch
+
+Training converged normally (no NaN, no gradient underflow signs). Loss decreased monotonically. Table A's prediction ("AMP=true is safe for SNNTorch atan") confirmed on this net.
+
+### Why MEMORY mode was ~4× slower than EXP-001's disk mode (480s vs 124s steady state)
+
+Unexpected — MEMORY should be faster. Likely culprits (most → least likely):
+- **AMP autocast overhead exceeds savings on this tiny net.** For a 12-conv + 32-conv + 800-FC model, the per-step matmul is small enough that AMP's scaler/autocast overhead may dominate. AMP wins on big models, not toy nets.
+- **mse_count_loss has more compute than cross_entropy** (per-output-neuron rate target instead of single softmax).
+- **Different Colab T4 allocation** (random session-to-session hardware variance).
+
+Not blocking — accuracy result is what matters.
+
+### Comparison ranking (SNNTorch on N-MNIST Conv-SNN)
+
+| Configuration | Test Acc | Energy/sample | Spike rate | Recommendation |
+|---|---|---|---|---|
+| **EXP-001 (fair-comparison)** | 98.25% | 86.81 pJ | 0.142 | **✅ Best overall — energy/accuracy Pareto-optimal** |
+| EXP-005 (individual-optimal) | 98.17% | 128.60 pJ | 0.236 | ❌ Worse on every dimension |
+
+### Implications for the final comparison MD
+
+- **"Library-canonical" ≠ "best on every task."** SNNTorch's library-canonical loss (`mse_count_loss`) is intended for tasks where spike-rate encoding matters (e.g., physiological signal modeling). For classification on a clean dataset like N-MNIST, cross-entropy on summed spikes is more efficient.
+- **Soft reset is not universally better** even for SNNTorch. On clean classification it produces wasted spikes (multiple firings encoding nothing meaningful for the loss).
+- **Recommended SNNTorch config for N-MNIST classification:** EXP-001's settings (`cross_entropy`, hard reset, threshold=0.5, no AMP) — they're "Pareto-optimal" against EXP-005's library-canonical choices.
+
+### Possible follow-ups
+
+- **EXP-005b:** Same config but `loss_fn: cross_entropy` (isolate the mse_count contribution to high firing)
+- **EXP-005c:** Same config but `reset_mode: zero` (isolate the soft-reset contribution)
+- **EXP-005d:** EXP-001 baseline + `use_amp: true` (isolate AMP's effect alone, no other changes)
 
 ---
 
