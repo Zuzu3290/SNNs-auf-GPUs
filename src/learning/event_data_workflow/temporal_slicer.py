@@ -57,6 +57,14 @@ class TemporalSlicedDataset(Dataset):
         self.transform = transform
         self.verbose = verbose
 
+        if (self.config.events_per_slice is None and
+                self.config.overlap_us >= self.config.slice_duration_us):
+            raise ValueError(
+                f"[TEMPORAL SLICER] overlap_us ({self.config.overlap_us}µs) must be less than "
+                f"slice_duration_us ({self.config.slice_duration_us}µs) — "
+                "a zero or negative stride produces infinite or duplicate slices."
+            )
+
         if self.config.overlap_us > 0 and self.verbose:
             overlap_pct = 100 * self.config.overlap_us / self.config.slice_duration_us
             logger.warning(
@@ -129,6 +137,12 @@ class TemporalSlicedDataset(Dataset):
         Locate slice boundaries with np.searchsorted — O(log N) per slice
         instead of scanning the full array for each window.
         """
+        if len(t) > 1 and not np.all(t[:-1] <= t[1:]):
+            raise ValueError(
+                "[TEMPORAL SLICER] Non-monotonic timestamps in recording. "
+                "np.searchsorted requires sorted input — pre-sort events by timestamp "
+                "before dataset construction, or use event-driven slicing (events_per_slice=N)."
+            )
         t_min = int(t[0])
         t_max = int(t[-1])
         duration = t_max - t_min
@@ -189,7 +203,7 @@ class TemporalSlicedDataset(Dataset):
             if len(sliced_events) > 0:
                 sliced_events[:, 2] -= sliced_events[0, 2]
 
-        if self.transform is not None:
+        if self.transform is not None and len(sliced_events) > 0:
             sliced_events = self.transform(sliced_events)
 
         return sliced_events, target

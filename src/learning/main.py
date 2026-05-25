@@ -18,12 +18,12 @@ def main():
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model = SNN_NORSE(cfg)
+    model = SNN_TORCH(cfg)
     trainer              = model.get_trainer(train_loader)
     inference            = model.get_inference(test_loader)
     adversarial_evaluator = model.get_adversarial_evaluator(test_loader)
 
-    print("\n✓ Norse Model ready.")
+    print("\n✓ Torch Model ready.")
     cfg.display()
 
     return model, trainer, inference, adversarial_evaluator
