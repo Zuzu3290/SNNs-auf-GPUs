@@ -169,6 +169,7 @@ class SNNTester:
             "overall_accuracy":          overall_acc,
             "total_spikes":              total_spikes,
             "avg_spikes_per_sample":     avg_spikes_per_sample,
+            "avg_firing_rate_hz":        avg_firing_rate_hz,
             "avg_latency_ms":            avg_latency_ms,
             "avg_latency_per_sample_ms": avg_latency_per_sample,
             "total_energy_pj":           total_energy_pj,
