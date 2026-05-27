@@ -184,7 +184,7 @@ class NeuromorphicEncoder:
         """Build DataLoaders; worker count and prefetch driven by PipelineMemoryCoordinator."""
         batch_size = self.cfg.BATCH_SIZE
         dl_cfg = {
-            k: v for k, v in self.coordinator.dataloader_config().items()
+            k: v for k, v in self.coordinator.dataloader_config(num_workers=self.cfg.NUM_WORKERS).items()
             if v is not None  # prefetch_factor must be omitted (not None) when num_workers=0
         }
 
