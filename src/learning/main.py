@@ -2,6 +2,11 @@ import sys
 import os
 from pathlib import Path
 
+# Suppress TensorFlow C++ backend logs before any library imports.
+# tonic (neuromorphic data) pulls in TF as an optional dependency; TF then
+# warns about CUDA DLL mismatches that are irrelevant to PyTorch training.
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
 # Add the 'src' directory to the path so we can import from 'skeleton' and 'learning'
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -18,7 +23,12 @@ def main():
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model = SNN_SJ(cfg)
+    model = SNN_NORSE(cfg)
+
+    if cfg.COMPILER_ENABLED:
+        from compiler import compile_model
+        model = compile_model(model, cfg)
+
     trainer              = model.get_trainer(train_loader)
     inference            = model.get_inference(test_loader)
     adversarial_evaluator = model.get_adversarial_evaluator(test_loader)
