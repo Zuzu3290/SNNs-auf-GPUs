@@ -1,13 +1,29 @@
 """
 Compiler entry point.
 
-compile_model(model, cfg) returns:
-  - CompiledModel when cfg.COMPILER_ENABLED is True
-  - the original model unchanged when False
+compile_model(model, cfg) → CompiledModel when cfg.COMPILER_ENABLED is True,
+                             original model unchanged when False.
 
-CompiledModel routes forward() through the compiler runtime, which
-manages the timestep loop and dispatches each layer via the execution plan.
-Weight parameters and optimizer remain on the original model.
+Pipeline
+--------
+  lower_to_ir  →  schedule  →  build_plan  →  CompiledModel
+
+CompiledModel.forward() routes through execute(plan, x) in runtime.py.
+The runtime dispatches each FusedStep to the custom CUDA kernel (lif_fused_step)
+which fuses membrane_update + threshold + spike_gen + reset into one kernel launch,
+replacing four separate PyTorch operations with one.
+
+CUDA kernel is compiled on first use via NVCC (torch.utils.cpp_extension.load).
+Compilation is triggered proactively during compile_model() so it completes
+before training starts rather than on the first batch.
+
+Note on activity regularization and STDP
+-----------------------------------------
+The CUDA kernel path owns the membrane state and bypasses the SNNTorch neuron
+modules. Forward hooks registered by activity_reg.py on those modules will
+therefore not fire during the CUDA path. activity_reg and STDP penalties will
+be zero when the compiler is enabled. Disable them in SNN_module.yaml when
+using the compiler to avoid a silent no-op.
 """
 from __future__ import annotations
 
@@ -32,7 +48,8 @@ class CompiledModel(nn.Module):
     """
     Wraps a PyTorch SNN model and routes forward passes through the compiler
     runtime. The runtime calls the original PyTorch layers (stored in IR node
-    attrs) so weight updates and optimizer state remain fully intact.
+    attrs) or the fused CUDA kernel for LIF groups, keeping weight tensors and
+    optimizer state fully intact on the original model.
     """
 
     def __init__(self, model: nn.Module, plan: ExecutionPlan, cfg: Settings):
@@ -46,6 +63,12 @@ class CompiledModel(nn.Module):
         self.loss_fn   = getattr(model, "loss_fn",   None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        try:
+            import snntorch.utils as snn_utils
+            snn_utils.reset(self.net)
+        except Exception:
+            pass
+
         try:
             from spikingjelly.activation_based import functional
             functional.reset_net(self.net)
@@ -73,17 +96,24 @@ class CompiledModel(nn.Module):
 
 def compile_model(model: nn.Module, cfg: Settings) -> nn.Module:
     """
-    Lower → schedule → plan the model.
-    Returns CompiledModel if enabled, original model otherwise.
+    Lower → schedule → plan, then return a CompiledModel that dispatches LIF
+    layers to the fused CUDA kernel.
     """
     if not cfg.COMPILER_ENABLED:
         logger.info("[COMPILER] Disabled — using standard PyTorch execution")
         return model
 
     logger.info(
-        "[COMPILER] Compiling — backend=%s, fuse_timesteps=%s, log_ir=%s",
+        "[COMPILER] Compiling — backend=%s  fuse_timesteps=%s  log_ir=%s",
         cfg.COMPILER_BACKEND, cfg.COMPILER_FUSE_STEPS, cfg.COMPILER_LOG_IR,
     )
+
+    if getattr(cfg, "ACTIVITY_REG_ENABLED", False) or getattr(cfg, "STDP_ENABLED", False):
+        logger.warning(
+            "[COMPILER] activity_reg and STDP hooks are bypassed by the CUDA kernel path. "
+            "Set activity_reg_enabled: false and stdp_enabled: false in SNN_module.yaml "
+            "when using the compiler, otherwise their penalties will be zero."
+        )
 
     graph = lower_to_ir(model, cfg)
     graph = schedule(graph, cfg)
@@ -91,6 +121,14 @@ def compile_model(model: nn.Module, cfg: Settings) -> nn.Module:
 
     if cfg.COMPILER_LOG_IR:
         logger.info("[COMPILER] Execution plan:\n%s", plan.summary())
+
+    # Trigger NVCC compilation now so it completes before the first training batch.
+    if cfg.COMPILER_BACKEND == "cuda" and torch.cuda.is_available():
+        try:
+            from compiler.cuda_ops import _load_ops
+            _load_ops()
+        except Exception:
+            pass
 
     logger.info("[COMPILER] Compilation complete")
     return CompiledModel(model, plan, cfg)
