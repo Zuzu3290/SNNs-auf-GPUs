@@ -1,14 +1,21 @@
 """
 Runtime: executes an ExecutionPlan against real tensors.
 
-For each timestep the runtime walks the plan steps:
-  - AtomicStep  → calls node.attrs["module"](x) using the original PyTorch layer
-  - FusedStep   → calls the stored spikingjelly/snntorch neuron for that group,
-                  which manages membrane state internally across timestep calls.
-                  Falls back to a pure-PyTorch LIF step when no module is stored.
+Dispatch priority for each plan step
+-------------------------------------
+AtomicStep  → calls node.attrs["module"](x) using the original PyTorch layer,
+              so weight tensors and optimizer state stay intact.
 
-The runtime owns the timestep loop so the compiler controls execution order,
-which is the hook point for future custom-kernel dispatch.
+FusedStep   → tries the CUDA kernel first (lif_fused_step), which runs
+              membrane_update + threshold + spike_gen + reset in a single kernel
+              launch and owns the membrane state for that group.
+              Falls back to the original SNNTorch/SpikingJelly neuron module
+              (state managed internally by the framework) when the tensor is on
+              CPU or when the CUDA kernel is unavailable.
+              Final fallback: pure-PyTorch soft-reset LIF with explicit mem state.
+
+The runtime owns the timestep loop, which is the hook point for future
+custom kernel dispatch (e.g. fusing the entire T-step loop into one launch).
 """
 from __future__ import annotations
 
@@ -29,7 +36,7 @@ def lif_step(
     beta:      float,
     threshold: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Single-step soft-reset LIF: integrate → threshold → spike → reset."""
+    """Pure-PyTorch soft-reset LIF — used as final fallback."""
     mem_new = beta * mem + x
     spikes  = (mem_new >= threshold).float()
     mem_new = mem_new - spikes * threshold
@@ -52,28 +59,45 @@ def execute(plan: ExecutionPlan, x: torch.Tensor) -> torch.Tensor:
 
             if isinstance(step, AtomicStep):
                 node = step.node
-
                 if node.op in (OpType.INPUT, OpType.OUTPUT, OpType.AGGREGATE):
                     continue
-
                 module = node.attrs.get("module")
                 if module is not None:
                     current = module(current)
 
             elif isinstance(step, FusedStep):
-                neuron = step.nodes[0].attrs.get("module")
+                beta      = float(step.attrs.get("beta",      0.95))
+                threshold = float(step.attrs.get("threshold", 1.0))
+                gid       = step.group_id
+                used_cuda = False
 
-                if neuron is not None:
-                    current = neuron(current)
-                else:
-                    gid = step.group_id
-                    if gid not in mem_state:
-                        mem_state[gid] = torch.zeros_like(current)
-                    beta      = float(step.attrs.get("beta",      0.95))
-                    threshold = float(step.attrs.get("threshold", 1.0))
-                    current, mem_state[gid] = lif_step(
-                        current, mem_state[gid], beta, threshold
-                    )
+                # ── Priority 1: fused CUDA kernel ─────────────────────────────
+                if current.is_cuda:
+                    try:
+                        from compiler.cuda_ops import _load_ops, lif_fused_step
+                        if _load_ops() is not None:
+                            if gid not in mem_state:
+                                mem_state[gid] = torch.zeros_like(current)
+                            current, mem_state[gid] = lif_fused_step(
+                                current, mem_state[gid], beta, threshold
+                            )
+                            used_cuda = True
+                    except Exception as exc:
+                        logger.debug("[RUNTIME] CUDA kernel step failed (%s), using fallback", exc)
+
+                if not used_cuda:
+                    # ── Priority 2: framework neuron module (manages own state) ──
+                    neuron = step.nodes[0].attrs.get("module")
+                    if neuron is not None:
+                        out     = neuron(current)
+                        current = out[0] if isinstance(out, tuple) else out
+                    else:
+                        # ── Priority 3: pure-PyTorch LIF ──────────────────────
+                        if gid not in mem_state:
+                            mem_state[gid] = torch.zeros_like(current)
+                        current, mem_state[gid] = lif_step(
+                            current, mem_state[gid], beta, threshold
+                        )
 
         spike_acc = current if spike_acc is None else spike_acc + current
 

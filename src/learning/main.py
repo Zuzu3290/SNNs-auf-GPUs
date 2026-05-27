@@ -10,11 +10,12 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 # Add the 'src' directory to the path so we can import from 'skeleton' and 'learning'
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import torch
 from skeleton import Settings
 from learning.frameworks.snn_torch import SNN_TORCH
 from learning.event_data_workflow import NeuromorphicEncoder
-from learning.frameworks.snn_norse import SNN_NORSE
-from learning.frameworks.snn_spikingjelly import SNN_SJ
+
+torch.backends.cudnn.benchmark = True
 
 def main():
     # 1. Initialize settings
@@ -23,7 +24,7 @@ def main():
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model = SNN_NORSE(cfg)
+    model = SNN_TORCH(cfg)
 
     if cfg.COMPILER_ENABLED:
         from compiler import compile_model

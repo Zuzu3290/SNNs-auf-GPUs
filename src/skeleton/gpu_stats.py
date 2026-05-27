@@ -81,14 +81,16 @@ class GPUStats:
         avg_util  = sum(self.epoch_samples) / len(self.epoch_samples) if self.epoch_samples else 0.0
         peak_util = max(self.epoch_samples)                            if self.epoch_samples else 0.0
 
-        # Detect NVML reporting failure: all samples are 0% yet GPU memory is in
-        # active use, which is physically impossible — the compute utilization counter
-        # is simply not accessible on this driver/OS combination.
-        nvml_ok = not (
-            avg_util == 0.0
-            and peak_gb > 0.1
-            and len(self.epoch_samples) >= 5
+        # Detect NVML reporting failure. Two failure modes:
+        #   1. torch.cuda.utilization() throws every call → epoch_samples is empty
+        #   2. It returns 0 for all calls despite GPU memory being in active use
+        # Both are physically impossible if the GPU is genuinely idle (memory would
+        # also be ~0). If memory is in use but utilization shows nothing, NVML is broken.
+        no_util_signal = (
+            len(self.epoch_samples) == 0
+            or max(self.epoch_samples) == 0.0
         )
+        nvml_ok = not (no_util_signal and peak_gb > 0.1)
 
         self.all_samples.extend(self.epoch_samples)
         self.peak_mem_each.append(peak_gb)
