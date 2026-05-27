@@ -52,6 +52,13 @@ training:
   stdp_a_plus: 0.01             # LTP strength — how strongly to reinforce causal (pre→post) spike order.
   stdp_a_minus: 0.01            # LTD strength — how strongly to penalise anticausal (post→pre) spike order.
   
+compiler:
+  enabled: false            # Master switch. true → route model through the JIT compiler pipeline.
+                            #                false → standard PyTorch execution (safe default).
+  backend: cuda             # Hardware target the compiler emits code for: cuda | cpu
+  fuse_timesteps: true      # Fuse the T-timestep loop into a single kernel launch instead of T separate launches.
+  log_ir: false             # Dump the compiler IR to stdout after lowering (useful for debugging passes).
+
 dataset:
   dataset_name: MNIST
   data_path:

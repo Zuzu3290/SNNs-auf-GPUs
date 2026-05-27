@@ -81,15 +81,25 @@ class GPUStats:
         avg_util  = sum(self.epoch_samples) / len(self.epoch_samples) if self.epoch_samples else 0.0
         peak_util = max(self.epoch_samples)                            if self.epoch_samples else 0.0
 
+        # Detect NVML reporting failure: all samples are 0% yet GPU memory is in
+        # active use, which is physically impossible — the compute utilization counter
+        # is simply not accessible on this driver/OS combination.
+        nvml_ok = not (
+            avg_util == 0.0
+            and peak_gb > 0.1
+            and len(self.epoch_samples) >= 5
+        )
+
         self.all_samples.extend(self.epoch_samples)
         self.peak_mem_each.append(peak_gb)
 
         return {
-            "gpu_util_avg_pct":  round(avg_util,  1),
-            "gpu_util_peak_pct": round(peak_util, 1),
-            "gpu_mem_peak_gb":   round(peak_gb,   2),
-            "gpu_mem_curr_gb":   round(curr_gb,   2),
-            "gpu_mem_peak_pct":  round(peak_pct,  1),
+            "gpu_util_avg_pct":   round(avg_util,  1),
+            "gpu_util_peak_pct":  round(peak_util, 1),
+            "gpu_util_available": nvml_ok,
+            "gpu_mem_peak_gb":    round(peak_gb,   2),
+            "gpu_mem_curr_gb":    round(curr_gb,   2),
+            "gpu_mem_peak_pct":   round(peak_pct,  1),
         }
 
     def summary(self) -> dict:

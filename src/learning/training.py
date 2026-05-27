@@ -311,7 +311,11 @@ class SNNTrainer:
             print(f"  • LR             : {current_lr:.6f}")
             print(f"  • Duration       : {epoch_duration:.2f}s")
             if gpu:
-                print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
+                if gpu.get("gpu_util_available", True):
+                    print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
+                else:
+                    print(f"  • GPU Util       : NVML counter unavailable on this driver  "
+                          f"(model IS on GPU — {gpu['gpu_mem_peak_gb']} GB VRAM in use)")
                 print(f"  • GPU Memory     : {gpu['gpu_mem_peak_gb']} GB / {self.gpu_stats.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
 
             if checkpoint_path is not None and train_acc > best_acc:

@@ -10,10 +10,11 @@ class Settings:
         self.config = self.load_yaml_config(yaml_path)
 
         architecture = self.config.get("architecture", {})
-        training = self.config.get("training", {})
-        dataset = self.config.get("dataset", {})
-        input_cfg = self.config.get("input", {})
-        output = self.config.get("output", {})
+        training     = self.config.get("training", {})
+        dataset      = self.config.get("dataset", {})
+        input_cfg    = self.config.get("input", {})
+        output       = self.config.get("output", {})
+        compiler     = self.config.get("compiler", {})
 
         # Neural network architecture
         self.INPUT_SIZE = int(architecture.get("input_size", 10))
@@ -64,6 +65,12 @@ class Settings:
         self.STDP_TAU     = float(training.get("stdp_tau", 20.0))
         self.STDP_A_PLUS  = float(training.get("stdp_a_plus", 0.01))
         self.STDP_A_MINUS = float(training.get("stdp_a_minus", 0.01))
+
+        # Compiler pipeline
+        self.COMPILER_ENABLED    = bool(compiler.get("enabled",         False))
+        self.COMPILER_BACKEND    = str( compiler.get("backend",         "cuda"))
+        self.COMPILER_FUSE_STEPS = bool(compiler.get("fuse_timesteps",  True))
+        self.COMPILER_LOG_IR     = bool(compiler.get("log_ir",          False))
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
@@ -148,6 +155,7 @@ class Settings:
         print(f"Device               : {self.DEVICE}")
         print(f"Kernel               : {self.KERNEL}")
         print(f"Threshold            : {self.THRESHOLD}")
+        print(f"Compiler             : {'ENABLED  (backend={}, fuse_timesteps={})'.format(self.COMPILER_BACKEND, self.COMPILER_FUSE_STEPS) if self.COMPILER_ENABLED else 'DISABLED'}")
 
         print("=" * 60)
 

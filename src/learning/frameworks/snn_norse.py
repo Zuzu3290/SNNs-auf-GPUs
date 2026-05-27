@@ -113,7 +113,7 @@ class SNN_NORSE(nn.Module):
         return SNNTrainer(self, train_loader, self.cfg, self.device)
 
     def get_inference(self, test_loader) -> SNNTester:
-        return SNNTester(self.net, test_loader, self.cfg, self.device)
+        return SNNTester(self, test_loader, self.cfg, self.device)
 
     def get_adversarial_evaluator(self, test_loader):
         from learning.adversarial_robustness import AdversarialEvaluator
