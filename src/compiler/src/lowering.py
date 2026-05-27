@@ -28,11 +28,15 @@ except Exception:
     SJBaseNode = None
 
 try:
-    from snntorch._neurons.neurons import SpikingNeuron as STBaseNode
+    import snntorch as _snt
+    STBaseNode = getattr(_snt, "SpikingNeuron", None)
 except Exception:
     STBaseNode = None
 
-LIF_NAME_FRAGMENTS = ("lif", "leaky", "izhikevich", "spiking", "integrate")
+LIF_NAME_FRAGMENTS = (
+    "lif", "leaky", "izhikevich", "spiking", "integrate",
+    "alpha", "synaptic", "adex", "rlif",   # SNNTorch neuron types
+)
 
 
 def is_spiking_neuron(module: nn.Module) -> bool:
