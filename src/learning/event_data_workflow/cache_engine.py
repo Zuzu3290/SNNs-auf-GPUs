@@ -16,7 +16,7 @@ import psutil
 import shutil
 from collections import OrderedDict
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from dataclasses import dataclass
 
 import torch
@@ -126,23 +126,48 @@ class PipelineMemoryCoordinator:
             )
         return result
 
-    def dataloader_config(self, batch_bytes: int = 0) -> dict:
-        """Recommend num_workers, prefetch_factor, pin_memory, persistent_workers."""
-        worker_bytes = self.budget.total_gb * self.budget.worker_fraction * (1024 ** 3)
-        if batch_bytes > 0:
-            max_workers = max(1, int(worker_bytes / (2 * batch_bytes)))
+    def dataloader_config(self, batch_bytes: int = 0, num_workers: int = 4) -> dict:
+        """Recommend num_workers, prefetch_factor, pin_memory, persistent_workers.
+
+        GPU-only mode (no CPU workers) is activated when the available RAM budget
+        for workers is less than 500 MB — typical of GPU-only embedded deployments
+        where there is no host memory headroom for multiprocessing DataLoader workers.
+        In that case num_workers=0 avoids forking and pin_memory is disabled since
+        there is no CPU→GPU transfer boundary to optimise.
+        """
+        gpu    = torch.cuda.is_available()
+        on_gpu = (hasattr(self, "_device_idx") and
+                  getattr(self, "device", None) is not None and
+                  getattr(self.device if hasattr(self, "device") else None, "type", "") == "cuda")
+
+        worker_budget_gb = self.budget.total_gb * self.budget.worker_fraction
+        gpu_only = on_gpu and worker_budget_gb < 0.5   # <500 MB RAM → GPU-only embedded
+
+        if gpu_only:
+            cfg = {
+                "num_workers":        0,
+                "prefetch_factor":    None,
+                "pin_memory":         False,  # no H2D copy boundary in GPU-only path
+                "persistent_workers": False,
+            }
+            if self.verbose:
+                logger.info("[MEMORY COORDINATOR] GPU-only mode — num_workers=0, pin_memory=False")
         else:
-            max_workers = 4
-        max_workers = min(max_workers, os.cpu_count() or 4)
-        gpu = torch.cuda.is_available()
-        cfg = {
-            "num_workers": max_workers,
-            "prefetch_factor": 2 if max_workers > 0 else None,
-            # pin_memory allocates page-locked host memory so CPU→GPU transfers
-            # can run asynchronously via non_blocking=True in the training loop.
-            "pin_memory": gpu,
-            "persistent_workers": max_workers > 0,
-        }
+            worker_bytes = worker_budget_gb * (1024 ** 3)
+            if batch_bytes > 0:
+                max_workers = max(1, int(worker_bytes / (2 * batch_bytes)))
+            else:
+                max_workers = num_workers
+            max_workers = min(max_workers, os.cpu_count() or 4)
+            cfg = {
+                "num_workers":     max_workers,
+                "prefetch_factor": 2 if max_workers > 0 else None,
+                # pin_memory allocates page-locked host memory so CPU→GPU transfers
+                # can run asynchronously via non_blocking=True in the training loop.
+                "pin_memory":         gpu,
+                "persistent_workers": max_workers > 0,
+            }
+
         if self.verbose:
             logger.info(f"[MEMORY COORDINATOR] DataLoader config: {cfg}")
         return cfg
@@ -247,6 +272,92 @@ class BoundedRecordingCache(Dataset):
         self._cache_bytes = sum(self.estimate_item_bytes(v) for v in self._cache.values())
 
 
+class SparseEventBuffer:
+    """
+    AER-format (Address Event Representation) spike buffer.
+
+    Instead of accumulating dense [T, B, ...] float tensors, stores only the
+    coordinates where spikes occurred — one [k, ndim] index tensor per timestep.
+
+    At a typical SNN firing rate of 2-10%, memory usage is 10-50x lower than
+    the equivalent dense tensor.
+
+    Interface:
+        buf.push(spk)     — call once per timestep in a forward hook
+        buf.stack()       — reconstruct dense [T, B, ...] when needed for loss/metrics
+        buf.clear()       — reset between forward passes
+
+    Multiprocessing-safe: lock is rebuilt after unpickling (matches BoundedRecordingCache).
+    Works with CPU and CUDA tensors.
+    """
+
+    def __init__(self) -> None:
+        self._events: List[torch.Tensor] = []    # per-timestep [k_t, ndim] index tensors
+        self._step_shape: Optional[tuple] = None  # shape of one timestep e.g. (B, N) or (B, C, H, W)
+        self._lock = threading.Lock()
+
+    def push(self, spk: torch.Tensor) -> None:
+        """Record one timestep's spike tensor. Stored dense to avoid CUDA sync in the hot path."""
+        tensor = spk.detach()
+        with self._lock:
+            if self._step_shape is None:
+                self._step_shape = tuple(spk.shape)
+            self._events.append(tensor)
+
+    def stack(self) -> Optional[torch.Tensor]:
+        """
+        Return [T, B, ...] dense tensor stacked from stored timesteps.
+        Returns None if push() was never called.
+        """
+        with self._lock:
+            if not self._events:
+                return None
+            return torch.stack(self._events)  # single CUDA op — no Python loop
+
+    def clear(self) -> None:
+        with self._lock:
+            self._events.clear()
+            self._step_shape = None
+
+    @property
+    def num_spikes(self) -> int:
+        with self._lock:
+            return int(sum(e.sum().item() for e in self._events))
+
+    @property
+    def num_timesteps(self) -> int:
+        with self._lock:
+            return len(self._events)
+
+    @property
+    def memory_bytes(self) -> int:
+        """Bytes actually used by sparse index storage."""
+        with self._lock:
+            return sum(e.element_size() * e.numel() for e in self._events)
+
+    @property
+    def firing_rate(self) -> float:
+        """Fraction of possible spike slots that fired (0.0 – 1.0)."""
+        with self._lock:
+            if not self._events or self._step_shape is None:
+                return 0.0
+            total_per_step = 1
+            for d in self._step_shape:
+                total_per_step *= d
+            total = total_per_step * len(self._events)
+            fired = int(sum(e.sum().item() for e in self._events))
+            return fired / total if total > 0 else 0.0
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_lock"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
+
+
 class AdaptiveCacheController:
     """
     Intelligent caching controller that monitors system resources and selects
@@ -276,6 +387,7 @@ class AdaptiveCacheController:
         self.memory_threshold = memory_cache_threshold_gb
         self.max_cached_recordings = max_cached_recordings
         self.verbose = verbose
+        self.device = device
         self._device_idx = (
             (device.index or 0)
             if device is not None and getattr(device, "type", "") == "cuda"

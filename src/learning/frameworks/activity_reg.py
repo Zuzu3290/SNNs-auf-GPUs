@@ -39,24 +39,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional
 
+from learning.event_data_workflow.cache_engine import SparseEventBuffer
+
 
 def register_activity_hooks(model: nn.Module, layer_map: Dict[str, nn.Module]) -> None:
     """
     Attach forward hooks to the specified hidden LIF layers.
-    Spike tensors from each timestep are appended to model.hidden_spk_buf[name].
+
+    Each hook pushes one timestep's spike tensor into a SparseEventBuffer,
+    storing only the positions of fired neurons (AER format) rather than a
+    full dense tensor. Memory cost scales with spike count, not tensor volume.
 
     Args:
         model:     SNN model instance (SNN_TORCH, SNN_NORSE, SNN_SJ, or any nn.Module)
         layer_map: {name: module} for each hidden layer to monitor.
                    e.g. {'lif1': self.net[1], 'lif2': self.net[4]}
     """
-    model.hidden_spk_buf = {name: [] for name in layer_map}
+    model.hidden_spk_buf = {name: SparseEventBuffer() for name in layer_map}
 
     def make_hook(name):
         def hook(module, inp, output):
-            # Norse LIFCell returns (spk, state) — extract spike tensor only
+            if getattr(model, '_hooks_paused', False):
+                return
             spk = output[0] if isinstance(output, tuple) else output
-            model.hidden_spk_buf[name].append(spk)
+            model.hidden_spk_buf[name].push(spk)
         return hook
 
     for name, layer in layer_map.items():
@@ -75,13 +81,16 @@ def clear_hidden_spikes(model: nn.Module) -> None:
 
 def get_hidden_spike_recordings(model: nn.Module) -> Dict[str, Optional[torch.Tensor]]:
     """
-    Stack per-timestep spike lists into (T, B, ...) tensors.
+    Reconstruct dense [T, B, ...] tensors from the sparse AER buffers.
+
+    Conversion from sparse indices to dense happens here — once per training
+    step — rather than storing full dense tensors throughout the forward pass.
     Returns empty dict if hooks were not registered.
     """
     if not hasattr(model, 'hidden_spk_buf'):
         return {}
     return {
-        name: torch.stack(buf) if buf else None
+        name: buf.stack()
         for name, buf in model.hidden_spk_buf.items()
     }
 
@@ -184,8 +193,9 @@ def stdp_regularization(
         device = layers[0].device if layers else torch.device('cpu')
         return torch.zeros(1, device=device)
 
-    decay = torch.tensor(-1.0 / tau).exp()
-    total = torch.zeros(1, device=layers[0].device)
+    device = layers[0].device
+    decay  = torch.tensor(-1.0 / tau, device=device).exp()
+    total  = torch.zeros(1, device=device)
     n_pairs = 0
 
     for i in range(len(layers) - 1):
@@ -197,19 +207,27 @@ def stdp_regularization(
         pre_t  = pre_spk.mean(dim=list(range(1, pre_spk.dim())))   # (T,)
         post_t = post_spk.mean(dim=list(range(1, post_spk.dim()))) # (T,)
 
-        trace_pre  = torch.zeros(1, device=pre_spk.device)
-        trace_post = torch.zeros(1, device=pre_spk.device)
-        ltp = torch.zeros(1, device=pre_spk.device)
-        ltd = torch.zeros(1, device=pre_spk.device)
+        # Causal EMA as a single matmul: kernel[t,s] = decay^(t-s) for t>=s, 0 otherwise
+        steps      = torch.arange(T, dtype=torch.float32, device=device)
+        ema_kernel = (decay ** (steps.unsqueeze(1) - steps.unsqueeze(0))).tril()  # [T, T]
 
-        for t in range(T):
-            trace_pre  = decay * trace_pre  + pre_t[t]
-            trace_post = decay * trace_post + post_t[t]
+        trace_pre  = ema_kernel @ pre_t   # [T]
+        trace_post = ema_kernel @ post_t  # [T]
 
-            ltp = ltp + trace_pre  * post_t[t]  # pre was recently active, post fires now
-            ltd = ltd + pre_t[t]   * trace_post  # post was recently active, pre fires now
+        ltp = (trace_pre  * post_t).sum()
+        ltd = (pre_t      * trace_post).sum()
 
         total = total + (-A_plus * ltp + A_minus * ltd) / T
         n_pairs += 1
 
     return total / n_pairs
+
+
+def pause_hooks(model: nn.Module) -> None:
+    """Stop all registered activity hooks from recording. Safe no-op if hooks not registered."""
+    model._hooks_paused = True
+
+
+def resume_hooks(model: nn.Module) -> None:
+    """Re-enable activity hook recording after a pause_hooks() call."""
+    model._hooks_paused = False

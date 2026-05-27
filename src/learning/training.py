@@ -9,11 +9,13 @@ from contextlib import nullcontext
 import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from skeleton import Settings
+from skeleton import Settings, GPUStats
 from learning.frameworks.activity_reg import (
     get_hidden_spike_recordings,
     activity_regularization,
     stdp_regularization,
+    pause_hooks,
+    resume_hooks,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,12 +46,16 @@ def generate_trades_adversarial(
         data + epsilon,
     ).detach()
 
-    for _ in range(steps):
-        adv = adv.requires_grad_(True)
-        adv_logits = aggregate_spike_output(model(adv).float())
-        kl   = F.kl_div(F.log_softmax(adv_logits, dim=1), clean_prob, reduction="batchmean")
-        grad = torch.autograd.grad(kl, adv)[0]
-        adv  = torch.clamp((adv + alpha * grad.sign()).detach(), data - epsilon, data + epsilon)
+    pause_hooks(model)
+    try:
+        for _ in range(steps):
+            adv = adv.requires_grad_(True)
+            adv_logits = aggregate_spike_output(model(adv).float())
+            kl   = F.kl_div(F.log_softmax(adv_logits, dim=1), clean_prob, reduction="batchmean")
+            grad = torch.autograd.grad(kl, adv)[0]
+            adv  = torch.clamp((adv + alpha * grad.sign()).detach(), data - epsilon, data + epsilon)
+    finally:
+        resume_hooks(model)
 
     return adv
 
@@ -84,6 +90,9 @@ class SNNTrainer:
         self.spike_rate_hist = []
         self.last_spk_rec    = None
         self.epoch_log       = []
+
+        device_idx = (device.index or 0) if device.type == "cuda" else 0
+        self.gpu_stats = GPUStats(device_idx=device_idx)
 
         use_amp = getattr(cfg, "USE_AMP", True) and device.type == "cuda"
         self.scaler           = torch.amp.GradScaler(enabled=use_amp)
@@ -145,6 +154,7 @@ class SNNTrainer:
             self.model.net.train()
             epoch_loss, epoch_acc, epoch_spike, n, step_count = 0.0, 0.0, 0.0, 0, 0
             t0 = time.perf_counter()
+            self.gpu_stats.start_epoch()
 
             self.model.optimizer.zero_grad(set_to_none=True)
 
@@ -231,7 +241,8 @@ class SNNTrainer:
                     self.model.optimizer.zero_grad(set_to_none=True)
 
                 raw_loss   = loss_val.item() * accum
-                acc        = (aggregate_spike_output(spk_rec.detach().float()).argmax(dim=1) == targets).float().mean().item()
+                logits     = clean_logits.detach() if self.cfg.TRADES_ENABLED else aggregate_spike_output(spk_rec.detach().float())
+                acc        = (logits.argmax(dim=1) == targets).float().mean().item()
                 spike_rate = spk_rec.detach().float().mean().item()
 
                 self.loss_hist.append(raw_loss)
@@ -257,6 +268,7 @@ class SNNTrainer:
                 self.scheduler.step()
 
             epoch_duration = time.perf_counter() - t0
+            gpu            = self.gpu_stats.end_epoch()
             train_loss     = epoch_loss / n
             train_acc      = epoch_acc  / n
             current_lr     = self.model.optimizer.param_groups[0]["lr"]
@@ -269,27 +281,50 @@ class SNNTrainer:
             firing_rate_hz  = train_spike * timesteps / window_s
 
             self.epoch_log.append({
-                "epoch":            epoch + 1,
-                "train_loss":       round(train_loss,     4),
-                "train_accuracy":   round(train_acc,      4),
-                "spike_rate":       round(train_spike,    4),
-                "firing_rate_hz":   round(firing_rate_hz, 2),
-                "learning_rate":    round(current_lr,     6),
-                "epoch_duration_s": round(epoch_duration, 2),
+                "epoch":              epoch + 1,
+                "train_loss":         round(train_loss,     4),
+                "train_accuracy":     round(train_acc,      4),
+                "spike_rate":         round(train_spike,    4),
+                "firing_rate_hz":     round(firing_rate_hz, 2),
+                "learning_rate":      round(current_lr,     6),
+                "epoch_duration_s":   round(epoch_duration, 2),
+                **{k: v for k, v in gpu.items()},
             })
+
+            # Sparse buffer diagnostics — shows AER memory savings vs dense equivalent
+            spk_buf = getattr(self.model, "hidden_spk_buf", {})
+            if spk_buf:
+                sparse_kb  = sum(b.memory_bytes for b in spk_buf.values()) / 1024
+                avg_rate   = sum(b.firing_rate   for b in spk_buf.values()) / len(spk_buf)
+                dense_kb   = sparse_kb / avg_rate if avg_rate > 0 else 0.0
+                buf_report = (f"sparse={sparse_kb:.1f}KB  dense_equiv={dense_kb:.1f}KB  "
+                              f"rate={avg_rate * 100:.1f}%")
+            else:
+                buf_report = "no hooks"
 
             print(f"\nEpoch {epoch + 1}/{epochs}")
             print(f"  • Train Loss     : {train_loss:.4f}")
             print(f"  • Train Accuracy : {train_acc * 100:.2f}%")
             print(f"  • Spike Rate     : {train_spike:.4f}")
             print(f"  • Firing Rate    : {firing_rate_hz:.2f} Hz")
+            print(f"  • Spike Buffer   : {buf_report}")
             print(f"  • LR             : {current_lr:.6f}")
             print(f"  • Duration       : {epoch_duration:.2f}s")
+            if gpu:
+                print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
+                print(f"  • GPU Memory     : {gpu['gpu_mem_peak_gb']} GB / {self.gpu_stats.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
 
             if checkpoint_path is not None and train_acc > best_acc:
                 best_acc = train_acc
                 self.save_checkpoint(checkpoint_path)
                 print(f"  • Checkpoint saved (best: {best_acc * 100:.2f}%)")
+
+        overall = self.gpu_stats.summary()
+        if overall:
+            print("\nGPU Training Summary")
+            print(f"  • Avg utilization  : {overall['overall_avg_util_pct']}%")
+            print(f"  • Peak utilization : {overall['overall_peak_util_pct']}%")
+            print(f"  • Peak VRAM used   : {overall['overall_peak_mem_gb']} GB / {overall['total_vram_gb']} GB  ({overall['overall_peak_mem_pct']}%)")
 
         self.write_csv(csv_path)
 
