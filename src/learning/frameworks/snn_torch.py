@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 from skeleton.snn_config import Settings
 from learning.inference import SNNTester
-from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
 from learning.training import SNNTrainer
 from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
 
@@ -84,7 +83,7 @@ class SNN_TORCH(nn.Module):
 
 
 if __name__ == "__main__":
-    from learning.event_data_workflow.data_pipeline import main as load_data
+    from event_data_workflow.data_pipeline import main as load_data
  
     train_loader, test_loader = load_data()
  

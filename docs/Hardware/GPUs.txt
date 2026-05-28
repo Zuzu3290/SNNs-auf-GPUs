@@ -1,0 +1,127 @@
+# GPU Acceleration — Guided Overview
+
+## The Core Idea
+
+A CPU is built for **latency** — a few powerful cores that execute complex sequential logic fast.
+
+A GPU is built for **throughput** — thousands of weak cores that execute the same simple operation on many pieces of data simultaneously.
+
+```
+CPU:  [====][====][====][====]        4–16 powerful cores
+GPU:  [=][=][=][=][=][=][=][=]...    thousands of small cores
+         (NVIDIA A100: 6,912 CUDA cores)
+```
+
+GPU acceleration means offloading work that fits the "same operation, many data points" pattern to the GPU.
+
+---
+
+## The Memory Hierarchy (Most Important Thing to Understand)
+
+```
+Speed ▲   Size ▼
+│
+│  Registers          ~KB    per thread, fastest
+│  Shared Memory      ~48-96KB  per SM block, very fast
+│  L2 Cache           ~MB    chip-wide
+│  Global Memory      ~GB    (VRAM), slow but large
+│  System RAM         ~GB    CPU side, much slower
+│  Disk               ~TB    slowest
+▼
+```
+
+The entire game of GPU programming is keeping your data in shared memory as long as possible
+and minimizing trips to global memory.
+
+---
+
+## How Work Gets Organized
+
+```
+Grid  →  many Blocks  →  many Threads
+                  ↕
+            Shared Memory
+         (visible only within a Block)
+```
+
+- **Thread**: one execution unit, runs your kernel code
+- **Block**: group of threads that share memory and can synchronize
+- **Grid**: all the blocks running your whole operation
+- **Warp**: 32 threads that execute in lockstep — the hardware's actual scheduling unit
+
+---
+
+## Why It Matters for SNN Training
+
+| Operation                               | CPU              | GPU                         |
+|-----------------------------------------|------------------|-----------------------------|
+| Matrix multiply (weights × activations) | Sequential loops | Massively parallel          |
+| Applying activation to every neuron     | Loop             | One thread per neuron       |
+| Events → Frames conversion              | Slow             | Parallel per event          |
+| Gradient accumulation                   | Sequential       | Atomic adds across threads  |
+
+Neural network training is almost entirely matrix math — which maps perfectly to the GPU's
+parallel structure.
+
+---
+
+## The Three Bottlenecks in Practice
+
+1. **Compute-bound** — cores are busy, need more arithmetic throughput → use Tensor Cores (FP16/BF16)
+2. **Memory-bound** — cores are idle waiting for data → reduce global memory access, increase data reuse in shared memory
+3. **Latency-bound** — threads stalling on synchronization or branching → reduce conditional logic, coalesce memory accesses
+
+Most deep learning workloads are **memory-bound**, not compute-bound. Bandwidth (GB/s) often
+matters more than raw FLOPS.
+
+---
+
+## Producer-Consumer Pipeline (Events → Frames → Training)
+
+```
+[Raw Events Memory]  →  [Conversion Workers]  →  [Frames Memory]  →  [Training Workers]
+```
+
+### Adding More Workers
+
+- Helps IF the conversion stage is the bottleneck (frames memory often empty)
+- Hurts IF shared memory contention outweighs the parallelism gain
+- Shared memory bank conflicts serialize access past a threshold
+- Amdahl's Law: synchronization barriers cap speedup regardless of worker count
+
+### Diagnosing the Bottleneck
+
+| Observation               | Bottleneck       | Fix                         |
+|---------------------------|------------------|-----------------------------|
+| Frames memory often empty | Conversion slow  | Add more conversion workers |
+| Frames memory often full  | Training slow    | Add more training workers   |
+| Both idle                 | Sync overhead    | Reduce barriers, use streams |
+
+### Recommended: CUDA Streams
+
+Overlap conversion and training asynchronously without adding worker contention:
+
+```
+Stream 0:  [Convert batch A] ---------> [Convert batch B]
+Stream 1:           [Train on batch A] -----------> [Train on batch B]
+```
+
+---
+
+## Key Numbers to Know
+
+| Hardware    | CUDA Cores | VRAM  | Memory Bandwidth |
+|-------------|------------|-------|-----------------|
+| RTX 3080    | 8,704      | 10 GB | 760 GB/s        |
+| RTX 4090    | 16,384     | 24 GB | 1,008 GB/s      |
+| NVIDIA A100 | 6,912      | 80 GB | 2,039 GB/s      |
+| NVIDIA H100 | 16,896     | 80 GB | 3,350 GB/s      |
+
+---
+
+## Summary
+
+GPU acceleration = exploit parallelism + keep data close to the cores + avoid synchronization overhead.
+
+For SNN pipelines specifically: the transfer between memory tiers is the dominant cost,
+not raw arithmetic. Profile memory access patterns before adding more workers.
