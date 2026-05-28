@@ -28,7 +28,7 @@ if __name__ == "__main__":
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model = SNN_TORCH(cfg)
+    model = SNN_SJ(cfg)
 
     if cfg.COMPILER_ENABLED:
         from compiler import compile_model
