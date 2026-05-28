@@ -25,7 +25,7 @@ from .cache_engine import AdaptiveCacheController
 from .pipeline_coordinator import PipelineMemoryCoordinator
 from .temporal_slicer import create_sliced_dataset
 
-PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
 
 import tqdm as t
