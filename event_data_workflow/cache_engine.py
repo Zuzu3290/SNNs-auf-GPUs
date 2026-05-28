@@ -20,9 +20,7 @@ import torch
 from torch.utils.data import Dataset
 from tonic import DiskCachedDataset, MemoryCachedDataset
 
-sys.path.insert(0, str(Path(__file__).parent))  # sibling modules (system_monitor)
-
-from system_monitor import CacheMetrics, SystemResourceMonitor, is_gpu_under_pressure
+from .system_monitor import CacheMetrics, SystemResourceMonitor, is_gpu_under_pressure
 
 logger = logging.getLogger(__name__)
 

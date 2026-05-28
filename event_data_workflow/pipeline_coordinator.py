@@ -18,10 +18,9 @@ from dataclasses import dataclass
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # project root → skeleton package
-sys.path.insert(0, str(Path(__file__).parent))          # sibling modules
 
 from skeleton.snn_config import Settings
-from system_monitor import SystemResourceMonitor, gpu_pressure as _gpu_pressure, is_gpu_under_pressure
+from .system_monitor import SystemResourceMonitor, gpu_pressure as system_gpu_pressure, is_gpu_under_pressure
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +92,7 @@ class PipelineMemoryCoordinator:
     def gpu_pressure(self) -> float:
         """Live GPU VRAM utilisation as 0–1 via SystemResourceMonitor."""
         metrics = SystemResourceMonitor(device_idx=self.device_idx).snapshot()
-        return _gpu_pressure(metrics)
+        return system_gpu_pressure(metrics)
 
     def max_cache_bytes(self) -> int:
         """Byte budget for BoundedRecordingCache derived from the effective cache GB."""
