@@ -8,10 +8,11 @@ architecture:
   override: false
   network_struct: S
   device: cuda
-  kernel: OFF
-  simulator: ON  
+  simulator: ON
 
 training:
+  kernel: OFF                   # ON → use the compiled CRSC CUDA kernel for LIF forward pass.
+                                # Requires: python src/learning/setup.py build_ext --inplace
   loss_function: CrossEntropy
   optimizer: Adam
   epochs: 1

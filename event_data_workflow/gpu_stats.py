@@ -18,6 +18,17 @@ from __future__ import annotations
 import threading
 import torch
 
+# Optional NVML Python bindings for real power readings.
+# Install with: pip install nvidia-ml-py
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    NVML_HANDLE = pynvml.nvmlDeviceGetHandleByIndex(0)
+    NVML_OK = True
+except Exception:
+    NVML_OK = False
+    NVML_HANDLE = None
+
 
 class GPUStats:
     """
@@ -41,6 +52,7 @@ class GPUStats:
         self.epoch_samples:   list[float] = []
         self.all_samples:     list[float] = []
         self.peak_mem_each:   list[float] = []
+        self.power_samples_mw: list[float] = []
         self.stop_event                   = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -49,18 +61,35 @@ class GPUStats:
         if not self.available:
             return
         torch.cuda.reset_peak_memory_stats(self.device_idx)
-        self.epoch_samples = []
+        self.epoch_samples    = []
+        self.power_samples_mw = []
         self.stop_event.clear()
         self.thread = threading.Thread(target=self.sample_loop, daemon=True)
         self.thread.start()
 
     def sample_loop(self):
-        """Background thread: records compute utilization % at fixed intervals."""
+        """Background thread: records compute utilization % and GPU power at fixed intervals."""
         while not self.stop_event.wait(self.sample_interval):
             try:
                 self.epoch_samples.append(float(torch.cuda.utilization(self.device_idx)))
             except Exception:
                 pass
+            if NVML_OK and NVML_HANDLE is not None:
+                try:
+                    self.power_samples_mw.append(float(pynvml.nvmlDeviceGetPowerUsage(NVML_HANDLE)))
+                except Exception:
+                    pass
+
+    def gpu_energy_j(self, elapsed_s: float) -> float | None:
+        """Return estimated GPU energy in joules for a timed region.
+
+        Uses average of power samples collected during that region multiplied by
+        elapsed wall-clock seconds. Returns None if NVML power data is unavailable.
+        """
+        if not self.power_samples_mw:
+            return None
+        avg_w = (sum(self.power_samples_mw) / len(self.power_samples_mw)) * 1e-3
+        return avg_w * elapsed_s
 
     def end_epoch(self) -> dict:
         """
