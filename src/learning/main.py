@@ -19,16 +19,37 @@ from learning.adversarial_robustness import AdversarialEvaluator
 
 torch.backends.cudnn.benchmark = True
 
+
+def load_custom_kernel():
+    """Import the compiled CRSC CUDA extension; return the module or None."""
+    try:
+        import snn_cuda.snn_forward as ext  # type: ignore[import]
+        return ext
+    except ImportError:
+        print("[kernel] snn_cuda not built — run: python src/learning/setup.py build_ext --inplace")
+        return None
+
+
 if __name__ == "__main__":
     os.makedirs("./checkpoints", exist_ok=True)
 
     cfg    = Settings()
     device = torch.device(cfg.DEVICE)
 
+    # Load the custom CRSC CUDA kernel only when kernel: ON in SNN_module.yaml
+    custom_kernel = None
+    if cfg.KERNEL == "ON":
+        custom_kernel = load_custom_kernel()
+        if custom_kernel is not None:
+            print("[kernel] Custom CRSC CUDA kernel active (forward + forward_profiled available)")
+
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model = SNN_SJ(cfg)
+    model = SNN_NORSE(cfg)
+
+    # Store on cfg so both trainer and tester can reach it without touching model internals
+    cfg.custom_kernel = custom_kernel
 
     if cfg.COMPILER_ENABLED:
         from compiler import compile_model

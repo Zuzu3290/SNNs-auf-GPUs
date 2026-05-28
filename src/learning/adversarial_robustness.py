@@ -85,8 +85,8 @@ class AdversarialEvaluator:
         correct = total = 0
 
         for data, targets in self.test_loader:
-            data = data.to(self.device)
-            targets = targets.to(self.device)
+            data    = data.to(self.device)
+            targets = targets.to(self.device).long()
 
             if attack == "fgsm":
                 data = generate_fgsm_input(self.model, data, targets, epsilon)
