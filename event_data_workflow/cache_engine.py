@@ -12,7 +12,7 @@ import logging
 import threading
 import shutil
 from abc import abstractmethod
-from collections import OrderedDict
+from collections import deque
 from pathlib import Path
 from typing import Optional, Literal
 from dataclasses import dataclass
@@ -83,35 +83,56 @@ def estimate_item_bytes(events) -> int:
     return 0
 
 
-class BaseLRURecordingCache(Dataset):
+class BaseS3FIFOCache(Dataset):
     """
-    LRU cache base for raw neuromorphic recordings.
+    S3-FIFO cache base for raw neuromorphic recordings.
 
-    Subclasses override prepare_item() to transform a raw (events, target)
-    before it enters the cache — CPU subclass is a no-op, GPU subclass moves
-    tensors to CUDA.
+    Architecture — SOSP'23 (Yang et al., "FIFO Queues are All You Need"):
+      Small queue  (10% target): new items enter here. Items accessed more than
+                   once before eviction are promoted to Main; single-access items
+                   are retired to the ghost set (indices only, no data).
+      Main queue   (90% target): stable working set with CLOCK-style second chance.
+                   Items with freq > 0 are reinserted at the tail with freq - 1;
+                   items with freq == 0 are evicted.
+      Ghost set    : recently evicted indices. A miss that hits the ghost is
+                   admitted directly into Main, bypassing Small — this gives
+                   returning items an immediate fast path.
 
-    Eviction policy:
-    - max_recordings: count-based LRU eviction (None = no count cap)
-    - max_bytes: byte-based LRU eviction  (None = no byte cap)
-    Both caps apply simultaneously when set.
+    Subclasses override prepare_item() — CPU subclass is a no-op, GPU subclass
+    moves tensors to CUDA.
 
-    Multi-worker safety: lock rebuilds after multiprocessing unpickle.
+    Both max_recordings (count cap) and max_bytes (byte cap) apply simultaneously.
+    Multi-worker / multiprocessing safe: lock is rebuilt on unpickle.
     """
+
+    SMALL_FRAC     = 0.10   # target fraction of cached items kept in Small queue
+    GHOST_CAPACITY = 4096   # max ghost entries (indices only — negligible memory)
+    FREQ_MAX       = 3      # 2-bit counter ceiling (per paper)
 
     def __init__(
         self,
         dataset: Dataset,
         max_recordings: Optional[int] = None,
-        max_bytes: Optional[int] = None,
-        transform=None,
+        max_bytes: Optional[int]      = None,
+        transform                     = None,
     ):
-        self.dataset = dataset
-        self.max_recordings = max_recordings  # None = no count cap
-        self.max_bytes = max_bytes            # None = no byte cap
-        self.transform = transform
-        self.cache: OrderedDict = OrderedDict()
-        self.cache_bytes: int = 0
+        self.dataset        = dataset
+        self.max_recordings = max_recordings
+        self.max_bytes      = max_bytes
+        self.transform      = transform
+
+        self.cache: dict[int, tuple] = {}
+        self.freq:  dict[int, int]   = {}
+        self.cache_bytes: int        = 0
+
+        self.small_q:  deque[int] = deque()   # admission queue  (10%)
+        self.main_q:   deque[int] = deque()   # working set      (90%)
+        self.ghost_q:  deque[int] = deque()   # eviction history (indices only)
+        self.ghost_set: set[int]  = set()
+
+        self.in_small: set[int] = set()
+        self.in_main:  set[int] = set()
+
         self.lock = threading.Lock()
 
     @abstractmethod
@@ -124,7 +145,7 @@ class BaseLRURecordingCache(Dataset):
     def __getitem__(self, idx: int):
         with self.lock:
             if idx in self.cache:
-                self.cache.move_to_end(idx)
+                self.freq[idx] = min(self.FREQ_MAX, self.freq[idx] + 1)
                 raw = self.cache[idx]
             else:
                 raw = None
@@ -135,22 +156,105 @@ class BaseLRURecordingCache(Dataset):
             nb = estimate_item_bytes(events)
             with self.lock:
                 if idx not in self.cache:
-                    self.cache[idx] = raw
-                    self.cache.move_to_end(idx)
-                    self.cache_bytes += nb
-                    if self.max_recordings is not None:
-                        while len(self.cache) > self.max_recordings:
-                            _, evicted = self.cache.popitem(last=False)
-                            self.cache_bytes -= estimate_item_bytes(evicted[0])
-                    if self.max_bytes is not None:
-                        while self.cache_bytes > self.max_bytes and self.cache:
-                            _, evicted = self.cache.popitem(last=False)
-                            self.cache_bytes -= estimate_item_bytes(evicted[0])
+                    self.insert_item(idx, raw, nb)
+                else:
+                    # Another worker inserted concurrently — just boost frequency
+                    self.freq[idx] = min(self.FREQ_MAX, self.freq.get(idx, 0) + 1)
+                    raw = self.cache[idx]
 
         if self.transform is not None:
             events, target = raw
             return self.transform(events), target
         return raw
+
+    # ------------------------------------------------------------------
+    # Internal S3-FIFO mechanics  (all called with self.lock held)
+    # ------------------------------------------------------------------
+
+    def insert_item(self, idx: int, raw: tuple, nb: int) -> None:
+        while self.over_capacity(nb):
+            if not self.evict_one():
+                break
+
+        self.cache[idx]   = raw
+        self.freq[idx]    = 1
+        self.cache_bytes += nb
+
+        if idx in self.ghost_set:
+            # Ghost hit → skip Small, go straight to Main
+            self.ghost_set.discard(idx)
+            self.main_q.append(idx)
+            self.in_main.add(idx)
+        else:
+            self.small_q.append(idx)
+            self.in_small.add(idx)
+
+    def over_capacity(self, incoming_bytes: int) -> bool:
+        if self.max_recordings is not None and len(self.cache) >= self.max_recordings:
+            return True
+        if self.max_bytes is not None and self.cache_bytes + incoming_bytes > self.max_bytes:
+            return True
+        return False
+
+    def evict_one(self) -> bool:
+        # Maintain the 10/90 split: evict from Small if it is above its target share
+        small_target = max(1, int(len(self.cache) * self.SMALL_FRAC))
+        if self.small_q and len(self.small_q) >= small_target:
+            return self.evict_from_small()
+        if self.main_q:
+            return self.evict_from_main()
+        if self.small_q:
+            return self.evict_from_small()
+        return False
+
+    def evict_from_small(self) -> bool:
+        if not self.small_q:
+            return False
+        idx = self.small_q.popleft()
+        self.in_small.discard(idx)
+
+        if self.freq.get(idx, 0) > 1:
+            # Accessed more than once → graduate to Main
+            self.freq[idx] = 1
+            self.main_q.append(idx)
+            self.in_main.add(idx)
+            return True  # item kept, space not freed; caller loops again if needed
+        else:
+            # Single-access → evict and add fingerprint to ghost
+            nb = estimate_item_bytes(self.cache[idx][0])
+            del self.cache[idx]
+            del self.freq[idx]
+            self.cache_bytes -= nb
+            self.ghost_q.append(idx)
+            self.ghost_set.add(idx)
+            while len(self.ghost_q) > self.GHOST_CAPACITY:
+                self.ghost_set.discard(self.ghost_q.popleft())
+            return True
+
+    def evict_from_main(self) -> bool:
+        if not self.main_q:
+            return False
+        # CLOCK loop: bounded by queue length × (FREQ_MAX + 1) — always terminates
+        limit = len(self.main_q) * (self.FREQ_MAX + 1) + 1
+        for _ in range(limit):
+            if not self.main_q:
+                return False
+            idx = self.main_q.popleft()
+            self.in_main.discard(idx)
+            if self.freq.get(idx, 0) > 0:
+                # Second chance: reinsert with decremented frequency
+                self.freq[idx] -= 1
+                self.main_q.append(idx)
+                self.in_main.add(idx)
+            else:
+                nb = estimate_item_bytes(self.cache[idx][0])
+                del self.cache[idx]
+                del self.freq[idx]
+                self.cache_bytes -= nb
+                return True
+        return False
+
+    # ------------------------------------------------------------------
 
     @property
     def cache_size(self) -> int:
@@ -160,7 +264,14 @@ class BaseLRURecordingCache(Dataset):
     def clear(self):
         with self.lock:
             self.cache.clear()
+            self.freq.clear()
             self.cache_bytes = 0
+            self.small_q.clear()
+            self.main_q.clear()
+            self.ghost_q.clear()
+            self.ghost_set.clear()
+            self.in_small.clear()
+            self.in_main.clear()
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -172,9 +283,9 @@ class BaseLRURecordingCache(Dataset):
         self.lock = threading.Lock()
 
 
-class BoundedRecordingCache(BaseLRURecordingCache):
+class BoundedRecordingCache(BaseS3FIFOCache):
     """
-    CPU RAM LRU cache for raw recordings.
+    CPU RAM S3-FIFO cache for raw recordings.
 
         cached_raw = BoundedRecordingCache(raw_dataset, max_recordings=500)
         sliced     = TemporalSlicedDataset(cached_raw, config)
@@ -191,12 +302,8 @@ class BoundedRecordingCache(BaseLRURecordingCache):
     def prepare_item(self, raw):
         return raw  # CPU path — no transformation needed
 
-    def __setstate__(self, state):
-        super().__setstate__(state)
-        self.cache_bytes = sum(estimate_item_bytes(v[0]) for v in self.cache.values())
 
-
-class GPURecordingCache(BaseLRURecordingCache):
+class GPURecordingCache(BaseS3FIFOCache):
     """
     GPU VRAM LRU cache for GPU-only deployments (no disk, limited RAM).
 
@@ -251,16 +358,15 @@ class GPURecordingCache(BaseLRURecordingCache):
         new_max_bytes = int(new_budget * (1024 ** 3))
         with self.lock:
             self.max_bytes = new_max_bytes
-            while self.cache_bytes > self.max_bytes and self.cache:
-                _, evicted = self.cache.popitem(last=False)
-                self.cache_bytes -= estimate_item_bytes(evicted[0])
+            while self.cache_bytes > self.max_bytes and (self.small_q or self.main_q):
+                self.evict_one()
 
     def __getitem__(self, idx: int):
         self.evict_under_pressure()
         return super().__getitem__(idx)
 
     def evict_under_pressure(self) -> None:
-        """Evict LRU entries if VRAM free space falls below the emergency margin."""
+        """Evict S3-FIFO entries if VRAM free space falls below the emergency margin."""
         self.access_count += 1
         if self.access_count % self.PRESSURE_CHECK_INTERVAL != 0:
             return
@@ -274,8 +380,7 @@ class GPURecordingCache(BaseLRURecordingCache):
             return  # fast path — no pressure
         with self.lock:
             while self.cache and free_gb < emergency_gb:
-                _, evicted = self.cache.popitem(last=False)
-                self.cache_bytes -= estimate_item_bytes(evicted[0])
+                self.evict_one()
                 free_driver, _ = torch.cuda.mem_get_info(device_idx)
                 free_gb = free_driver / (1024 ** 3)
 
