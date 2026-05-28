@@ -16,7 +16,8 @@ from pathlib import Path
 
 import torch.nn as nn
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))  # project root → skeleton
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))          # src/ → compiler, learning
 from skeleton import Settings
 from compiler.src.ir import ComputeGraph, DeviceTag, IRNode, OpType
 

@@ -34,12 +34,16 @@ Norse neurons return (spk, state) tuples — handled automatically.
 SpikingJelly returns pre-summed [B, C] output — STDP skips the output pair automatically.
 """
 
+import sys
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional
 
-from learning.event_data_workflow.cache_engine import SparseEventBuffer
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "event_data_workflow"))
+
+from pipeline_coordinator import DenseTimestepBuffer
 
 
 def register_activity_hooks(model: nn.Module, layer_map: Dict[str, nn.Module]) -> None:
@@ -55,7 +59,7 @@ def register_activity_hooks(model: nn.Module, layer_map: Dict[str, nn.Module]) -
         layer_map: {name: module} for each hidden layer to monitor.
                    e.g. {'lif1': self.net[1], 'lif2': self.net[4]}
     """
-    model.hidden_spk_buf = {name: SparseEventBuffer() for name in layer_map}
+    model.hidden_spk_buf = {name: DenseTimestepBuffer() for name in layer_map}
 
     def make_hook(name):
         def hook(module, inp, output):

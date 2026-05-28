@@ -36,24 +36,24 @@ training:
   trades_steps: 3              # PGD iterations used to find worst-case input per batch. Recommended: 10 for training.
                                 # Range: 1 (fast, weaker adversarial) → 40 (slow, strongest adversarial).
 
-  activity_reg_enabled: false   # Two-sided per-neuron activity regularization on hidden LIF layers.
+  activity_reg_enabled: true   # Two-sided per-neuron activity regularization on hidden LIF layers.
   activity_reg_min_rate: 0.01   # Penalize neurons firing less than 1% of timesteps  (dead neuron prevention).
   activity_reg_max_rate: 0.50   # Penalize neurons firing more than 50% of timesteps (saturation prevention).
   activity_reg_lambda_low: 0.1  # Penalty weight for dead neurons.
   activity_reg_lambda_high: 0.1 # Penalty weight for saturated neurons.
 
-  num_workers: 4                # CPU DataLoader workers that prefetch batches while the GPU trains.
+  num_workers: 6                # CPU DataLoader workers that prefetch batches while the GPU trains.
                                 # More workers reduce GPU starvation between batches (better utilisation).
                                 # Recommended: 4–8 on a workstation. Capped by CPU count automatically.
                                 # Set to 0 to disable multiprocessing (needed for non-picklable transforms).
 
-  stdp_enabled: false           # STDP causal correlation loss alongside BPTT.
+  stdp_enabled: true           # STDP causal correlation loss alongside BPTT.
   stdp_tau: 20.0                # Trace decay time constant in timesteps. Higher = longer memory of past spikes.
   stdp_a_plus: 0.01             # LTP strength — how strongly to reinforce causal (pre→post) spike order.
   stdp_a_minus: 0.01            # LTD strength — how strongly to penalise anticausal (post→pre) spike order.
   
 compiler:
-  enabled: true             # Master switch. true → route model through the JIT compiler pipeline.
+  enabled: false             # Master switch. true → route model through the JIT compiler pipeline.
                             #                false → standard PyTorch execution (safe default).
   backend: cuda             # Hardware target the compiler emits code for: cuda | cpu
   fuse_timesteps: true      # Fuse the T-timestep loop into a single kernel launch instead of T separate launches.

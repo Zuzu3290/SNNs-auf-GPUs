@@ -21,7 +21,7 @@ class SNNTester:
         self.num_classes = cfg.NUM_CLASSES
         self.batch_log   = []
 
-    def _class_metrics(self, cm: np.ndarray) -> list[dict]:
+    def class_metrics(self, cm: np.ndarray) -> list[dict]:
         total = cm.sum()
         rows  = []
         for c in range(self.num_classes):
@@ -48,7 +48,7 @@ class SNNTester:
             })
         return rows
 
-    def _write_csv(self, path: str):
+    def write_csv(self, path: str):
         if not self.batch_log:
             return
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -135,7 +135,7 @@ class SNNTester:
         avg_spike_rate         = total_spikes / (len(self.batch_log) * self.cfg.TIMESTEPS * self.num_classes) if self.batch_log else 0.0
         window_s               = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
         avg_firing_rate_hz     = avg_spike_rate * self.cfg.TIMESTEPS / window_s
-        class_metrics          = self._class_metrics(cm)
+        class_metrics          = self.class_metrics(cm)
         gt_dist                = {c: int((all_targets == c).sum()) for c in range(self.num_classes)}
         pred_dist              = {c: int((all_preds   == c).sum()) for c in range(self.num_classes)}
  
@@ -163,7 +163,7 @@ class SNNTester:
         for c in range(self.num_classes):
             print(f"    Class {c:>2} | GT: {gt_dist[c]:>5}  Pred: {pred_dist[c]:>5}")
  
-        self._write_csv(csv_path)
+        self.write_csv(csv_path)
  
         return {
             "overall_accuracy":          overall_acc,
