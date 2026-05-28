@@ -90,6 +90,9 @@ class Settings:
         # Generated network structure
         self.network_structure = self.generate_network_structure()
 
+        # Set at runtime by main.py when kernel: ON — holds the compiled snn_cuda extension or None
+        self.custom_kernel = None
+
     def load_yaml_config(self, yaml_path):
         with open(yaml_path, "r") as file:
             return yaml.safe_load(file)
