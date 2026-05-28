@@ -13,8 +13,8 @@ import sys
 import logging
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # src/ → skeleton
-sys.path.insert(0, str(Path(__file__).parent))                # sibling modules
+sys.path.insert(0, str(Path(__file__).parent.parent))  # project root → skeleton package
+sys.path.insert(0, str(Path(__file__).parent))          # sibling modules
 
 import torch
 from torch.utils.data import DataLoader
@@ -22,7 +22,8 @@ import tonic
 import tonic.transforms as transforms
 import torchvision
 from skeleton import Settings
-from cache_engine import AdaptiveCacheController, PipelineMemoryCoordinator
+from cache_engine import AdaptiveCacheController
+from pipeline_coordinator import PipelineMemoryCoordinator
 from temporal_slicer import create_sliced_dataset
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
@@ -30,13 +31,13 @@ DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
 
 import tqdm as t
 orig_tqdm_init = t.tqdm.__init__
-def _mb_init(self, *a, **kw):
+def mb_init(self, *a, **kw):
     if kw.get("total", 0) > 1_000_000:
         kw.setdefault("unit", "B")
         kw.setdefault("unit_scale", True)
         kw.setdefault("unit_divisor", 1024)
     orig_tqdm_init(self, *a, **kw)
-t.tqdm.__init__ = _mb_init
+t.tqdm.__init__ = mb_init
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ class NeuromorphicEncoder:
         self.test_loader: DataLoader
 
         self.coordinator = PipelineMemoryCoordinator.from_system(
+            settings=cfg,
             device=torch.device(cfg.DEVICE)
         )
         self.build()
@@ -146,10 +148,12 @@ class NeuromorphicEncoder:
         ])
         test_tf = frame_tf
 
+        num_workers = self.cfg.NUM_WORKERS
+
         if self.use_temporal_slicing:
             # Layer 1: cache raw events (slicing needs raw timestamps)
-            cached_train = controller.wrap_dataset(raw_train, split="train")
-            cached_test  = controller.wrap_dataset(raw_test,  split="test")
+            cached_train = controller.wrap_dataset(raw_train, split="train", num_workers=num_workers)
+            cached_test  = controller.wrap_dataset(raw_test,  split="test",  num_workers=num_workers)
 
             # Layer 2: stateless slicing with transforms applied per slice
             train_data = create_sliced_dataset(
@@ -175,8 +179,8 @@ class NeuromorphicEncoder:
                 )
         else:
             # No slicing: cache with transforms baked in
-            train_data = controller.wrap_dataset(raw_train, transform=train_tf, split="train")
-            test_data  = controller.wrap_dataset(raw_test,  transform=test_tf,  split="test")
+            train_data = controller.wrap_dataset(raw_train, transform=train_tf, split="train", num_workers=num_workers)
+            test_data  = controller.wrap_dataset(raw_test,  transform=test_tf,  split="test",  num_workers=num_workers)
 
         return train_data, test_data
 
@@ -184,7 +188,7 @@ class NeuromorphicEncoder:
         """Build DataLoaders; worker count and prefetch driven by PipelineMemoryCoordinator."""
         batch_size = self.cfg.BATCH_SIZE
         dl_cfg = {
-            k: v for k, v in self.coordinator.dataloader_config(num_workers=self.cfg.NUM_WORKERS).items()
+            k: v for k, v in self.coordinator.dataloader_config().items()
             if v is not None  # prefetch_factor must be omitted (not None) when num_workers=0
         }
 

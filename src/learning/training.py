@@ -9,7 +9,8 @@ from contextlib import nullcontext
 import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from skeleton import Settings, GPUStats
+from skeleton import Settings
+from event_data_workflow.gpu_stats import GPUStats
 from learning.frameworks.activity_reg import (
     get_hidden_spike_recordings,
     activity_regularization,
@@ -19,10 +20,6 @@ from learning.frameworks.activity_reg import (
 )
 
 logger = logging.getLogger(__name__)
-
-cfg = Settings()
-device = torch.device(cfg.DEVICE)
-
 
 
 def generate_trades_adversarial(
@@ -95,7 +92,7 @@ class SNNTrainer:
         self.gpu_stats = GPUStats(device_idx=device_idx)
 
         use_amp = getattr(cfg, "USE_AMP", True) and device.type == "cuda"
-        self.scaler           = torch.amp.GradScaler(enabled=use_amp)
+        self.scaler           = torch.amp.GradScaler("cuda", enabled=use_amp)  # type: ignore[attr-defined]
         self.use_amp          = use_amp
         self.grad_accum_steps = max(1, getattr(cfg, "GRAD_ACCUM_STEPS", 1))
 
