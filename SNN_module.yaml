@@ -14,7 +14,7 @@ architecture:
 training:
   loss_function: CrossEntropy
   optimizer: Adam
-  epochs: 3
+  epochs: 1
   iterations_per_epoch: 100
   timesteps: 25
   batch_size: 128

@@ -378,7 +378,7 @@ def create_cached_sliced_dataset(
     share a single cache entry.  Reversing the order caches every slice
     individually and multiplies RAM usage by the slice expansion factor.
     """
-    from cache_engine import AdaptiveCacheController
+    from .cache_engine import AdaptiveCacheController
 
     # Layer 1: cache raw recordings before any slicing
     controller = AdaptiveCacheController(cache_path=cache_path, verbose=verbose)

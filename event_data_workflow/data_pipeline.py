@@ -14,7 +14,6 @@ import logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # project root → skeleton package
-sys.path.insert(0, str(Path(__file__).parent))          # sibling modules
 
 import torch
 from torch.utils.data import DataLoader
@@ -22,9 +21,9 @@ import tonic
 import tonic.transforms as transforms
 import torchvision
 from skeleton import Settings
-from cache_engine import AdaptiveCacheController
-from pipeline_coordinator import PipelineMemoryCoordinator
-from temporal_slicer import create_sliced_dataset
+from .cache_engine import AdaptiveCacheController
+from .pipeline_coordinator import PipelineMemoryCoordinator
+from .temporal_slicer import create_sliced_dataset
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 DATA_DIR     = PROJECT_ROOT / "tmp" / "data"

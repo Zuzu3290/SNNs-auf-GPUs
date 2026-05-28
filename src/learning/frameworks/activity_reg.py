@@ -34,16 +34,12 @@ Norse neurons return (spk, state) tuples — handled automatically.
 SpikingJelly returns pre-summed [B, C] output — STDP skips the output pair automatically.
 """
 
-import sys
-from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "event_data_workflow"))
-
-from pipeline_coordinator import DenseTimestepBuffer
+from event_data_workflow.pipeline_coordinator import DenseTimestepBuffer
 
 
 def register_activity_hooks(model: nn.Module, layer_map: Dict[str, nn.Module]) -> None:
