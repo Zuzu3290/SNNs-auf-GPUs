@@ -81,6 +81,8 @@ class SNNTrainer:
         self.train_loader = train_loader
         self.cfg          = cfg
         self.device       = device
+        self.use_custom_kernel = cfg.KERNEL == "ON" and cfg.custom_kernel is not None
+        self._voltage_buf: torch.Tensor | None = None
 
         self.loss_hist       = []
         self.acc_hist        = []
@@ -101,6 +103,35 @@ class SNNTrainer:
             CosineAnnealingLR(self.model.optimizer, T_max=cfg.EPOCHS)
             if lr_sched == "cosine" else None
         )
+
+    def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
+        """Single forward pass. Routes through the custom CRSC CUDA kernel when
+        kernel: ON is set in SNN_module.yaml, otherwise uses the framework model."""
+        if not self.use_custom_kernel:
+            return self.model(data)
+
+        # Custom kernel expects [B, N, T]; typical neuromorphic data is [T, B, C, H, W]
+        if data.dim() == 5:
+            T, B, C, H, W = data.shape
+            inp = data.view(T, B, C * H * W).permute(1, 2, 0).contiguous()  # [B, N, T]
+        elif data.dim() == 4:
+            T, B, C, N = data.shape
+            inp = data.view(T, B, C * N).permute(1, 2, 0).contiguous()      # [B, N, T]
+        else:
+            return self.model(data)  # unsupported shape — fall back silently
+
+        B_sz, N_sz = inp.size(0), inp.size(1)
+        if self._voltage_buf is None or self._voltage_buf.shape != (B_sz, N_sz):
+            self._voltage_buf = torch.zeros(B_sz, N_sz, device=self.device)
+
+        kernel  = self.cfg.custom_kernel
+        assert kernel is not None
+        tau_inv = 1.0 - float(self.cfg.BETA)
+        spikes  = kernel.forward(
+            inp, self._voltage_buf,
+            float(self.cfg.THRESHOLD), tau_inv,
+        )                                              # [B, N, T]
+        return spikes.permute(2, 0, 1).contiguous()   # [T, B, N]
 
     def save_checkpoint(self, path: str):
         ckpt = {
@@ -165,7 +196,7 @@ class SNNTrainer:
                         if reset is not None:
                             reset()
                         clean_prob = F.softmax(
-                            aggregate_spike_output(self.model(data).float()), dim=1
+                            aggregate_spike_output(self.forward_pass(data).float()), dim=1
                         )
                     adv_data = generate_trades_adversarial(
                         self.model, data, clean_prob,
@@ -174,10 +205,10 @@ class SNNTrainer:
                     with autocast_ctx:
                         if reset is not None:
                             reset()
-                        spk_rec      = self.model(data)
+                        spk_rec      = self.forward_pass(data)
                         if reset is not None:
                             reset()
-                        spk_rec_adv  = self.model(adv_data)
+                        spk_rec_adv  = self.forward_pass(adv_data)
                         clean_logits = aggregate_spike_output(spk_rec.float())
                         adv_logits   = aggregate_spike_output(spk_rec_adv.float())
                         ce_loss  = F.cross_entropy(clean_logits, targets)
@@ -208,7 +239,7 @@ class SNNTrainer:
                         loss_val = (ce_loss + self.cfg.TRADES_LAMBDA * kl_loss + act_penalty + stdp_penalty) / accum
                 else:
                     with autocast_ctx:
-                        spk_rec   = self.model(data)
+                        spk_rec   = self.forward_pass(data)
                         task_loss = self.model.loss_fn(spk_rec, targets)
                         hidden    = get_hidden_spike_recordings(self.model)
                         if self.cfg.ACTIVITY_REG_ENABLED:

@@ -7,6 +7,7 @@ import torch
 import numpy as np
 from skeleton import Settings
 from learning.training import aggregate_spike_output
+from event_data_workflow.gpu_stats import GPUStats
 
 # Energy per synaptic op — adjust for your target neuromorphic platform
 ENERGY_PER_SPIKE_PJ = 3.5
@@ -20,6 +21,35 @@ class SNNTester:
         self.device      = device
         self.num_classes = cfg.NUM_CLASSES
         self.batch_log   = []
+        self.use_custom_kernel = cfg.KERNEL == "ON" and cfg.custom_kernel is not None
+        self._voltage_buf: torch.Tensor | None = None
+        device_idx = (device.index or 0) if device.type == "cuda" else 0
+        self.gpu_stats = GPUStats(device_idx=device_idx)
+
+    def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
+        if not self.use_custom_kernel:
+            return self.model(data)
+
+        if data.dim() == 5:
+            T, B, C, H, W = data.shape
+            inp = data.view(T, B, C * H * W).permute(1, 2, 0).contiguous()
+        elif data.dim() == 4:
+            T, B, C, N = data.shape
+            inp = data.view(T, B, C * N).permute(1, 2, 0).contiguous()
+        else:
+            return self.model(data)
+
+        B_sz, N_sz = inp.size(0), inp.size(1)
+        if self._voltage_buf is None or self._voltage_buf.shape != (B_sz, N_sz):
+            self._voltage_buf = torch.zeros(B_sz, N_sz, device=self.device)
+
+        kernel = self.cfg.custom_kernel
+        assert kernel is not None
+        spikes = kernel.forward(
+            inp, self._voltage_buf,
+            float(self.cfg.THRESHOLD), 1.0 - float(self.cfg.BETA),
+        )
+        return spikes.permute(2, 0, 1).contiguous()
 
     def class_metrics(self, cm: np.ndarray) -> list[dict]:
         total = cm.sum()
@@ -70,7 +100,10 @@ class SNNTester:
         cm = np.zeros((self.num_classes, self.num_classes), dtype=int)
  
         print("\n[TEST RUN]")
- 
+
+        self.gpu_stats.start_epoch()
+        t_run_start = time.perf_counter()
+
         with torch.no_grad():
             for batch_idx, (data, targets) in enumerate(self.test_loader):
                 data    = data.to(self.device)
@@ -79,7 +112,7 @@ class SNNTester:
                 T = data.size(0)
  
                 t0         = time.perf_counter()
-                spk_rec    = self.model(data)               # [T, B, num_classes]
+                spk_rec    = self.forward_pass(data)
                 latency_ms = (time.perf_counter() - t0) * 1000
  
                 batch_spikes    = int(spk_rec.sum().item())
@@ -125,9 +158,13 @@ class SNNTester:
                       f"Latency: {latency_ms:.1f}ms | "
                       f"Energy: {energy_pj:.1f}pJ")
  
+        t_run_elapsed = time.perf_counter() - t_run_start
+        self.gpu_stats.end_epoch()
+        gpu_energy_j = self.gpu_stats.gpu_energy_j(t_run_elapsed)
+
         all_preds   = torch.cat(all_preds)
         all_targets = torch.cat(all_targets)
- 
+
         overall_acc            = (all_preds == all_targets).float().mean().item()
         avg_latency_ms         = total_latency_ms / len(self.batch_log)
         avg_latency_per_sample = total_latency_ms / total_samples
@@ -147,8 +184,16 @@ class SNNTester:
         print(f"  • Avg Firing Rate         : {avg_firing_rate_hz:.2f} Hz")
         print(f"  • Avg Batch Latency       : {avg_latency_ms:.2f} ms")
         print(f"  • Avg Latency / Sample    : {avg_latency_per_sample:.3f} ms")
-        print(f"  • Total Energy Estimate   : {total_energy_pj:.1f} pJ")
+        print(f"  • Total Energy Estimate   : {total_energy_pj:.1f} pJ  (neuromorphic model)")
         print(f"  • Energy / Sample         : {total_energy_pj / total_samples:.2f} pJ")
+
+        if gpu_energy_j is not None:
+            neuromorphic_j = total_energy_pj * 1e-12
+            gap = gpu_energy_j / neuromorphic_j if neuromorphic_j > 0 else float("inf")
+            print(f"  • GPU Energy (actual)     : {gpu_energy_j * 1e3:.2f} mJ")
+            print(f"  • Hardware Efficiency Gap : {gap:.2e}x  (GPU vs ideal neuromorphic silicon)")
+        else:
+            print(f"  • GPU Energy (actual)     : N/A  (install nvidia-ml-py for real power readings)")
  
         print("\n  Per-class metrics:")
         for row in class_metrics:
@@ -174,6 +219,7 @@ class SNNTester:
             "avg_latency_per_sample_ms": avg_latency_per_sample,
             "total_energy_pj":           total_energy_pj,
             "energy_per_sample_pj":      total_energy_pj / total_samples,
+            "gpu_energy_j":              gpu_energy_j,
             "class_metrics":             class_metrics,
             "gt_distribution":           gt_dist,
             "pred_distribution":         pred_dist,
