@@ -1,0 +1,10 @@
+{
+  "include": ["src", "event_data_workflow", "skeleton"],
+  "extraPaths": [
+    ".",
+    "src",
+    "event_data_workflow"
+  ],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic"
+}
