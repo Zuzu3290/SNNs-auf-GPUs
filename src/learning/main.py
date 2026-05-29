@@ -52,7 +52,7 @@ if __name__ == "__main__":
     model = _MODELS[args.model](cfg)
     print(f"\n  Model backend  : {args.model.upper()}")
 
-    if cfg.COMPILER_ENABLED:
+    if cfg.TORCH_COMPILE:
         model = compile_model(model, cfg)
 
     cfg.display()
