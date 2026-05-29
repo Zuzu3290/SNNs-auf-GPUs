@@ -14,21 +14,21 @@ import logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # project root → skeleton package
+PROJECT_ROOT = Path(__file__).parent.parent
+DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
+logger = logging.getLogger(__name__)
 
 import torch
 from torch.utils.data import DataLoader
 import tonic
 import tonic.transforms as transforms
 import torchvision
+import tqdm as t
 from skeleton import Settings
 from .cache_engine import AdaptiveCacheController
 from .pipeline_coordinator import PipelineMemoryCoordinator
 from .temporal_slicer import create_sliced_dataset
 
-PROJECT_ROOT = Path(__file__).parent.parent
-DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
-
-import tqdm as t
 orig_tqdm_init = t.tqdm.__init__
 def mb_init(self, *a, **kw):
     if kw.get("total", 0) > 1_000_000:
@@ -37,17 +37,6 @@ def mb_init(self, *a, **kw):
         kw.setdefault("unit_divisor", 1024)
     orig_tqdm_init(self, *a, **kw)
 t.tqdm.__init__ = mb_init
-
-logger = logging.getLogger(__name__)
-
-
-def dataset_is_picklable(obj) -> bool:
-    import pickle
-    try:
-        pickle.dumps(obj)
-        return True
-    except Exception:
-        return False
 
 
 class NeuromorphicEncoder:
@@ -62,27 +51,16 @@ class NeuromorphicEncoder:
         events_per_slice    : Switch to event-driven slicing (ignores slice_duration_ms)
     """
 
-    def __init__(
-        self,
-        cfg: Settings,
-        use_temporal_slicing: bool = False,
-        slice_duration_ms: float = None,
-        auto_tune_slicing: bool = False,
-        events_per_slice: int = None,
-    ):
+    def __init__(self, cfg: Settings, use_temporal_slicing: bool = False, slice_duration_ms: float = None, auto_tune_slicing: bool = False, events_per_slice: int = None ):
+
         self.cfg = cfg
         self.use_temporal_slicing = use_temporal_slicing
         self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)
         self.auto_tune_slicing = auto_tune_slicing
         self.events_per_slice = events_per_slice
-
         self.train_loader: DataLoader
         self.test_loader: DataLoader
-
-        self.coordinator = PipelineMemoryCoordinator.from_system(
-            settings=cfg,
-            device=torch.device(cfg.DEVICE)
-        )
+        self.coordinator = PipelineMemoryCoordinator.from_system(settings=cfg, device=torch.device(cfg.DEVICE))
         self.build()
 
     def build(self):
@@ -118,10 +96,7 @@ class NeuromorphicEncoder:
         self.validate_first_sample(raw_train, "train")
         self.validate_first_sample(raw_test, "test")
 
-        frame_tf = transforms.Compose([
-            transforms.Denoise(filter_time=10000),
-            transforms.ToFrame(sensor_size=sensor_size, time_window=time_window),
-        ])
+        frame_tf = transforms.Compose([transforms.Denoise(filter_time=10000), transforms.ToFrame(sensor_size=sensor_size, time_window=time_window)])
         return raw_train, raw_test, frame_tf
 
     def apply_pipeline(self, raw_train, raw_test, frame_tf):
@@ -136,15 +111,10 @@ class NeuromorphicEncoder:
         controller = AdaptiveCacheController(
             cache_path=str(PROJECT_ROOT / "cache"),
             max_cached_recordings=max_recs,
-            verbose=True,
             device=torch.device(self.cfg.DEVICE),
         )
 
-        train_tf = transforms.Compose([
-            frame_tf,
-            torch.from_numpy,
-            torchvision.transforms.RandomRotation([-10, 10]),
-        ])
+        train_tf = transforms.Compose([frame_tf, torch.from_numpy, torchvision.transforms.RandomRotation([-10, 10])])
         test_tf = frame_tf
 
         num_workers = self.cfg.NUM_WORKERS
@@ -155,19 +125,20 @@ class NeuromorphicEncoder:
             cached_test  = controller.wrap_dataset(raw_test,  split="test",  num_workers=num_workers)
 
             # Layer 2: stateless slicing with transforms applied per slice
+            metadata_dir = str(PROJECT_ROOT / "metadata")
             train_data = create_sliced_dataset(
                 cached_train,
                 slice_duration_ms=self.slice_duration_ms,
                 auto_tune=self.auto_tune_slicing,
                 events_per_slice=self.events_per_slice,
                 transform=train_tf,
-                verbose=True,
+                metadata_path=f"{metadata_dir}/train",
             )
             test_data = create_sliced_dataset(
                 cached_test,
                 slice_duration_ms=self.slice_duration_ms,
                 transform=test_tf,
-                verbose=True,
+                metadata_path=f"{metadata_dir}/test",
             )
             logger.info(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
             if len(train_data) == 0 or len(test_data) == 0:
@@ -190,16 +161,6 @@ class NeuromorphicEncoder:
             k: v for k, v in self.coordinator.dataloader_config().items()
             if v is not None  # prefetch_factor must be omitted (not None) when num_workers=0
         }
-
-        if dl_cfg.get("persistent_workers") and not dataset_is_picklable(train_data):
-            logger.warning(
-                "[PIPELINE] Dataset is not picklable — disabling persistent_workers "
-                "and multiprocessing to prevent DataLoader hang. "
-                "Remove lambda functions from transforms to re-enable multiprocessing."
-            )
-            dl_cfg["persistent_workers"] = False
-            dl_cfg["num_workers"] = 0
-            dl_cfg.pop("prefetch_factor", None)
 
         pad = tonic.collation.PadTensors(batch_first=False)
 
@@ -253,8 +214,3 @@ def main() -> tuple[DataLoader, DataLoader]:
     cfg = Settings()
     encoder = NeuromorphicEncoder(cfg)
     return encoder.get_dataloaders()
-
-
-if __name__ == "__main__":
-    train_loader, test_loader = main()
-    logger.info(f"[PIPELINE] Ready — {len(train_loader)} train batches, {len(test_loader)} test batches")

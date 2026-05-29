@@ -57,10 +57,9 @@ class PipelineMemoryCoordinator:
     GPU_PRESSURE_THRESHOLD = 0.75
     # When the GPU has consumed 75% or more of its total VRAM, the recording cache allocation is halved — preventing the model and cache from competing for the remaining VRAM and crashing with an out-of-memory error
 
-    def __init__(self, budget: PipelineMemoryBudget, settings: Settings, verbose: bool = True, device=None):
-        self.budget = budget      # carries the RAM fractions for each pipeline stage and the total RAM budget
-        self.settings = settings  # SNN_module.yaml config — used to read NUM_WORKERS and other training params
-        self.verbose = verbose    # logging messages about allocation decisions and GPU pressure
+    def __init__(self, budget: PipelineMemoryBudget, settings: Settings, device=None):
+        self.budget = budget
+        self.settings = settings
         self.device = device
 
         # CUDA is always required — either with CPU workers (Scenario 1: CUDA + CPU)
@@ -78,15 +77,14 @@ class PipelineMemoryCoordinator:
         )
 
     @classmethod
-    def from_system(cls, settings: Settings, safety_margin_gb: float = 2.0, verbose: bool = True, device=None) -> "PipelineMemoryCoordinator":
+    def from_system(cls, settings: Settings, safety_margin_gb: float = 2.0, device=None) -> "PipelineMemoryCoordinator":
         """Build coordinator from live system metrics via SystemResourceMonitor."""
         device_idx = (device.index or 0) if device is not None and getattr(device, "type", "") == "cuda" else 0
         metrics = SystemResourceMonitor(device_idx=device_idx).snapshot()
         total_gb = max(1.0, metrics.available_ram_gb - safety_margin_gb)
-        coord = cls(PipelineMemoryBudget(total_gb=total_gb), settings=settings, verbose=verbose, device=device)
-        if verbose:
-            logger.info(f"[MEMORY COORDINATOR] Pipeline budget: {total_gb:.1f} GB")
-            coord.log_allocation()
+        coord = cls(PipelineMemoryBudget(total_gb=total_gb), settings=settings, device=device)
+        logger.info(f"[MEMORY COORDINATOR] Pipeline budget: {total_gb:.1f} GB")
+        coord.log_allocation()
         return coord
 
     def gpu_pressure(self) -> float:
@@ -111,11 +109,10 @@ class PipelineMemoryCoordinator:
     def max_recordings(self, avg_recording_bytes: int) -> int:
         """Compute max_recordings cap for BoundedRecordingCache."""
         result = max(50, int(self.effective_cache_gb() * (1024 ** 3) / avg_recording_bytes))
-        if self.verbose:
-            logger.info(
-                f"[MEMORY COORDINATOR] max_recordings={result} "
-                f"(cache={self.effective_cache_gb():.2f}GB, avg={avg_recording_bytes // 1024}KB/rec)"
-            )
+        logger.info(
+            f"[MEMORY COORDINATOR] max_recordings={result} "
+            f"(cache={self.effective_cache_gb():.2f}GB, avg={avg_recording_bytes // 1024}KB/rec)"
+        )
         return result
 
     def dataloader_config(self, batch_bytes: int = 0) -> dict:
@@ -130,7 +127,6 @@ class PipelineMemoryCoordinator:
         In that case num_workers=0 avoids forking and pin_memory is disabled since
         there is no CPU→GPU transfer boundary to optimise.
         """
-        gpu    = torch.cuda.is_available()
         on_gpu = (self.device is not None and getattr(self.device, "type", "") == "cuda")
         worker_budget_gb = self.budget.total_gb * self.budget.worker_fraction
         gpu_only = on_gpu and worker_budget_gb < 0.5  # <500 MB RAM → GPU-only embedded
@@ -142,8 +138,7 @@ class PipelineMemoryCoordinator:
                 "pin_memory":         False,  # no H2D copy boundary in GPU-only path
                 "persistent_workers": False,
             }
-            if self.verbose:
-                logger.info("[MEMORY COORDINATOR] GPU-only mode — num_workers=0, pin_memory=False")
+            logger.info("[MEMORY COORDINATOR] GPU-only mode — num_workers=0, pin_memory=False")
         else:
             worker_bytes = worker_budget_gb * (1024 ** 3)
             if batch_bytes > 0:
@@ -156,12 +151,11 @@ class PipelineMemoryCoordinator:
                 "prefetch_factor":    2 if max_workers > 0 else None,
                 # pin_memory allocates page-locked host memory so CPU→GPU transfers
                 # can run asynchronously via non_blocking=True in the training loop.
-                "pin_memory":         gpu,
+                "pin_memory":         True,
                 "persistent_workers": max_workers > 0,
             }
 
-        if self.verbose:
-            logger.info(f"[MEMORY COORDINATOR] DataLoader config: {cfg}")
+        logger.info(f"[MEMORY COORDINATOR] DataLoader config: {cfg}")
         return cfg
 
     def prefetch_queue_size(self) -> int:

@@ -283,6 +283,10 @@ class SNNTrainer:
             timesteps       = getattr(self.cfg, 'TIMESTEPS', 25)
             firing_rate_hz  = train_spike * timesteps / window_s
 
+            energy_j     = self.gpu_stats.gpu_energy_j(epoch_duration)
+            avg_power_w  = energy_j / epoch_duration
+            gpu_active_s = epoch_duration * gpu.get("gpu_util_avg_pct", 0.0) / 100.0
+
             self.epoch_log.append({
                 "epoch":              epoch + 1,
                 "train_loss":         round(train_loss,     4),
@@ -291,6 +295,9 @@ class SNNTrainer:
                 "firing_rate_hz":     round(firing_rate_hz, 2),
                 "learning_rate":      round(current_lr,     6),
                 "epoch_duration_s":   round(epoch_duration, 2),
+                "gpu_active_s":       round(gpu_active_s,   2),
+                "energy_j":           round(energy_j,       2),
+                "avg_power_w":        round(avg_power_w,    2),
                 **{k: v for k, v in gpu.items()},
             })
 
@@ -312,13 +319,11 @@ class SNNTrainer:
             print(f"  • Firing Rate    : {firing_rate_hz:.2f} Hz")
             print(f"  • Spike Buffer   : {buf_report}")
             print(f"  • LR             : {current_lr:.6f}")
-            print(f"  • Duration       : {epoch_duration:.2f}s")
+            print(f"  • Wall time      : {epoch_duration:.2f}s")
+            print(f"  • GPU active     : {gpu_active_s:.2f}s  ({gpu.get('gpu_util_avg_pct', 0.0):.1f}% of wall time)")
+            print(f"  • Energy         : {energy_j:.2f} J  ({avg_power_w:.1f} W avg)")
             if gpu:
-                if gpu.get("gpu_util_available", True):
-                    print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
-                else:
-                    print(f"  • GPU Util       : NVML counter unavailable on this driver  "
-                          f"(model IS on GPU — {gpu['gpu_mem_peak_gb']} GB VRAM in use)")
+                print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
                 print(f"  • GPU Memory     : {gpu['gpu_mem_peak_gb']} GB / {self.gpu_stats.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
 
             if checkpoint_path is not None and train_acc > best_acc:

@@ -1,5 +1,6 @@
 import sys
 import os
+import argparse
 from pathlib import Path
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -8,6 +9,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # project root →
 sys.path.insert(0, str(Path(__file__).parent.parent))          # src/ → learning, compiler
 
 import torch
+
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA-capable GPU required. No GPU detected.")
+
 from skeleton import Settings
 from learning.frameworks.snn_torch import SNN_TORCH
 from learning.frameworks.snn_norse import SNN_NORSE
@@ -17,10 +22,25 @@ from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder
 from learning.adversarial_robustness import AdversarialEvaluator
 from compiler import compile_model
-torch.backends.cudnn.benchmark = True #cuDNN's autotuner
 
+torch.backends.cudnn.benchmark = True
+
+_MODELS = {
+    "norse": SNN_NORSE,
+    "torch": SNN_TORCH,
+    "sj":    SNN_SJ,
+}
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train an SNN model")
+    parser.add_argument(
+        "--model",
+        choices=_MODELS.keys(),
+        default="norse",
+        help="Model backend: norse | torch | sj  (default: norse)",
+    )
+    args = parser.parse_args()
+
     os.makedirs("./checkpoints", exist_ok=True)
 
     cfg    = Settings()
@@ -28,7 +48,9 @@ if __name__ == "__main__":
 
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
-    model = SNN_NORSE(cfg)
+
+    model = _MODELS[args.model](cfg)
+    print(f"\n  Model backend  : {args.model.upper()}")
 
     if cfg.COMPILER_ENABLED:
         model = compile_model(model, cfg)
@@ -41,8 +63,6 @@ if __name__ == "__main__":
     print(f"  Final loss      : {results['loss_history'][-1]:.4f}")
     print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}")
     print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
-    # trainer.plot_training()
-    # trainer.plot_raster()
 
     tester       = SNNTester(model, test_loader, cfg, device)
     test_results = tester.run()

@@ -1,7 +1,3 @@
-dataset:
-  name: N-MNIST          # N-MNIST | custom (set data_path for custom)
-  data_path: ""          # leave empty to use N-MNIST default download path
-
 temporal_slicing:
   enabled: false
   slice_duration_ms: 15.0
