@@ -33,9 +33,7 @@ class CacheMetrics:
 
 
 def gpu_pressure(metrics: CacheMetrics) -> float:
-    """VRAM utilisation as 0–1 derived from a CacheMetrics snapshot. Returns 0 if no GPU."""
-    if metrics.gpu_memory_gb == 0:
-        return 0.0
+    """VRAM utilisation as 0–1 derived from a CacheMetrics snapshot."""
     return 1.0 - (metrics.gpu_available_gb / metrics.gpu_memory_gb)
 
 
@@ -68,20 +66,17 @@ class SystemResourceMonitor:
             disk_available = 0.0
             disk_exists = False
 
-        gpu_total = 0.0
-        gpu_available = 0.0
-        if torch.cuda.is_available():
-            props = torch.cuda.get_device_properties(self.device_idx)
-            gpu_total = props.total_memory / (1024 ** 3)
+        props = torch.cuda.get_device_properties(self.device_idx)
+        gpu_total = props.total_memory / (1024 ** 3)
 
-            # Three views of VRAM — take the most conservative to avoid OOM surprises:
-            # - memory_allocated : PyTorch tensors only (underestimates real usage)
-            # - memory_reserved  : PyTorch allocator pool (includes fragmentation slack)
-            # - mem_get_info     : CUDA driver level — captures other processes, context overhead
-            free_driver, _ = torch.cuda.mem_get_info(self.device_idx)
-            reserved = torch.cuda.memory_reserved(self.device_idx)
-            # driver free is the hard ceiling; total-reserved is PyTorch's own view of headroom
-            gpu_available = min(free_driver, props.total_memory - reserved) / (1024 ** 3)
+        # Three views of VRAM — take the most conservative to avoid OOM surprises:
+        # - memory_allocated : PyTorch tensors only (underestimates real usage)
+        # - memory_reserved  : PyTorch allocator pool (includes fragmentation slack)
+        # - mem_get_info     : CUDA driver level — captures other processes, context overhead
+        free_driver, _ = torch.cuda.mem_get_info(self.device_idx)
+        reserved = torch.cuda.memory_reserved(self.device_idx)
+        # driver free is the hard ceiling; total-reserved is PyTorch's own view of headroom
+        gpu_available = min(free_driver, props.total_memory - reserved) / (1024 ** 3)
 
         return CacheMetrics(
             total_ram_gb=vm.total / (1024 ** 3),

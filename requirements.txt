@@ -41,6 +41,5 @@ tonic>=0.3.0           # for event data handling and visualization
 # Utilities
 tqdm>=4.65
 
-
 #gpu rrequirements
 nvidia-ml-py==0.1.0
