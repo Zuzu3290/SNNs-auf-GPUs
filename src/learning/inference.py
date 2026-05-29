@@ -21,7 +21,16 @@ class SNNTester:
         self.device      = device
         self.num_classes = cfg.NUM_CLASSES
         self.batch_log   = []
-        self.use_custom_kernel = cfg.KERNEL == "ON" and cfg.custom_kernel is not None
+        self.kernel_module = None
+        self.use_custom_kernel = False
+        if cfg.KERNEL == "ON":
+            try:
+                import snn_cuda.snn_forward as km  # type: ignore[import]
+                self.kernel_module = km
+                self.use_custom_kernel = True
+                print("[kernel] SNNTester: custom CRSC CUDA kernel active")
+            except ImportError:
+                print("[kernel] snn_cuda not built — run: python src/learning/setup.py build_ext --inplace")
         self._voltage_buf: torch.Tensor | None = None
         device_idx = (device.index or 0) if device.type == "cuda" else 0
         self.gpu_stats = GPUStats(device_idx=device_idx)
@@ -43,7 +52,7 @@ class SNNTester:
         if self._voltage_buf is None or self._voltage_buf.shape != (B_sz, N_sz):
             self._voltage_buf = torch.zeros(B_sz, N_sz, device=self.device)
 
-        kernel = self.cfg.custom_kernel
+        kernel = self.kernel_module
         assert kernel is not None
         spikes = kernel.forward(
             inp, self._voltage_buf,
@@ -90,7 +99,7 @@ class SNNTester:
         print(f"[INFO] Test log saved → {path}")
 
     def run(self, csv_path: str = "./outputs/data/test.csv") -> dict:
-        self.model.eval()
+        self.model.eval_mode()
  
         all_preds, all_targets = [], []
         total_spikes     = 0

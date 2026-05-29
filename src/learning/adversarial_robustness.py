@@ -88,9 +88,10 @@ class AdversarialEvaluator:
             data    = data.to(self.device)
             targets = targets.to(self.device).long()
 
-            if attack == "fgsm":
+            differentiable = getattr(self.model, "is_differentiable", lambda: True)()
+            if attack == "fgsm" and differentiable:
                 data = generate_fgsm_input(self.model, data, targets, epsilon)
-            elif attack == "pgd":
+            elif attack == "pgd" and differentiable:
                 data = generate_pgd_input(self.model, data, targets, epsilon, pgd_steps)
 
             with torch.no_grad():
