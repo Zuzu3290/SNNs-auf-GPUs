@@ -139,7 +139,7 @@ def compile_model(model: nn.Module, cfg: Settings) -> nn.Module:
         logger.info("[COMPILER] Execution plan:\n%s", plan.summary())
 
     # Trigger NVCC compilation now so it completes before the first training batch.
-    if cfg.COMPILER_BACKEND == "cuda" and torch.cuda.is_available():
+    if cfg.COMPILER_BACKEND == "cuda":
         try:
             from compiler.cuda_ops import _load_ops
             _load_ops()

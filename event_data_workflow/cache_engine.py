@@ -348,8 +348,6 @@ class GPURecordingCache(BaseS3FIFOCache):
         if phase not in GPU_PHASE_CAPS:
             raise ValueError(f"Unknown phase '{phase}'. Valid: {list(GPU_PHASE_CAPS)}")
         self.phase = phase
-        if not torch.cuda.is_available():
-            return
         device_idx    = self.device.index if self.device.index is not None else 0
         free_driver, total = torch.cuda.mem_get_info(device_idx)
         new_budget    = compute_gpu_cache_budget(
@@ -369,8 +367,6 @@ class GPURecordingCache(BaseS3FIFOCache):
         """Evict S3-FIFO entries if VRAM free space falls below the emergency margin."""
         self.access_count += 1
         if self.access_count % self.PRESSURE_CHECK_INTERVAL != 0:
-            return
-        if not torch.cuda.is_available():
             return
         device_idx   = self.device.index if self.device.index is not None else 0
         free_driver, total = torch.cuda.mem_get_info(device_idx)
@@ -407,14 +403,12 @@ class AdaptiveCacheController:
         memory_safety_margin_gb: float = 2.0,
         memory_cache_threshold_gb: float = 8.0,
         max_cached_recordings: int = 500,
-        verbose: bool = True,
         device=None,
     ):
         self.cache_path = Path(cache_path)
         self.memory_safety_margin = memory_safety_margin_gb
         self.memory_threshold = memory_cache_threshold_gb
         self.max_cached_recordings = max_cached_recordings
-        self.verbose = verbose
         self.device = device
         self.device_idx = (
             (device.index or 0)
@@ -447,8 +441,7 @@ class AdaptiveCacheController:
                     total_bytes += sys.getsizeof(events)
                 successful_probes += 1
             except Exception as e:
-                if self.verbose:
-                    logger.warning(f"[CACHE CONTROLLER] Could not probe sample {idx}: {e}")
+                logger.warning(f"[CACHE CONTROLLER] Could not probe sample {idx}: {e}")
                 continue
 
         if successful_probes == 0:
@@ -466,8 +459,7 @@ class AdaptiveCacheController:
         metrics = self.monitor.snapshot()
         dataset_size_gb = self.estimate_dataset_memory_footprint(dataset)
 
-        if self.verbose:
-            self.log_diagnostics(metrics, dataset_size_gb)
+        self.log_diagnostics(metrics, dataset_size_gb)
 
         if force_mode:
             return self.create_forced_strategy(force_mode, metrics)
@@ -594,18 +586,15 @@ class AdaptiveCacheController:
         cache_dir = self.cache_path / split
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.verbose:
-            logger.info(f"[CACHE CONTROLLER] Applying {strategy.mode.upper()} strategy for {split} split")
-            logger.info(f"[CACHE CONTROLLER] Reason: {strategy.reason}")
+        logger.info(f"[CACHE CONTROLLER] Applying {strategy.mode.upper()} strategy for {split} split")
+        logger.info(f"[CACHE CONTROLLER] Reason: {strategy.reason}")
 
         if strategy.mode == "memory":
-            if self.verbose:
-                logger.info(f"[CACHE CONTROLLER] Using MemoryCachedDataset → full dataset in RAM ({strategy.memory_threshold_gb:.1f} GB available)")
+            logger.info(f"[CACHE CONTROLLER] Using MemoryCachedDataset → full dataset in RAM ({strategy.memory_threshold_gb:.1f} GB available)")
             return MemoryCachedDataset(dataset, transform=transform)
 
         elif strategy.mode == "disk":
-            if self.verbose:
-                logger.info(f"[CACHE CONTROLLER] Using DiskCachedDataset → Path: {cache_dir}")
+            logger.info(f"[CACHE CONTROLLER] Using DiskCachedDataset → Path: {cache_dir}")
             return DiskCachedDataset(dataset, transform=transform, cache_path=str(cache_dir))
 
         elif strategy.mode == "hybrid":
@@ -614,12 +603,11 @@ class AdaptiveCacheController:
             # budget so the total across all workers stays within the strategy's allocation.
             effective_workers = max(1, num_workers)
             max_bytes = int(strategy.memory_threshold_gb * (1024 ** 3)) // effective_workers
-            if self.verbose:
-                logger.info(
-                    f"[CACHE CONTROLLER] Using Hybrid → DiskCachedDataset (primary) + "
-                    f"BoundedRecordingCache ({strategy.memory_threshold_gb:.1f} GB ÷ {effective_workers} workers "
-                    f"= {max_bytes / (1024**3):.2f} GB per worker hot layer)"
-                )
+            logger.info(
+                f"[CACHE CONTROLLER] Using Hybrid → DiskCachedDataset (primary) + "
+                f"BoundedRecordingCache ({strategy.memory_threshold_gb:.1f} GB ÷ {effective_workers} workers "
+                f"= {max_bytes / (1024**3):.2f} GB per worker hot layer)"
+            )
             disk_cached = DiskCachedDataset(dataset, transform=transform, cache_path=str(cache_dir))
             return BoundedRecordingCache(disk_cached, max_recordings=self.max_cached_recordings, max_bytes=max_bytes)
 
@@ -628,13 +616,11 @@ class AdaptiveCacheController:
                 logger.warning("[CACHE CONTROLLER] gpu_memory strategy selected but no CUDA device set — falling back to no_cache")
                 return dataset
             max_bytes = int(strategy.memory_threshold_gb * (1024 ** 3))
-            if self.verbose:
-                logger.info(f"[CACHE CONTROLLER] Using GPURecordingCache → {strategy.memory_threshold_gb:.1f} GB VRAM budget on {self.device}")
+            logger.info(f"[CACHE CONTROLLER] Using GPURecordingCache → {strategy.memory_threshold_gb:.1f} GB VRAM budget on {self.device}")
             return GPURecordingCache(dataset, device=self.device, max_bytes=max_bytes, transform=transform)
 
         else:  # no_cache
-            if self.verbose:
-                logger.info("[CACHE CONTROLLER] No caching → On-the-fly processing (may be slower)")
+            logger.info("[CACHE CONTROLLER] No caching → On-the-fly processing (may be slower)")
             return dataset
 
     def log_diagnostics(self, metrics: CacheMetrics, dataset_size_gb: float):
@@ -664,14 +650,12 @@ class AdaptiveCacheController:
             if cache_dir.exists():
                 shutil.rmtree(cache_dir)
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                if self.verbose:
-                    logger.info(f"[CACHE CONTROLLER] Cleared cache for split: {split}")
+                logger.info(f"[CACHE CONTROLLER] Cleared cache for split: {split}")
         else:
             if self.cache_path.exists():
                 shutil.rmtree(self.cache_path)
                 self.cache_path.mkdir(parents=True, exist_ok=True)
-                if self.verbose:
-                    logger.info("[CACHE CONTROLLER] Cleared all cache directories")
+                logger.info("[CACHE CONTROLLER] Cleared all cache directories")
 
 
 def gpu_pressure_pct(metrics: CacheMetrics) -> float:
@@ -686,7 +670,6 @@ def auto_cache_dataset(
     transform=None,
     split: str = "train",
     cache_path: str = "./cache",
-    verbose: bool = True,
     device=None,
 ) -> Dataset:
     """
@@ -699,5 +682,5 @@ def auto_cache_dataset(
         trainset = tonic.datasets.NMNIST(save_to="./data", train=True)
         cached_trainset = auto_cache_dataset(trainset, transform=my_transform, split="train", device=device)
     """
-    controller = AdaptiveCacheController(cache_path=cache_path, verbose=verbose, device=device)
+    controller = AdaptiveCacheController(cache_path=cache_path, device=device)
     return controller.wrap_dataset(dataset, transform=transform, split=split)
