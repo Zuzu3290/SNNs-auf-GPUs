@@ -2,11 +2,10 @@ import torch
 import torch.nn as nn
 from spikingjelly.activation_based import neuron, functional, surrogate
 from skeleton.snn_config import Settings
-from learning.inference import SNNTester
-from learning.training import SNNTrainer
+from learning.frameworks.model_interface import ModelInterface
 from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
 
-class SNN_SJ(nn.Module):
+class SNN_SJ(ModelInterface, nn.Module):
     IN_CHANNELS:    int   = 2
     CONV1_OUT:      int   = 12
     CONV1_KERNEL:   int   = 5
@@ -67,12 +66,35 @@ class SNN_SJ(nn.Module):
         # This matches what your Trainer expects
         return sum_spikes
     
-    def get_trainer(self, train_loader) -> SNNTrainer:
-        return SNNTrainer(self, train_loader, self.cfg, self.device)
+    # ------------------------------------------------------------------
+    # ModelInterface implementation
+    # ------------------------------------------------------------------
 
-    def get_inference(self, test_loader) -> SNNTester:
-        return SNNTester(self, test_loader, self.cfg, self.device)
+    def backward_pass(self, loss: torch.Tensor, scaler=None, do_step: bool = True) -> None:
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if do_step:
+                scaler.step(self.optimizer)
+                scaler.update()
+        else:
+            loss.backward()
+            if do_step:
+                self.optimizer.step()
 
-    def get_adversarial_evaluator(self, test_loader):
-        from learning.adversarial_robustness import AdversarialEvaluator
-        return AdversarialEvaluator(self, test_loader, self.cfg, self.device)
+    def zero_grad(self) -> None:
+        self.optimizer.zero_grad(set_to_none=True)
+
+    def train_mode(self) -> None:
+        self.net.train()
+
+    def eval_mode(self) -> None:
+        self.net.eval()
+
+    def get_lr(self) -> float:
+        return self.optimizer.param_groups[0]["lr"]
+
+    def get_state(self) -> dict:
+        return {
+            "model_state_dict":     self.net.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }

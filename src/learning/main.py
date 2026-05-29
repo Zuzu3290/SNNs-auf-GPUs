@@ -16,18 +16,8 @@ from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder
 from learning.adversarial_robustness import AdversarialEvaluator
-
-torch.backends.cudnn.benchmark = True
-
-
-def load_custom_kernel():
-    """Import the compiled CRSC CUDA extension; return the module or None."""
-    try:
-        import snn_cuda.snn_forward as ext  # type: ignore[import]
-        return ext
-    except ImportError:
-        print("[kernel] snn_cuda not built — run: python src/learning/setup.py build_ext --inplace")
-        return None
+from compiler import compile_model
+torch.backends.cudnn.benchmark = True #cuDNN's autotuner
 
 
 if __name__ == "__main__":
@@ -36,42 +26,27 @@ if __name__ == "__main__":
     cfg    = Settings()
     device = torch.device(cfg.DEVICE)
 
-    # Load the custom CRSC CUDA kernel only when kernel: ON in SNN_module.yaml
-    custom_kernel = None
-    if cfg.KERNEL == "ON":
-        custom_kernel = load_custom_kernel()
-        if custom_kernel is not None:
-            print("[kernel] Custom CRSC CUDA kernel active (forward + forward_profiled available)")
-
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
-
     model = SNN_NORSE(cfg)
 
-    # Store on cfg so both trainer and tester can reach it without touching model internals
-    cfg.custom_kernel = custom_kernel
-
     if cfg.COMPILER_ENABLED:
-        from compiler import compile_model
         model = compile_model(model, cfg)
 
     cfg.display()
 
     trainer = SNNTrainer(model, train_loader, cfg, device)
     results = trainer.train(checkpoint_dir="./checkpoints")
-
-    print("\n✓ Training complete!")
+    print("\n Training complete!")
     print(f"  Final loss      : {results['loss_history'][-1]:.4f}")
     print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}")
     print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
-
-    trainer.plot_training()
-    trainer.plot_raster()
+    # trainer.plot_training()
+    # trainer.plot_raster()
 
     tester       = SNNTester(model, test_loader, cfg, device)
     test_results = tester.run()
-
-    print("\n✓ Testing complete!")
+    print("\n Testing complete!")
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
     print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")
     print(f"  Avg Firing Rate : {test_results['avg_firing_rate_hz']:.2f} Hz")

@@ -59,6 +59,26 @@ data pipeline settings. No hardcoded values in source files.
 
 ---
 
+## Framework Backends
+
+The trainer and inference pipeline are framework-agnostic at the model boundary.
+Any model that satisfies the `ModelInterface` contract can be plugged in — the
+pipeline does not care what runs inside.
+
+| Backend | Status | Notes |
+|---------|--------|-------|
+| SNNTorch | Working | Default |
+| Norse | Working | Current default in `main.py` |
+| SpikingJelly | Working | |
+| JAX + Flax/Haiku | Extension point | Trains via XLA; DLPack bridge to PyTorch at boundary |
+| TensorFlow | Extension point | DLPack bridge at boundary |
+| Custom / from scratch | Extension point | Return a PyTorch tensor — everything else is your choice |
+
+For details on how each backend cooperates with the training loop, backward pass,
+and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
+
+---
+
 ## Current Capabilities
 
 - Three SNN backends: SNNTorch, Norse, SpikingJelly — switchable via config
