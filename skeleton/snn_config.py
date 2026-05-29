@@ -66,11 +66,8 @@ class Settings:
         self.STDP_A_PLUS  = float(training.get("stdp_a_plus", 0.01))
         self.STDP_A_MINUS = float(training.get("stdp_a_minus", 0.01))
 
-        # Compiler pipeline
-        self.COMPILER_ENABLED    = bool(compiler.get("enabled",         False))
-        self.COMPILER_BACKEND    = str( compiler.get("backend",         "cuda"))
-        self.COMPILER_FUSE_STEPS = bool(compiler.get("fuse_timesteps",  True))
-        self.COMPILER_LOG_IR     = bool(compiler.get("log_ir",          False))
+        # Compiler
+        self.TORCH_COMPILE = bool(compiler.get("torch_compile", False))
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
@@ -156,7 +153,7 @@ class Settings:
         print(f"Device               : {self.DEVICE}")
         print(f"Kernel               : {self.KERNEL}")
         print(f"Threshold            : {self.THRESHOLD}")
-        print(f"Compiler             : {'ENABLED  (backend={}, fuse_timesteps={})'.format(self.COMPILER_BACKEND, self.COMPILER_FUSE_STEPS) if self.COMPILER_ENABLED else 'DISABLED'}")
+        print(f"torch.compile        : {'ENABLED' if self.TORCH_COMPILE else 'DISABLED'}")
 
         print("=" * 60)
 
