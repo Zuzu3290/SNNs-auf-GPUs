@@ -15,7 +15,7 @@ training:
                                 # Requires: python src/learning/setup.py build_ext --inplace
   loss_function: CrossEntropy
   optimizer: Adam
-  epochs: 1
+  epochs: 2
   iterations_per_epoch: 100
   timesteps: 25
   batch_size: 128
@@ -54,11 +54,8 @@ training:
   stdp_a_minus: 0.01            # LTD strength — how strongly to penalise anticausal (post→pre) spike order.
   
 compiler:
-  enabled: false             # Master switch. true → route model through the JIT compiler pipeline.
-                            #                false → standard PyTorch execution (safe default).
-  backend: cuda             # Hardware target the compiler emits code for: cuda | cpu
-  fuse_timesteps: true      # Fuse the T-timestep loop into a single kernel launch instead of T separate launches.
-  log_ir: true              # Dump the compiler IR to stdout after lowering (useful for debugging passes).
+  torch_compile: false      # true → wrap model with torch.compile() (TorchInductor kernel fusion).
+                            # First run is slower (compilation overhead); subsequent runs are faster.
 
 dataset:
   dataset_name: MNIST
