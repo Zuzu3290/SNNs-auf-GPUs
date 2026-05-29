@@ -5,34 +5,21 @@ import csv
 import time
 import logging
 from contextlib import nullcontext
-
 import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
 from event_data_workflow.gpu_stats import GPUStats
-from learning.frameworks.activity_reg import (
-    get_hidden_spike_recordings,
-    activity_regularization,
-    stdp_regularization,
-    pause_hooks,
-    resume_hooks,
-)
+from learning.frameworks.activity_reg import get_hidden_spike_recordings, activity_regularization, stdp_regularization, pause_hooks, resume_hooks
 
 logger = logging.getLogger(__name__)
 
 
-def generate_trades_adversarial(
-    model: torch.nn.Module,
-    data: torch.Tensor,
-    clean_prob: torch.Tensor,
-    epsilon: float,
-    steps: int,
-) -> torch.Tensor:
+def generate_trades_adversarial(model: torch.nn.Module, data: torch.Tensor, clean_prob: torch.Tensor, epsilon: float, steps: int) -> torch.Tensor:
     """Find the worst-case input within the epsilon-ball by maximising KL divergence
     from the clean prediction.
 
-    Uses torch.autograd.grad so model parameter gradients are never accumulated,
+    Using torch.autograd.grad so model parameter gradients are never accumulated,
     keeping gradient accumulation in the outer training loop intact.
     clean_prob must be a detached softmax probability tensor [B, C].
     """
@@ -45,7 +32,7 @@ def generate_trades_adversarial(
 
     pause_hooks(model)
     try:
-        for _ in range(steps):
+        for a in range(steps):
             adv = adv.requires_grad_(True)
             adv_logits = aggregate_spike_output(model(adv).float())
             kl   = F.kl_div(F.log_softmax(adv_logits, dim=1), clean_prob, reduction="batchmean")
@@ -81,7 +68,16 @@ class SNNTrainer:
         self.train_loader = train_loader
         self.cfg          = cfg
         self.device       = device
-        self.use_custom_kernel = cfg.KERNEL == "ON" and cfg.custom_kernel is not None
+        self.kernel_module = None
+        self.use_custom_kernel = False
+        if cfg.KERNEL == "ON":
+            try:
+                import snn_cuda.snn_forward as km  # type: ignore[import]
+                self.kernel_module = km
+                self.use_custom_kernel = True
+                print("[kernel] SNNTrainer: custom CRSC CUDA kernel active")
+            except ImportError:
+                print("[kernel] snn_cuda not built — run: python src/learning/setup.py build_ext --inplace")
         self._voltage_buf: torch.Tensor | None = None
 
         self.loss_hist       = []
@@ -99,10 +95,8 @@ class SNNTrainer:
         self.grad_accum_steps = max(1, getattr(cfg, "GRAD_ACCUM_STEPS", 1))
 
         lr_sched = getattr(cfg, "LR_SCHEDULER", "cosine")
-        self.scheduler = (
-            CosineAnnealingLR(self.model.optimizer, T_max=cfg.EPOCHS)
-            if lr_sched == "cosine" else None
-        )
+        opt = getattr(self.model, "optimizer", None)
+        self.scheduler = (CosineAnnealingLR(opt, T_max=cfg.EPOCHS) if opt is not None and lr_sched == "cosine" else None)
 
     def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
         """Single forward pass. Routes through the custom CRSC CUDA kernel when
@@ -124,7 +118,7 @@ class SNNTrainer:
         if self._voltage_buf is None or self._voltage_buf.shape != (B_sz, N_sz):
             self._voltage_buf = torch.zeros(B_sz, N_sz, device=self.device)
 
-        kernel  = self.cfg.custom_kernel
+        kernel  = self.kernel_module
         assert kernel is not None
         tau_inv = 1.0 - float(self.cfg.BETA)
         spikes  = kernel.forward(
@@ -135,11 +129,10 @@ class SNNTrainer:
 
     def save_checkpoint(self, path: str):
         ckpt = {
-            "model_state_dict":     self.model.net.state_dict(),
-            "optimizer_state_dict": self.model.optimizer.state_dict(),
-            "scaler_state_dict":    self.scaler.state_dict(),
-            "loss_history":         self.loss_hist,
-            "accuracy_history":     self.acc_hist,
+            **self.model.get_state(),
+            "scaler_state_dict": self.scaler.state_dict(),
+            "loss_history":      self.loss_hist,
+            "accuracy_history":  self.acc_hist,
         }
         if self.scheduler is not None:
             ckpt["scheduler_state_dict"] = self.scheduler.state_dict()
@@ -156,35 +149,26 @@ class SNNTrainer:
             writer.writerows(self.epoch_log)
         print(f"[INFO] Training log saved → {path}")
 
-    def train(self,
-              checkpoint_dir: str,
-              checkpoint_name: str = "best_model.pt",
-              csv_path: str = "./outputs/data/training_results.csv") -> dict:
+    def train(self, checkpoint_dir: str, checkpoint_name: str = "best_model.pt", csv_path: str = "./outputs/data/training_results.csv") -> dict:
 
         epochs    = self.cfg.EPOCHS
         num_iters = self.cfg.ITERA
         accum     = self.grad_accum_steps
 
-        autocast_ctx = (
-            torch.autocast(device_type="cuda", dtype=torch.float16)
-            if self.use_amp else nullcontext()
-        )
+        autocast_ctx = (torch.autocast(device_type="cuda", dtype=torch.float16) if self.use_amp else nullcontext())
 
-        if checkpoint_dir is not None:
-            os.makedirs(checkpoint_dir, exist_ok=True)
-            checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
-        else:
-            checkpoint_path = None
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
 
         best_acc = 0.0
 
         for epoch in range(epochs):
-            self.model.net.train()
+            self.model.train_mode()
             epoch_loss, epoch_acc, epoch_spike, n, step_count = 0.0, 0.0, 0.0, 0, 0
             t0 = time.perf_counter()
             self.gpu_stats.start_epoch()
 
-            self.model.optimizer.zero_grad(set_to_none=True)
+            self.model.zero_grad()
 
             for i, (data, targets) in enumerate(self.train_loader):
                 data    = data.to(self.device, non_blocking=True)
@@ -198,10 +182,8 @@ class SNNTrainer:
                         clean_prob = F.softmax(
                             aggregate_spike_output(self.forward_pass(data).float()), dim=1
                         )
-                    adv_data = generate_trades_adversarial(
-                        self.model, data, clean_prob,
-                        self.cfg.TRADES_EPSILON, self.cfg.TRADES_STEPS,
-                    )
+                    adv_data = generate_trades_adversarial(self.model, data, clean_prob, self.cfg.TRADES_EPSILON, self.cfg.TRADES_STEPS
+                                                           )
                     with autocast_ctx:
                         if reset is not None:
                             reset()
@@ -221,16 +203,14 @@ class SNNTrainer:
                         act_penalty = torch.zeros(1, device=self.device)
                         stdp_penalty = torch.zeros(1, device=self.device)
                         if self.cfg.ACTIVITY_REG_ENABLED:
-                            act_penalty = activity_regularization(
-                                hidden,
+                            act_penalty = activity_regularization(hidden,
                                 min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
                                 max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
                                 lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
                                 lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
                             )
                         if self.cfg.STDP_ENABLED:
-                            stdp_penalty = stdp_regularization(
-                                hidden,
+                            stdp_penalty = stdp_regularization(hidden,
                                 output_spikes = spk_rec,
                                 tau    = self.cfg.STDP_TAU,
                                 A_plus = self.cfg.STDP_A_PLUS,
@@ -243,16 +223,14 @@ class SNNTrainer:
                         task_loss = self.model.loss_fn(spk_rec, targets)
                         hidden    = get_hidden_spike_recordings(self.model)
                         if self.cfg.ACTIVITY_REG_ENABLED:
-                            task_loss = task_loss + activity_regularization(
-                                hidden,
+                            task_loss = task_loss + activity_regularization(hidden,
                                 min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
                                 max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
                                 lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
                                 lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
                             )
                         if self.cfg.STDP_ENABLED:
-                            task_loss = task_loss + stdp_regularization(
-                                hidden,
+                            task_loss = task_loss + stdp_regularization(hidden,
                                 output_spikes = spk_rec,
                                 tau    = self.cfg.STDP_TAU,
                                 A_plus = self.cfg.STDP_A_PLUS,
@@ -260,13 +238,11 @@ class SNNTrainer:
                             )
                         loss_val = task_loss / accum
 
-                self.scaler.scale(loss_val).backward()
+                do_step = ((step_count + 1) % accum == 0)
+                self.model.backward_pass(loss_val, scaler=self.scaler, do_step=do_step)
+                if do_step:
+                    self.model.zero_grad()
                 step_count += 1
-
-                if step_count % accum == 0:
-                    self.scaler.step(self.model.optimizer)
-                    self.scaler.update()
-                    self.model.optimizer.zero_grad(set_to_none=True)
 
                 raw_loss   = loss_val.item() * accum
                 logits     = clean_logits.detach() if self.cfg.TRADES_ENABLED else aggregate_spike_output(spk_rec.detach().float())
@@ -288,9 +264,8 @@ class SNNTrainer:
 
             # flush any gradients accumulated in a partial final batch
             if step_count % accum != 0:
-                self.scaler.step(self.model.optimizer)
-                self.scaler.update()
-                self.model.optimizer.zero_grad(set_to_none=True)
+                self.model.backward_pass(loss_val, scaler=self.scaler, do_step=True)
+                self.model.zero_grad()
 
             if self.scheduler is not None:
                 self.scheduler.step()
@@ -299,7 +274,7 @@ class SNNTrainer:
             gpu            = self.gpu_stats.end_epoch()
             train_loss     = epoch_loss / n
             train_acc      = epoch_acc  / n
-            current_lr     = self.model.optimizer.param_groups[0]["lr"]
+            current_lr     = self.model.get_lr()
 
             train_spike = epoch_spike / n
 
@@ -399,14 +374,14 @@ class SNNTrainer:
             print("[PLOT] No spike data — run train() first.")
             return
         import matplotlib.pyplot as plt
-        from snntorch import spikeplot as splt
         os.makedirs(save_dir, exist_ok=True)
 
         # Normalise to [T, C]: for [T, B, C] take sample 0; for [B, C] treat each batch row as a timestep
         spk = self.last_spk_rec
         spk_sample = spk[:, 0, :] if spk.dim() == 3 else spk
+        timesteps, neurons = spk_sample.numpy().nonzero()
         fig, ax = plt.subplots(figsize=(10, 3))
-        splt.raster(spk_sample, ax, s=40, c="black")
+        ax.scatter(timesteps, neurons, s=2, c="black", marker="|")
         ax.set_title("Output Neuron Spike Raster  (last batch · sample 0)")
         ax.set_xlabel("Time step")
         ax.set_ylabel("Neuron index")
