@@ -1,0 +1,165 @@
+EVENT-BASED CAMERA PIPELINE — IMPLEMENTATION NOTES
+====================================================
+
+OVERVIEW
+--------
+The pipeline ingests raw events from a DVS (Dynamic Vision Sensor) event camera
+and prepares them for SNN training. Unlike frame-based cameras, a DVS outputs
+asynchronous (x, y, polarity, timestamp) tuples whenever a pixel detects a change
+in log-luminance. This means recordings have variable length and variable event
+density rather than a fixed frame rate.
+
+The entry point is NeuromorphicEncoder in event_data_workflow/data_pipeline.py.
+It enforces a strict four-layer order to avoid correctness bugs (e.g. caching
+slices instead of recordings, applying transforms before caching):
+
+    Layer 1 — Raw dataset load        (no transforms, no caching)
+    Layer 2 — Adaptive cache          (raw recordings only)
+    Layer 3 — Temporal slicing        (stateless, via tonic)
+    Layer 4 — DataLoader construction (coordinator-driven worker/prefetch config)
+
+
+DATA FORMAT
+-----------
+Raw events from tonic datasets are structured NumPy arrays with dtype fields:
+    t  — timestamp in microseconds (uint32/int64)
+    x  — pixel column
+    y  — pixel row
+    p  — polarity: 0 = OFF (decreasing luminance), 1 = ON (increasing luminance)
+
+Sensor size for N-MNIST: (34, 34, 2) — width × height × polarities.
+For the DVS dataset from the professor, sensor size is read from the dataset
+itself via full_raw.sensor_size.
+
+The ToFrame transform from tonic converts the raw event stream into a dense
+tensor of shape [T, C, H, W] where T is the number of time windows, C=2
+(ON/OFF polarity channels), H and W are the sensor height and width.
+
+
+TEMPORAL SLICING — TONIC SlicedDataset
+---------------------------------------
+Previously the project had a hand-written TemporalSlicedDataset class that
+replicated what tonic already provides natively. This has been replaced entirely
+with tonic's built-in machinery:
+
+    from tonic import SlicedDataset
+    from tonic.slicers import SliceByTime, SliceByEventCount
+
+SliceByTime(time_window=N_microseconds)
+    Cuts each recording into windows of fixed duration. Good when recordings
+    have consistent length and temporal consistency matters (e.g. RNNs).
+
+SliceByEventCount(event_count=N)
+    Cuts each recording into windows of fixed event count regardless of time.
+    Good when activity density varies across recordings and spatial consistency
+    matters more than temporal consistency (e.g. CNNs).
+
+SlicedDataset builds a slice index (start/end positions per recording) once at
+construction and stores it as HDF5 at metadata_path. Subsequent runs load the
+index from disk instead of rebuilding it, which is significant for large datasets.
+
+The pipeline passes:
+    metadata/train/slice_metadata.h5  — for the training split
+    metadata/test/slice_metadata.h5   — for the test split
+
+AdaptiveTemporalSlicer (event_data_workflow/temporal_slicer.py) is the only
+custom slicing code retained. It samples N recordings, measures event density
+and recording duration, and suggests an appropriate slice duration when one is
+not known in advance. This is specific to the project and not in tonic.
+
+
+CACHING SYSTEM — AdaptiveCacheController
+-----------------------------------------
+Raw recordings are cached before slicing so that all slices derived from one
+recording share a single cache entry. Caching after slicing would multiply
+RAM usage by the slice expansion factor (e.g. 6x recordings = 6x cache entries
+for data that is identical up to the slice boundaries).
+
+Strategy selection (event_data_workflow/cache_engine.py):
+
+    memory      — full dataset fits in RAM → tonic MemoryCachedDataset
+    disk        — limited RAM but disk available → tonic DiskCachedDataset
+    hybrid      — large RAM (≥32 GB) with disk → DiskCachedDataset + hot RAM layer
+    gpu_memory  — no disk, insufficient RAM, VRAM available → GPURecordingCache
+    no_cache    — fallback, on-the-fly processing
+
+The selection is driven by live system metrics from SystemResourceMonitor
+(available RAM, disk space, free VRAM). GPU pressure (VRAM usage > 75%) forces
+the disk strategy to prevent the cache and CUDA's pinned-memory allocator from
+competing for the same physical RAM.
+
+Cache eviction policy — S3-FIFO (SOSP'23, Yang et al.):
+    Rather than LRU, the cache uses an S3-FIFO structure with three queues:
+    - Small queue  (10%): new items enter here
+    - Main queue   (90%): items promoted after being accessed more than once
+    - Ghost set         : fingerprints of recently evicted items; a ghost hit
+                          causes the next miss to be admitted directly to Main
+    This achieves a reported 6x improvement in cache miss ratio over LRU for
+    typical access patterns. For neuromorphic data where the same recordings
+    are revisited across epochs, the ghost-set fast path is particularly useful.
+
+GPURecordingCache additionally enforces a phase-aware VRAM budget:
+    warmup    5%  — activations and parameters not yet stable
+    train    10%  — backward pass competes hard for VRAM
+    backward  5%  — most dangerous moment, cache footprint minimised
+    eval     25%  — no gradients active
+    inference 30% — largest budget, no backward pass
+
+An emergency margin of 15% of total VRAM is always kept unconditionally free.
+
+
+GPU REQUIREMENT
+---------------
+A CUDA-capable GPU is a hard requirement. The application raises RuntimeError
+immediately on startup (src/learning/main.py) if no GPU is detected. All
+torch.cuda.is_available() guards below the entry point have been removed — they
+were dead code given this constraint.
+
+NVML (pynvml) is used for real power readings during training via
+GPUStats (event_data_workflow/gpu_stats.py). Power is sampled in a background
+thread every 0.5 seconds alongside compute utilisation. Energy per sample is
+estimated as: avg_power_W × elapsed_seconds.
+
+
+TRANSFORMS
+----------
+The transform chain applied to each sample:
+
+    tonic.transforms.Denoise(filter_time=10000)
+        Removes noise events: discards any event that has no neighbour within
+        10 ms in the (x, y, polarity) neighbourhood. Reduces spike noise from
+        the sensor.
+
+    tonic.transforms.ToFrame(sensor_size, time_window)
+        Converts the raw event stream to a dense [T, C, H, W] NumPy array.
+        Each bin accumulates all events within time_window microseconds.
+
+    torch.from_numpy
+        Converts the NumPy array to a PyTorch tensor (zero-copy, shared memory).
+
+    torchvision.transforms.RandomRotation([-10, 10])   [train only]
+        Light spatial augmentation. Applied only to the training split.
+
+All transforms are named, picklable objects — compatible with PyTorch's
+multiprocessing DataLoader workers without any special handling.
+
+
+DATALOADER CONFIG — PipelineMemoryCoordinator
+----------------------------------------------
+Worker count, prefetch factor, pin_memory, and persistent_workers are set
+by PipelineMemoryCoordinator (event_data_workflow/pipeline_coordinator.py)
+based on available system RAM:
+
+    CPU + GPU mode (worker_budget_gb ≥ 0.5 GB):
+        num_workers      = min(settings.NUM_WORKERS, cpu_count)
+        prefetch_factor  = 2
+        pin_memory       = True   (page-locked H→D transfers via non_blocking=True)
+        persistent_workers = True  (workers persist across epochs)
+
+    GPU-only mode (worker_budget_gb < 0.5 GB):
+        num_workers      = 0      (no forking, single-process loading)
+        pin_memory       = False  (no H→D boundary to optimise)
+        persistent_workers = False
+
+When GPU VRAM usage exceeds 75%, the recording cache allocation is halved to
+prevent the model and cache from competing for the remaining VRAM.
