@@ -120,6 +120,21 @@ def compile_model(model: nn.Module, cfg: Settings) -> nn.Module:
     graph = schedule(graph, cfg)
     plan  = build_plan(graph)
 
+    # Guard: if the plan has no real computation steps the model architecture
+    # was not recognised — return the original model rather than a broken wrapper
+    from compiler.src.ir import OpType
+    useful = [s for s in plan.steps
+              if isinstance(s, FusedStep) or (
+                  isinstance(s, AtomicStep) and
+                  s.node.op not in (OpType.INPUT, OpType.OUTPUT, OpType.AGGREGATE)
+              )]
+    if not useful:
+        logger.warning(
+            "[COMPILER] No executable steps in plan — model architecture was not "
+            "recognised by the lowering pass. Falling back to standard PyTorch execution."
+        )
+        return model
+
     if cfg.COMPILER_LOG_IR:
         logger.info("[COMPILER] Execution plan:\n%s", plan.summary())
 

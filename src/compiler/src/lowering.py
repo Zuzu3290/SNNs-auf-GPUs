@@ -67,8 +67,13 @@ def lower_to_ir(model: nn.Module, cfg: Settings) -> ComputeGraph:
 
     graph.add(IRNode(op=OpType.INPUT, name="input", device=dev))
 
-    net    = getattr(model, "net", model)
-    layers = list(net) if isinstance(net, nn.Sequential) else [net]
+    net = getattr(model, "net", None)
+    if net is not None and isinstance(net, nn.Sequential):
+        # SNN_TORCH / SNN_SJ style: layers packed into model.net sequential
+        layers = list(net)
+    else:
+        # SNN_NORSE style: layers registered directly on the model as children
+        layers = list(model.children())
 
     for module in layers:
         type_name = type(module).__name__
