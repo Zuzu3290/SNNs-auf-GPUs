@@ -10,7 +10,7 @@ temporal_slicing:
 cache:
   path: "./cache"
   memory_safety_margin_gb: 2.0
-  memory_cache_threshold_gb: 8.0
+  memory_cache_threshold_gb: 6.0
   max_cached_recordings: 500
   force_mode: null       # null | memory | disk | hybrid | no_cache
 

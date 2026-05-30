@@ -15,14 +15,22 @@ from abc import abstractmethod
 from collections import deque
 from pathlib import Path
 from typing import Optional, Literal
-from dataclasses import dataclass
 import torch
 from torch.utils.data import Dataset
 from tonic import DiskCachedDataset, MemoryCachedDataset
-
 from .system_monitor import CacheMetrics, SystemResourceMonitor, is_gpu_under_pressure
 
 logger = logging.getLogger(__name__)
+
+
+def measure_event_bytes(events) -> int:
+    """Return the memory footprint of a single event sample in bytes."""
+    if hasattr(events, "nbytes"):
+        return events.nbytes
+    if hasattr(events, "element_size"):
+        return events.element_size() * events.numel()
+    return sys.getsizeof(events)
+
 
 # VRAM budget fractions per training phase — controls how aggressively the
 # GPURecordingCache is allowed to grow relative to free VRAM.
@@ -34,10 +42,9 @@ GPU_PHASE_CAPS: dict[str, float] = {
     "backward":  0.05,  # most dangerous moment — minimize cache footprint
     "eval":      0.25,  # no optimizer state or gradients active — more headroom
     "inference": 0.30,  # largest budget; no backward pass at all
-}
+}   # controls how aggressive or conservative the cache is in each phase.
 GPU_EMERGENCY_MARGIN = 0.15  # fraction of total VRAM kept unconditionally free
 GPU_MAX_CACHE_GB     = 2.0   # absolute ceiling regardless of free VRAM
-
 
 def compute_gpu_cache_budget(free_vram_gb: float, total_vram_gb: float, phase: str = "train") -> float:
     """
@@ -56,31 +63,6 @@ def compute_gpu_cache_budget(free_vram_gb: float, total_vram_gb: float, phase: s
     phase_cap       = GPU_PHASE_CAPS.get(phase, 0.10)
     budget          = min(free_vram_gb * phase_cap, safe_cache_vram, GPU_MAX_CACHE_GB)
     return max(0.0, budget)
-
-
-@dataclass
-class CacheStrategy:
-    """Determined caching strategy based on system resources."""
-    mode: Literal["memory", "disk", "hybrid", "gpu_memory", "no_cache"]
-    memory_threshold_gb: float
-    reason: str
-
-    @property
-    def memory_cache_enabled(self) -> bool:
-        return self.mode in ("memory", "hybrid")
-
-    @property
-    def disk_cache_enabled(self) -> bool:
-        return self.mode in ("disk", "hybrid")
-
-
-def estimate_item_bytes(events) -> int:
-    """Shared byte estimator for cached event tensors."""
-    if hasattr(events, "element_size") and hasattr(events, "numel"):
-        return int(events.element_size() * events.numel())
-    if hasattr(events, "nbytes"):
-        return int(events.nbytes)
-    return 0
 
 
 class BaseS3FIFOCache(Dataset):
@@ -109,13 +91,7 @@ class BaseS3FIFOCache(Dataset):
     GHOST_CAPACITY = 4096   # max ghost entries (indices only — negligible memory)
     FREQ_MAX       = 3      # 2-bit counter ceiling (per paper)
 
-    def __init__(
-        self,
-        dataset: Dataset,
-        max_recordings: Optional[int] = None,
-        max_bytes: Optional[int]      = None,
-        transform                     = None,
-    ):
+    def __init__(self, dataset: Dataset, max_recordings: Optional[int] = None, max_bytes: Optional[int] = None, transform = None):
         self.dataset        = dataset
         self.max_recordings = max_recordings
         self.max_bytes      = max_bytes
@@ -153,7 +129,7 @@ class BaseS3FIFOCache(Dataset):
         if raw is None:
             raw = self.prepare_item(self.dataset[idx])
             events, _ = raw
-            nb = estimate_item_bytes(events)
+            nb = measure_event_bytes(events)
             with self.lock:
                 if idx not in self.cache:
                     self.insert_item(idx, raw, nb)
@@ -166,10 +142,6 @@ class BaseS3FIFOCache(Dataset):
             events, target = raw
             return self.transform(events), target
         return raw
-
-    # ------------------------------------------------------------------
-    # Internal S3-FIFO mechanics  (all called with self.lock held)
-    # ------------------------------------------------------------------
 
     def insert_item(self, idx: int, raw: tuple, nb: int) -> None:
         while self.over_capacity(nb):
@@ -221,7 +193,7 @@ class BaseS3FIFOCache(Dataset):
             return True  # item kept, space not freed; caller loops again if needed
         else:
             # Single-access → evict and add fingerprint to ghost
-            nb = estimate_item_bytes(self.cache[idx][0])
+            nb = measure_event_bytes(self.cache[idx][0])
             del self.cache[idx]
             del self.freq[idx]
             self.cache_bytes -= nb
@@ -247,14 +219,12 @@ class BaseS3FIFOCache(Dataset):
                 self.main_q.append(idx)
                 self.in_main.add(idx)
             else:
-                nb = estimate_item_bytes(self.cache[idx][0])
+                nb = measure_event_bytes(self.cache[idx][0])
                 del self.cache[idx]
                 del self.freq[idx]
                 self.cache_bytes -= nb
                 return True
         return False
-
-    # ------------------------------------------------------------------
 
     @property
     def cache_size(self) -> int:
@@ -283,6 +253,7 @@ class BaseS3FIFOCache(Dataset):
         self.lock = threading.Lock()
 
 
+# Selected under hybrid condition only (large RAM + disk available).
 class BoundedRecordingCache(BaseS3FIFOCache):
     """
     CPU RAM S3-FIFO cache for raw recordings.
@@ -394,17 +365,10 @@ class AdaptiveCacheController:
     2. If RAM > 32GB and disk available → Hybrid (DiskCachedDataset primary + BoundedRecordingCache hot layer)
     3. If RAM < threshold and disk available → DiskCachedDataset (memory-safe, neuromorphic default)
     4. If no disk and insufficient RAM but VRAM >= 500MB → GPURecordingCache (compute_gpu_cache_budget, train-phase cap)
-    5. If no resources available → No caching (on-the-fly)
+    5. If no resources available → System halt (RuntimeError)
     """
 
-    def __init__(
-        self,
-        cache_path: str = "./cache",
-        memory_safety_margin_gb: float = 2.0,
-        memory_cache_threshold_gb: float = 8.0,
-        max_cached_recordings: int = 500,
-        device=None,
-    ):
+    def __init__(self, cache_path: str = "./cache", memory_safety_margin_gb: float = 2.0, memory_cache_threshold_gb: float = 6.0, max_cached_recordings: int = 500, device=None):
         self.cache_path = Path(cache_path)
         self.memory_safety_margin = memory_safety_margin_gb
         self.memory_threshold = memory_cache_threshold_gb
@@ -419,13 +383,10 @@ class AdaptiveCacheController:
         self.monitor = SystemResourceMonitor(cache_path=str(self.cache_path), device_idx=self.device_idx)
 
     def get_system_metrics(self) -> CacheMetrics:
-        return self.monitor.snapshot()
+        return self.monitor.snapshot() #  takes a live reading of system resources
 
     def estimate_dataset_memory_footprint(self, dataset: Dataset, num_samples_to_probe: int = 10) -> float:
         """Estimate total dataset memory requirement by sampling. Returns estimated size in GB."""
-        if len(dataset) == 0:
-            return 0.0
-
         sample_indices = torch.randperm(len(dataset))[:min(num_samples_to_probe, len(dataset))]
         total_bytes = 0
         successful_probes = 0
@@ -433,12 +394,7 @@ class AdaptiveCacheController:
         for idx in sample_indices:
             try:
                 events, target = dataset[int(idx)]
-                if hasattr(events, "nbytes"):
-                    total_bytes += events.nbytes
-                elif hasattr(events, "element_size"):
-                    total_bytes += events.element_size() * events.numel()
-                else:
-                    total_bytes += sys.getsizeof(events)
+                total_bytes += measure_event_bytes(events)
                 successful_probes += 1
             except Exception as e:
                 logger.warning(f"[CACHE CONTROLLER] Could not probe sample {idx}: {e}")
@@ -450,178 +406,88 @@ class AdaptiveCacheController:
 
         return (total_bytes / successful_probes * len(dataset)) / (1024 ** 3)
 
-    def determine_strategy(
-        self,
-        dataset: Dataset,
+    def determine_dataset_strategy(self, dataset: Dataset, transform=None, split: str = "train", num_workers: int = 1,
         force_mode: Optional[Literal["memory", "disk", "hybrid", "gpu_memory", "no_cache"]] = None,
-    ) -> CacheStrategy:
-        """Analyze system resources and dataset characteristics to determine optimal caching strategy."""
-        metrics = self.monitor.snapshot()
-        dataset_size_gb = self.estimate_dataset_memory_footprint(dataset)
-
-        self.log_diagnostics(metrics, dataset_size_gb)
-
-        if force_mode:
-            return self.create_forced_strategy(force_mode, metrics)
-
-        available_for_cache = metrics.available_ram_gb - self.memory_safety_margin
-
-        # GPU pressure guard: if GPU is using >75% of VRAM, CUDA's pinned-memory
-        # allocator competes directly with the recording cache for physical RAM.
-        if is_gpu_under_pressure(metrics) and metrics.disk_exists:
-            return CacheStrategy(
-                mode="disk",
-                memory_threshold_gb=0.0,
-                reason=(f"GPU under pressure ({gpu_pressure_pct(metrics):.0f}% VRAM used) — "
-                        "disk cache chosen to avoid CUDA/RAM competition"),
-            )
-
-        if available_for_cache >= self.memory_threshold and dataset_size_gb < available_for_cache * 0.7:
-            return CacheStrategy(
-                mode="memory",
-                memory_threshold_gb=available_for_cache,
-                reason=f"Sufficient RAM available ({available_for_cache:.1f}GB free, dataset ~{dataset_size_gb:.1f}GB)",
-            )
-
-        if metrics.total_ram_gb >= 32.0 and metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.5:
-            return CacheStrategy(
-                mode="hybrid",
-                memory_threshold_gb=available_for_cache * 0.5,
-                reason=f"Large RAM ({metrics.total_ram_gb:.1f}GB) with disk backup - using hybrid strategy",
-            )
-
-        if metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.2:
-            return CacheStrategy(
-                mode="disk",
-                memory_threshold_gb=0.0,
-                reason=f"Limited RAM ({available_for_cache:.1f}GB) but disk available ({metrics.disk_available_gb:.1f}GB)",
-            )
-
-        # GPU-only fallback: no disk, insufficient RAM, but VRAM is available.
-        # Budget is strictly computed — cache is the lowest-priority VRAM user.
-        if metrics.gpu_available_gb >= 0.5:
-            vram_budget_gb = compute_gpu_cache_budget(
-                metrics.gpu_available_gb, metrics.gpu_memory_gb, phase="train"
-            )
-            return CacheStrategy(
-                mode="gpu_memory",
-                memory_threshold_gb=vram_budget_gb,
-                reason=(
-                    f"GPU-only: no disk, insufficient RAM — "
-                    f"cache budget {vram_budget_gb:.2f} GB "
-                    f"(train-phase cap {GPU_PHASE_CAPS['train']*100:.0f}%, "
-                    f"{GPU_EMERGENCY_MARGIN*100:.0f}% emergency margin, "
-                    f"from {metrics.gpu_available_gb:.1f} GB free)"
-                ),
-            )
-
-        return CacheStrategy(
-            mode="no_cache",
-            memory_threshold_gb=0.0,
-            reason=f"Insufficient resources - RAM: {available_for_cache:.1f}GB, Disk: {metrics.disk_available_gb:.1f}GB, GPU: {metrics.gpu_available_gb:.1f}GB",
-        )
-
-    def create_forced_strategy(self, mode: str, metrics: CacheMetrics) -> CacheStrategy:
-        strategies = {
-            "memory": CacheStrategy(
-                mode="memory",
-                memory_threshold_gb=metrics.available_ram_gb - self.memory_safety_margin,
-                reason=f"Forced memory mode (available: {metrics.available_ram_gb:.1f}GB)",
-            ),
-            "disk": CacheStrategy(
-                mode="disk",
-                memory_threshold_gb=0.0,
-                reason=f"Forced disk mode (available: {metrics.disk_available_gb:.1f}GB)",
-            ),
-            "hybrid": CacheStrategy(
-                mode="hybrid",
-                memory_threshold_gb=(metrics.available_ram_gb - self.memory_safety_margin) * 0.5,
-                reason="Forced hybrid mode",
-            ),
-            "gpu_memory": CacheStrategy(
-                mode="gpu_memory",
-                memory_threshold_gb=compute_gpu_cache_budget(
-                    metrics.gpu_available_gb, metrics.gpu_memory_gb, phase="train"
-                ),
-                reason=(
-                    f"Forced GPU memory mode — train-phase cap "
-                    f"({GPU_EMERGENCY_MARGIN*100:.0f}% emergency margin applied)"
-                ),
-            ),
-            "no_cache": CacheStrategy(
-                mode="no_cache",
-                memory_threshold_gb=0.0,
-                reason="Forced no-cache mode (on-the-fly processing)",
-            ),
-        }
-        return strategies[mode]
-
-    def wrap_dataset(
-        self,
-        dataset: Dataset,
-        transform=None,
-        split: str = "train",
-        strategy: Optional[CacheStrategy] = None,
-        num_workers: int = 1,
     ) -> Dataset:
         """
-        Wrap dataset with appropriate caching mechanism based on strategy.
+        Resolve caching strategy from live system metrics and apply it immediately.
         Cache must be applied to raw recordings BEFORE temporal slicing.
 
         num_workers: number of DataLoader workers that will share this cache.
-        With persistent_workers=True each worker holds its own copy of the cache,
+        With persistent_workers=True each worker holds its own copy of the cache dict,
         so the byte budget is divided by num_workers to prevent RAM overcommit.
         """
         if hasattr(dataset, "slice_map"):
             raise ValueError(
-                "wrap_dataset() received an already-sliced dataset. "
+                "determine_dataset_strategy() received an already-sliced dataset. "
                 "Cache must be applied to raw recordings BEFORE slicing — "
-                "use: cached_raw = wrap_dataset(raw_dataset); "
+                "use: cached_raw = determine_dataset_strategy(raw_dataset); "
                 "sliced = TemporalSlicedDataset(cached_raw, config)"
             )
 
-        if strategy is None:
-            strategy = self.determine_strategy(dataset)
+        metrics             = self.monitor.snapshot()
+        dataset_size_gb     = self.estimate_dataset_memory_footprint(dataset)
+        available_for_cache = metrics.available_ram_gb - self.memory_safety_margin
+        self.log_diagnostics(metrics, dataset_size_gb)
 
         cache_dir = self.cache_path / split
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"[CACHE CONTROLLER] Applying {strategy.mode.upper()} strategy for {split} split")
-        logger.info(f"[CACHE CONTROLLER] Reason: {strategy.reason}")
+        # ── Resolve mode ──────────────────────────────────────────────────
+        if force_mode:
+            mode = force_mode
+            threshold_gb = {
+                "memory":     available_for_cache,
+                "hybrid":     available_for_cache * 0.5,
+                "disk":       0.0,
+                "gpu_memory": compute_gpu_cache_budget(metrics.gpu_available_gb, metrics.gpu_memory_gb, phase="train"),
+                "no_cache":   0.0,
+            }[mode]
+        elif is_gpu_under_pressure(metrics) and metrics.disk_exists:
+            mode, threshold_gb = "disk", 0.0
+        elif available_for_cache >= self.memory_threshold and dataset_size_gb < available_for_cache * 0.7:
+            mode, threshold_gb = "memory", available_for_cache
+        elif metrics.total_ram_gb >= 32.0 and metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.5:
+            mode, threshold_gb = "hybrid", available_for_cache * 0.5
+        elif metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.2:
+            mode, threshold_gb = "disk", 0.0
+        elif metrics.gpu_available_gb >= 0.5:
+            threshold_gb = compute_gpu_cache_budget(metrics.gpu_available_gb, metrics.gpu_memory_gb, phase="train")
+            mode = "gpu_memory"
+        else:
+            raise RuntimeError(
+                f"[CACHE CONTROLLER] System halt: insufficient resources. "
+                f"RAM: {available_for_cache:.1f}GB, Disk: {metrics.disk_available_gb:.1f}GB, GPU: {metrics.gpu_available_gb:.1f}GB"
+            )
 
-        if strategy.mode == "memory":
-            logger.info(f"[CACHE CONTROLLER] Using MemoryCachedDataset → full dataset in RAM ({strategy.memory_threshold_gb:.1f} GB available)")
+        logger.info(f"[CACHE CONTROLLER] {split.upper()} → {mode.upper()} ({available_for_cache:.1f}GB RAM free, dataset ~{dataset_size_gb:.1f}GB)")
+
+        if mode == "memory":
             return MemoryCachedDataset(dataset, transform=transform)
 
-        elif strategy.mode == "disk":
-            logger.info(f"[CACHE CONTROLLER] Using DiskCachedDataset → Path: {cache_dir}")
+        if mode == "disk":
             return DiskCachedDataset(dataset, transform=transform, cache_path=str(cache_dir))
 
-        elif strategy.mode == "hybrid":
-            # Each persistent DataLoader worker gets its own copy of the cache dict in its
-            # subprocess, so true RAM consumption is max_bytes × num_workers. Divide the
-            # budget so the total across all workers stays within the strategy's allocation.
+        if mode == "hybrid":
             effective_workers = max(1, num_workers)
-            max_bytes = int(strategy.memory_threshold_gb * (1024 ** 3)) // effective_workers
+            max_bytes = int(threshold_gb * (1024 ** 3)) // effective_workers
             logger.info(
-                f"[CACHE CONTROLLER] Using Hybrid → DiskCachedDataset (primary) + "
-                f"BoundedRecordingCache ({strategy.memory_threshold_gb:.1f} GB ÷ {effective_workers} workers "
-                f"= {max_bytes / (1024**3):.2f} GB per worker hot layer)"
+                f"[CACHE CONTROLLER] Hybrid hot layer: {threshold_gb:.1f}GB ÷ {effective_workers} workers "
+                f"= {max_bytes / (1024**3):.2f}GB per worker"
             )
             disk_cached = DiskCachedDataset(dataset, transform=transform, cache_path=str(cache_dir))
             return BoundedRecordingCache(disk_cached, max_recordings=self.max_cached_recordings, max_bytes=max_bytes)
 
-        elif strategy.mode == "gpu_memory":
+        if mode == "gpu_memory":
             if self.device is None or getattr(self.device, "type", "") != "cuda":
-                logger.warning("[CACHE CONTROLLER] gpu_memory strategy selected but no CUDA device set — falling back to no_cache")
+                logger.warning("[CACHE CONTROLLER] gpu_memory selected but no CUDA device — no_cache fallback")
                 return dataset
-            max_bytes = int(strategy.memory_threshold_gb * (1024 ** 3))
-            logger.info(f"[CACHE CONTROLLER] Using GPURecordingCache → {strategy.memory_threshold_gb:.1f} GB VRAM budget on {self.device}")
-            return GPURecordingCache(dataset, device=self.device, max_bytes=max_bytes, transform=transform)
+            logger.info(f"[CACHE CONTROLLER] GPURecordingCache: {threshold_gb:.2f}GB VRAM budget on {self.device}")
+            return GPURecordingCache(dataset, device=self.device, max_bytes=int(threshold_gb * (1024 ** 3)), transform=transform)
 
-        else:  # no_cache
-            logger.info("[CACHE CONTROLLER] No caching → On-the-fly processing (may be slower)")
-            return dataset
+        # no_cache (force_mode only)
+        logger.info(f"[CACHE CONTROLLER] {split.upper()} → NO_CACHE (on-the-fly processing)")
+        return dataset
 
     def log_diagnostics(self, metrics: CacheMetrics, dataset_size_gb: float):
         sep = "=" * 70
@@ -644,43 +510,15 @@ class AdaptiveCacheController:
         logger.info(sep)
 
     def clear_cache(self, split: Optional[str] = None):
-        """Clear disk cache for specified split or all splits."""
+        """Clear disk cache. Directory is recreated automatically on the next pipeline run."""
         if split:
             cache_dir = self.cache_path / split
             if cache_dir.exists():
                 shutil.rmtree(cache_dir)
-                cache_dir.mkdir(parents=True, exist_ok=True)
                 logger.info(f"[CACHE CONTROLLER] Cleared cache for split: {split}")
         else:
             if self.cache_path.exists():
                 shutil.rmtree(self.cache_path)
-                self.cache_path.mkdir(parents=True, exist_ok=True)
                 logger.info("[CACHE CONTROLLER] Cleared all cache directories")
 
 
-def gpu_pressure_pct(metrics: CacheMetrics) -> float:
-    """GPU VRAM usage as a percentage (0–100)."""
-    if metrics.gpu_memory_gb == 0:
-        return 0.0
-    return (1.0 - metrics.gpu_available_gb / metrics.gpu_memory_gb) * 100
-
-
-def auto_cache_dataset(
-    dataset: Dataset,
-    transform=None,
-    split: str = "train",
-    cache_path: str = "./cache",
-    device=None,
-) -> Dataset:
-    """
-    Convenience function to automatically select and apply optimal caching.
-
-    Pass device=torch.device("cuda:0") to enable GPURecordingCache fallback
-    when no disk or RAM is available.
-
-    Usage:
-        trainset = tonic.datasets.NMNIST(save_to="./data", train=True)
-        cached_trainset = auto_cache_dataset(trainset, transform=my_transform, split="train", device=device)
-    """
-    controller = AdaptiveCacheController(cache_path=cache_path, device=device)
-    return controller.wrap_dataset(dataset, transform=transform, split=split)
