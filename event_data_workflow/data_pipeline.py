@@ -25,9 +25,10 @@ import tonic.transforms as transforms
 import torchvision
 import tqdm as t
 from skeleton import Settings
-from .cache_engine import AdaptiveCacheController
+from .cache_engine import AdaptiveCacheController, measure_event_bytes
 from .pipeline_coordinator import PipelineMemoryCoordinator
 from .temporal_slicer import create_sliced_dataset
+from .workflow_config import WorkflowSettings
 
 orig_tqdm_init = t.tqdm.__init__
 def mb_init(self, *a, **kw):
@@ -54,6 +55,7 @@ class NeuromorphicEncoder:
     def __init__(self, cfg: Settings, use_temporal_slicing: bool = False, slice_duration_ms: float = None, auto_tune_slicing: bool = False, events_per_slice: int = None ):
 
         self.cfg = cfg
+        self.wf = WorkflowSettings()
         self.use_temporal_slicing = use_temporal_slicing
         self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)
         self.auto_tune_slicing = auto_tune_slicing
@@ -93,8 +95,9 @@ class NeuromorphicEncoder:
         logger.info(f"[PIPELINE] Train   : {len(raw_train)} recordings")
         logger.info(f"[PIPELINE] Test    : {len(raw_test)} recordings")
 
-        self.validate_first_sample(raw_train, "train")
+        train_sample_bytes = self.validate_first_sample(raw_train, "train")
         self.validate_first_sample(raw_test, "test")
+        logger.info(f"[PIPELINE] First train sample size: {train_sample_bytes / 1024:.1f} KB — dataset non-empty, proceeding to cache strategy")
 
         frame_tf = transforms.Compose([transforms.Denoise(filter_time=10000), transforms.ToFrame(sensor_size=sensor_size, time_window=time_window)])
         return raw_train, raw_test, frame_tf
@@ -107,10 +110,11 @@ class NeuromorphicEncoder:
         Caching always wraps raw datasets so all slices from one recording
         share a single cache entry.
         """
-        max_recs = self.coordinator.max_recordings(avg_recording_bytes=50_000)
         controller = AdaptiveCacheController(
-            cache_path=str(PROJECT_ROOT / "cache"),
-            max_cached_recordings=max_recs,
+            cache_path=self.wf.CACHE_PATH,
+            memory_safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
+            memory_cache_threshold_gb=self.wf.MEMORY_CACHE_THRESHOLD_GB,
+            max_cached_recordings=self.wf.MAX_CACHED_RECORDINGS,
             device=torch.device(self.cfg.DEVICE),
         )
 
@@ -121,8 +125,8 @@ class NeuromorphicEncoder:
 
         if self.use_temporal_slicing:
             # Layer 1: cache raw events (slicing needs raw timestamps)
-            cached_train = controller.wrap_dataset(raw_train, split="train", num_workers=num_workers)
-            cached_test  = controller.wrap_dataset(raw_test,  split="test",  num_workers=num_workers)
+            cached_train = controller.determine_dataset_strategy(raw_train, split="train", num_workers=num_workers, force_mode=self.wf.CACHE_FORCE_MODE)
+            cached_test  = controller.determine_dataset_strategy(raw_test,  split="test",  num_workers=num_workers, force_mode=self.wf.CACHE_FORCE_MODE)
 
             # Layer 2: stateless slicing with transforms applied per slice
             metadata_dir = str(PROJECT_ROOT / "metadata")
@@ -149,8 +153,8 @@ class NeuromorphicEncoder:
                 )
         else:
             # No slicing: cache with transforms baked in
-            train_data = controller.wrap_dataset(raw_train, transform=train_tf, split="train", num_workers=num_workers)
-            test_data  = controller.wrap_dataset(raw_test,  transform=test_tf,  split="test",  num_workers=num_workers)
+            train_data = controller.determine_dataset_strategy(raw_train, transform=train_tf, split="train", num_workers=num_workers, force_mode=self.wf.CACHE_FORCE_MODE)
+            test_data  = controller.determine_dataset_strategy(raw_test,  transform=test_tf,  split="test",  num_workers=num_workers, force_mode=self.wf.CACHE_FORCE_MODE)
 
         return train_data, test_data
 
@@ -188,19 +192,22 @@ class NeuromorphicEncoder:
         return self.train_loader, self.test_loader
 
     def clear_cache(self):
-        """Clear all disk cache directories."""
+        """Clear all disk cache directories. Directory is recreated automatically on the next pipeline run."""
         import shutil
-        cache_path = PROJECT_ROOT / "cache"
+        cache_path = Path(self.wf.CACHE_PATH)
         if cache_path.exists():
             shutil.rmtree(cache_path)
             logger.info("[PIPELINE] Cache cleared")
 
-    def validate_first_sample(self, dataset, split: str) -> None:
+    def validate_first_sample(self, dataset, split: str) -> int:
+        """Validate the first sample and return its byte size."""
         try:
             events, target = dataset[0]
             if events is None or (hasattr(events, "numel") and events.numel() == 0):
                 raise ValueError("first sample is empty")
-            logger.info(f"[VALIDATION] {split.capitalize()} dataset: first sample OK")
+            sample_bytes = measure_event_bytes(events)
+            logger.info(f"[VALIDATION] {split.capitalize()} dataset: first sample OK ({sample_bytes / 1024:.1f} KB)")
+            return sample_bytes
         except Exception as exc:
             logger.error(f"[ERROR] {split} validation failed — {exc}")
             sys.exit(1)
