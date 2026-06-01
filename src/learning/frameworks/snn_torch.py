@@ -1,17 +1,15 @@
 import snntorch as snn
 from snntorch import surrogate
 from snntorch import functional as SF
-from snntorch import spikeplot as splt
 from snntorch import utils
 import torch
 import torch.nn as nn
 from skeleton.snn_config import Settings
-from learning.inference import SNNTester
-from learning.event_data_workflow.data_pipeline import NeuromorphicEncoder
-from learning.training import SNNTrainer
+from learning.frameworks.model_interface import ModelInterface
+from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
 
 
-class SNN_TORCH(nn.Module):
+class SNN_TORCH(ModelInterface, nn.Module):
 
     IN_CHANNELS:    int   = 2       # polarity channels from event camera (C in sensor_size)
     CONV1_OUT:      int   = 12      # first conv output channels
@@ -28,19 +26,24 @@ class SNN_TORCH(nn.Module):
         self.cfg = cfg
         self.device = torch.device(cfg.DEVICE)
 
-        beta        = cfg.BETA
+        # snn.Alpha requires alpha > beta: alpha = membrane decay (slow), beta = synaptic decay (fast)
+        alpha       = cfg.BETA                  # membrane decay  (e.g. 0.95)
+        beta        = max(0.5, cfg.BETA - 0.1)  # synaptic decay, must be < alpha
         num_classes = cfg.NUM_CLASSES
 
         self.net = nn.Sequential(
             nn.Conv2d(self.IN_CHANNELS, self.CONV1_OUT, self.CONV1_KERNEL),
-            snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True),
+            # snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True),
+            snn.Alpha(alpha=alpha, beta=beta, spike_grad=spike_grad, init_hidden=True),
             nn.MaxPool2d(self.POOL_KERNEL),
             nn.Conv2d(self.CONV1_OUT, self.CONV2_OUT, self.CONV2_KERNEL),
-            snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True),
+            # snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True),
+            snn.Alpha(alpha=alpha, beta=beta, spike_grad=spike_grad, init_hidden=True),
             nn.MaxPool2d(self.POOL_KERNEL),
             nn.Flatten(),
             nn.Linear(self.FC_IN, num_classes),
-            snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True, output=True),
+            # snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True, output=True),
+            snn.Alpha(alpha=alpha, beta=beta, spike_grad=spike_grad, init_hidden=True, output=True),
         ).to(self.device)
 
         self.optimizer = torch.optim.Adam(
@@ -50,28 +53,56 @@ class SNN_TORCH(nn.Module):
             weight_decay=cfg.WEIGHT_DECAY,
         )
         self.loss_fn = SF.mse_count_loss(correct_rate=0.8, incorrect_rate=0.2)
-        
+
+        # net[1] = lif1 (after conv1), net[4] = lif2 (after conv2)
+        register_activity_hooks(self, {'lif1': self.net[1], 'lif2': self.net[4]})
+
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """Iterate over timesteps and collect output spikes."""
+        clear_hidden_spikes(self)
         spk_rec = []
         utils.reset(self.net)  # reset LIF hidden states between batches
- 
+
         for step in range(data.size(0)):   # dim 0 = timesteps [T, B, C, H, W]
-            spk_out, _ = self.net(data[step])
+            spk_out, *_ = self.net(data[step])  # Alpha returns (spk, syn, mem)
             spk_rec.append(spk_out)
- 
+
         return torch.stack(spk_rec)
     
-    def get_trainer(self, train_loader) -> SNNTrainer:
-        return SNNTrainer(self, train_loader, self.cfg, self.device)
 
-    def get_inference(self, test_loader) -> SNNTester:
-        return SNNTester(self, test_loader, self.cfg, self.device)
+    def backward_pass(self, loss: torch.Tensor, scaler=None, do_step: bool = True) -> None:
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if do_step:
+                scaler.step(self.optimizer)
+                scaler.update()
+        else:
+            loss.backward()
+            if do_step:
+                self.optimizer.step()
+
+    def zero_grad(self) -> None:
+        self.optimizer.zero_grad(set_to_none=True)
+
+    def train_mode(self) -> None:
+        self.net.train()
+
+    def eval_mode(self) -> None:
+        self.net.eval()
+
+    def get_lr(self) -> float:
+        return self.optimizer.param_groups[0]["lr"]
+
+    def get_state(self) -> dict:
+        return {
+            "model_state_dict":     self.net.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }
 
 
 
 if __name__ == "__main__":
-    from learning.event_data_workflow.data_pipeline import main as load_data
+    from event_data_workflow.data_pipeline import main as load_data
  
     train_loader, test_loader = load_data()
  

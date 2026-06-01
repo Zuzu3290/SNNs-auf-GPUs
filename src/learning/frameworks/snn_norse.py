@@ -6,29 +6,36 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from skeleton.snn_config import Settings
-from learning.inference import SNNTester
-from learning.training import SNNTrainer
+from learning.frameworks.model_interface import ModelInterface
+from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
 
 
-class _NorseNet(nn.Module):
-    """
-    All Norse layers in one module — mirrors the role of nn.Sequential in SNN_TORCH.
+class SNN_NORSE(ModelInterface, nn.Module):
 
-    Unlike SNNTorch's Leaky (which hides state internally), norse.LIFCell returns
-    (spikes, new_state) and expects the previous state as input. States are initialised
-    to None on the first timestep; Norse auto-creates zero tensors from that.
-    """
+    IN_CHANNELS:  int = 2       # polarity channels from DVS event camera
+    CONV1_OUT:    int = 12      # first conv output channels
+    CONV1_KERNEL: int = 5       # first conv kernel size
+    CONV2_OUT:    int = 32      # second conv output channels
+    CONV2_KERNEL: int = 5       # second conv kernel size
+    POOL_KERNEL:  int = 2       # maxpool kernel (applied twice)
+    FC_IN:        int = 32 * 5 * 5  # flattened size after both conv+pool stages
 
-    IN_CHANNELS:  int = 2
-    CONV1_OUT:    int = 12
-    CONV1_KERNEL: int = 5
-    CONV2_OUT:    int = 32
-    CONV2_KERNEL: int = 5
-    POOL_KERNEL:  int = 2
-    FC_IN:        int = 32 * 5 * 5
-
-    def __init__(self, lif_params: norse.LIFParameters, num_classes: int):
+    def __init__(self, cfg: Settings):
         super().__init__()
+
+        self.cfg    = cfg
+        self.device = torch.device(cfg.DEVICE)
+
+        # Convert beta (SNNTorch convention, 0–1) to tau_mem_inv (Norse convention, Hz).
+        # tau_mem_inv = -ln(beta) / dt  where dt=0.001s gives ~51 Hz for beta=0.95.
+        # TODO: add a norse-specific section to SNN_module.yaml so tau_mem_inv can be
+        # tuned independently from the SNNTorch beta value.
+        dt          = 0.001
+        tau_mem_inv = -math.log(cfg.BETA) / dt
+        lif_params  = norse.LIFParameters(
+            tau_mem_inv = torch.as_tensor(tau_mem_inv, dtype=torch.float32),
+            v_th        = torch.as_tensor(cfg.THRESHOLD, dtype=torch.float32),
+        )
 
         self.conv1   = nn.Conv2d(self.IN_CHANNELS, self.CONV1_OUT, self.CONV1_KERNEL)
         self.lif1    = norse.LIFCell(p=lif_params)
@@ -39,15 +46,35 @@ class _NorseNet(nn.Module):
         self.pool2   = nn.MaxPool2d(self.POOL_KERNEL)
 
         self.flatten = nn.Flatten()
-        self.fc      = nn.Linear(self.FC_IN, num_classes)
+        self.fc      = nn.Linear(self.FC_IN, cfg.NUM_CLASSES)
         self.lif_out = norse.LIFCell(p=lif_params)
+
+        self.to(self.device)
+
+        self.optimizer = torch.optim.Adam(
+            self.parameters(),
+            lr=cfg.LEARNING_RATE,
+            betas=(0.9, 0.999),
+            weight_decay=cfg.WEIGHT_DECAY,
+        )
+        # CrossEntropy on spike counts — sums spikes over T, then maximises correct class logit.
+        # Simpler gradient signal than mse_count_loss; typically converges faster for classification.
+        self.loss_fn = lambda spk_rec, targets: F.cross_entropy(spk_rec.sum(0), targets)
+
+        # lif1 and lif2 are the hidden LIFCell layers
+        register_activity_hooks(self, {'lif1': self.lif1, 'lif2': self.lif2})
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """
         data: [T, B, C, H, W]
         returns: [T, B, num_classes]
+
+        Unlike SNNTorch's Leaky (which hides state internally), norse.LIFCell returns
+        (spikes, new_state) and expects the previous state as input. States are
+        initialised to None on the first timestep; Norse auto-creates zero tensors.
         """
-        s1 = s2 = s_out = None  # None → Norse auto-initialises to zeros on first call
+        clear_hidden_spikes(self)
+        s1 = s2 = s_out = None
         spk_rec = []
 
         for step in range(data.size(0)):   # dim 0 = timesteps
@@ -69,53 +96,38 @@ class _NorseNet(nn.Module):
 
         return torch.stack(spk_rec)        # [T, B, num_classes]
 
+    def backward_pass(self, loss: torch.Tensor, scaler=None, do_step: bool = True) -> None:
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            if do_step:
+                scaler.step(self.optimizer)
+                scaler.update()
+        else:
+            loss.backward()
+            if do_step:
+                self.optimizer.step()
 
-class SNN_NORSE(nn.Module):
+    def zero_grad(self) -> None:
+        self.optimizer.zero_grad(set_to_none=True)
 
-    def __init__(self, cfg: Settings):
-        super().__init__()
+    def train_mode(self) -> None:
+        self.train()
 
-        self.cfg    = cfg
-        self.device = torch.device(cfg.DEVICE)
+    def eval_mode(self) -> None:
+        self.eval()
 
-        # TODO: temporary parameter conversion — replace with framework-specific config sections.
-        # Norse and SNNTorch use different coordinate systems for the same physical quantity:
-        #   SNNTorch: beta (dimensionless, 0–1)     Norse: tau_mem_inv (Hz, typically 10–1000)
-        # The conversion is nonlinear, so a single shared YAML value cannot fairly control both.
-        # Proper fix: add snntorch/norse sub-sections to SNN_module.yaml and expose them via
-        # Settings, so each framework reads its own independently tuned parameters.
-        dt          = 0.001                          # 1 ms — Norse default timestep
-        tau_mem_inv = -math.log(cfg.BETA) / dt       # beta=0.95 → ~51.3 Hz
+    def get_lr(self) -> float:
+        return self.optimizer.param_groups[0]["lr"]
 
-        lif_params = norse.LIFParameters(
-            tau_mem_inv=torch.as_tensor(tau_mem_inv),
-            v_th=torch.as_tensor(cfg.THRESHOLD),      # v_th shares the same scale — no conversion needed
-        )
-
-        self.net = _NorseNet(lif_params, cfg.NUM_CLASSES).to(self.device)
-
-        self.optimizer = torch.optim.Adam(
-            self.net.parameters(),
-            lr=cfg.LEARNING_RATE,
-            betas=(0.9, 0.999),
-            weight_decay=cfg.WEIGHT_DECAY,
-        )
-        # CrossEntropy on spike counts — sums spikes over T, then maximises correct class logit.
-        # Simpler gradient signal than mse_count_loss; typically converges faster for classification.
-        self.loss_fn = lambda spk_rec, targets: F.cross_entropy(spk_rec.sum(0), targets)
-
-    def forward(self, data: torch.Tensor) -> torch.Tensor:
-        return self.net(data)
-
-    def get_trainer(self, train_loader) -> SNNTrainer:
-        return SNNTrainer(self, train_loader, self.cfg, self.device)
-
-    def get_inference(self, test_loader) -> SNNTester:
-        return SNNTester(self.net, test_loader, self.cfg, self.device)
+    def get_state(self) -> dict:
+        return {
+            "model_state_dict":     self.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }
 
 
 if __name__ == "__main__":
-    from learning.event_data_workflow import NeuromorphicEncoder
+    from event_data_workflow import NeuromorphicEncoder
 
     encoder = NeuromorphicEncoder(Settings())
     train_loader, test_loader = encoder.get_dataloaders()
@@ -126,6 +138,6 @@ if __name__ == "__main__":
     inference = model.get_inference(test_loader)
 
     print("\n✓ Norse model ready.")
-    print(f"  - Device    : {model.device}")
-    print(f"  - FC_IN     : {_NorseNet.FC_IN}  (verify matches your sensor resolution)")
-    print(f"  - Classes   : {cfg.NUM_CLASSES}")
+    print(f"  - Device : {model.device}")
+    print(f"  - FC_IN  : {SNN_NORSE.FC_IN}  (verify matches your sensor resolution)")
+    print(f"  - Classes: {cfg.NUM_CLASSES}")
