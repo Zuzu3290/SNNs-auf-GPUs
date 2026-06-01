@@ -5,8 +5,9 @@ import csv
 import time
 import torch
 import numpy as np
-from snntorch import functional as SF
-from skeleton import Settings 
+from skeleton import Settings
+from learning.training import aggregate_spike_output
+from event_data_workflow.gpu_stats import GPUStats
 
 # Energy per synaptic op — adjust for your target neuromorphic platform
 ENERGY_PER_SPIKE_PJ = 3.5
@@ -20,8 +21,46 @@ class SNNTester:
         self.device      = device
         self.num_classes = cfg.NUM_CLASSES
         self.batch_log   = []
+        self.kernel_module = None
+        self.use_custom_kernel = False
+        if cfg.KERNEL == "ON":
+            try:
+                import snn_cuda.snn_forward as km  # type: ignore[import]
+                self.kernel_module = km
+                self.use_custom_kernel = True
+                print("[kernel] SNNTester: custom CRSC CUDA kernel active")
+            except ImportError:
+                print("[kernel] snn_cuda not built — run: python src/learning/setup.py build_ext --inplace")
+        self._voltage_buf: torch.Tensor | None = None
+        device_idx = (device.index or 0) if device.type == "cuda" else 0
+        self.gpu_stats = GPUStats(device_idx=device_idx)
 
-    def _class_metrics(self, cm: np.ndarray) -> list[dict]:
+    def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
+        if not self.use_custom_kernel:
+            return self.model(data)
+
+        if data.dim() == 5:
+            T, B, C, H, W = data.shape
+            inp = data.view(T, B, C * H * W).permute(1, 2, 0).contiguous()
+        elif data.dim() == 4:
+            T, B, C, N = data.shape
+            inp = data.view(T, B, C * N).permute(1, 2, 0).contiguous()
+        else:
+            return self.model(data)
+
+        B_sz, N_sz = inp.size(0), inp.size(1)
+        if self._voltage_buf is None or self._voltage_buf.shape != (B_sz, N_sz):
+            self._voltage_buf = torch.zeros(B_sz, N_sz, device=self.device)
+
+        kernel = self.kernel_module
+        assert kernel is not None
+        spikes = kernel.forward(
+            inp, self._voltage_buf,
+            float(self.cfg.THRESHOLD), 1.0 - float(self.cfg.BETA),
+        )
+        return spikes.permute(2, 0, 1).contiguous()
+
+    def class_metrics(self, cm: np.ndarray) -> list[dict]:
         total = cm.sum()
         rows  = []
         for c in range(self.num_classes):
@@ -35,7 +74,7 @@ class SNNTester:
             f1          = (2 * precision * recall / (precision + recall)
                            if (precision + recall) > 0 else 0.0)
             specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-            class_acc   = (tp + tn) / total
+            class_acc   = (tp + tn) / total if total > 0 else 0.0
  
             rows.append({
                 "class":       c,
@@ -48,7 +87,7 @@ class SNNTester:
             })
         return rows
 
-    def _write_csv(self, path: str):
+    def write_csv(self, path: str):
         if not self.batch_log:
             return
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -60,7 +99,7 @@ class SNNTester:
         print(f"[INFO] Test log saved → {path}")
 
     def run(self, csv_path: str = "./outputs/data/test.csv") -> dict:
-        self.model.eval()
+        self.model.eval_mode()
  
         all_preds, all_targets = [], []
         total_spikes     = 0
@@ -70,7 +109,10 @@ class SNNTester:
         cm = np.zeros((self.num_classes, self.num_classes), dtype=int)
  
         print("\n[TEST RUN]")
- 
+
+        self.gpu_stats.start_epoch()
+        t_run_start = time.perf_counter()
+
         with torch.no_grad():
             for batch_idx, (data, targets) in enumerate(self.test_loader):
                 data    = data.to(self.device)
@@ -79,17 +121,21 @@ class SNNTester:
                 T = data.size(0)
  
                 t0         = time.perf_counter()
-                spk_rec    = self.model(data)               # [T, B, num_classes]
+                spk_rec    = self.forward_pass(data)
                 latency_ms = (time.perf_counter() - t0) * 1000
  
                 batch_spikes    = int(spk_rec.sum().item())
                 possible_spikes = T * B * self.num_classes
                 spike_rate      = batch_spikes / possible_spikes
                 energy_pj       = batch_spikes * ENERGY_PER_SPIKE_PJ
+
+                window_s       = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
+                firing_rate_hz = spike_rate * T / window_s
  
-                preds = spk_rec.sum(0).argmax(1).cpu()
-                tgts  = targets.cpu()
-                acc   = SF.accuracy_rate(spk_rec, targets)
+                logits = aggregate_spike_output(spk_rec.float())
+                preds  = logits.argmax(dim=1).cpu()
+                tgts   = targets.cpu()
+                acc    = (preds == tgts).float().mean().item()
  
                 np.add.at(cm, (tgts.numpy(), preds.numpy()), 1)
                 all_preds.append(preds)
@@ -108,26 +154,34 @@ class SNNTester:
                     "spikes_activated":      batch_spikes,
                     "possible_spikes":       possible_spikes,
                     "spike_rate":            round(spike_rate, 4),
+                    "firing_rate_hz":        round(firing_rate_hz, 2),
                     "latency_ms":            round(latency_ms, 3),
                     "latency_per_sample_ms": round(latency_ms / B, 3),
                     "energy_pJ":             round(energy_pj, 2),
                 })
- 
+
                 print(f"  Batch {batch_idx:>3} | "
                       f"Acc: {acc * 100:.2f}% | "
                       f"Spikes: {batch_spikes:>6} | "
-                      f"Rate: {spike_rate:.3f} | "
+                      f"Rate: {spike_rate:.3f} ({firing_rate_hz:.1f} Hz) | "
                       f"Latency: {latency_ms:.1f}ms | "
                       f"Energy: {energy_pj:.1f}pJ")
  
+        t_run_elapsed = time.perf_counter() - t_run_start
+        self.gpu_stats.end_epoch()
+        gpu_energy_j = self.gpu_stats.gpu_energy_j(t_run_elapsed)
+
         all_preds   = torch.cat(all_preds)
         all_targets = torch.cat(all_targets)
- 
+
         overall_acc            = (all_preds == all_targets).float().mean().item()
         avg_latency_ms         = total_latency_ms / len(self.batch_log)
         avg_latency_per_sample = total_latency_ms / total_samples
         avg_spikes_per_sample  = total_spikes / total_samples
-        class_metrics          = self._class_metrics(cm)
+        avg_spike_rate         = total_spikes / (len(self.batch_log) * self.cfg.TIMESTEPS * self.num_classes) if self.batch_log else 0.0
+        window_s               = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
+        avg_firing_rate_hz     = avg_spike_rate * self.cfg.TIMESTEPS / window_s
+        class_metrics          = self.class_metrics(cm)
         gt_dist                = {c: int((all_targets == c).sum()) for c in range(self.num_classes)}
         pred_dist              = {c: int((all_preds   == c).sum()) for c in range(self.num_classes)}
  
@@ -136,10 +190,19 @@ class SNNTester:
         print(f"  • Total Samples           : {total_samples}")
         print(f"  • Total Spikes Activated  : {total_spikes:,}")
         print(f"  • Avg Spikes / Sample     : {avg_spikes_per_sample:.2f}")
+        print(f"  • Avg Firing Rate         : {avg_firing_rate_hz:.2f} Hz")
         print(f"  • Avg Batch Latency       : {avg_latency_ms:.2f} ms")
         print(f"  • Avg Latency / Sample    : {avg_latency_per_sample:.3f} ms")
-        print(f"  • Total Energy Estimate   : {total_energy_pj:.1f} pJ")
+        print(f"  • Total Energy Estimate   : {total_energy_pj:.1f} pJ  (neuromorphic model)")
         print(f"  • Energy / Sample         : {total_energy_pj / total_samples:.2f} pJ")
+
+        if gpu_energy_j is not None:
+            neuromorphic_j = total_energy_pj * 1e-12
+            gap = gpu_energy_j / neuromorphic_j if neuromorphic_j > 0 else float("inf")
+            print(f"  • GPU Energy (actual)     : {gpu_energy_j * 1e3:.2f} mJ")
+            print(f"  • Hardware Efficiency Gap : {gap:.2e}x  (GPU vs ideal neuromorphic silicon)")
+        else:
+            print(f"  • GPU Energy (actual)     : N/A  (install nvidia-ml-py for real power readings)")
  
         print("\n  Per-class metrics:")
         for row in class_metrics:
@@ -154,16 +217,18 @@ class SNNTester:
         for c in range(self.num_classes):
             print(f"    Class {c:>2} | GT: {gt_dist[c]:>5}  Pred: {pred_dist[c]:>5}")
  
-        self._write_csv(csv_path)
+        self.write_csv(csv_path)
  
         return {
             "overall_accuracy":          overall_acc,
             "total_spikes":              total_spikes,
             "avg_spikes_per_sample":     avg_spikes_per_sample,
+            "avg_firing_rate_hz":        avg_firing_rate_hz,
             "avg_latency_ms":            avg_latency_ms,
             "avg_latency_per_sample_ms": avg_latency_per_sample,
             "total_energy_pj":           total_energy_pj,
             "energy_per_sample_pj":      total_energy_pj / total_samples,
+            "gpu_energy_j":              gpu_energy_j,
             "class_metrics":             class_metrics,
             "gt_distribution":           gt_dist,
             "pred_distribution":         pred_dist,

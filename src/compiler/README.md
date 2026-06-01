@@ -1,53 +1,90 @@
-Compiler front-end
+# Compiler Architecture
 
-This layer takes the model computation and translates it into a form the compiler can understand.
+The compiler is structured into four main layers: the front-end, middle-end, backend, and runtime. Each layer has a specific responsibility in transforming model computation into executable hardware operations.
 
-This layer is responsible for:
+---
 
-inspecting PyTorch operations
-capturing model execution regions
-recognizing SNN-specific semantics
-creating compiler IR nodes
+## Compiler Front-End
 
-This is where “framework code” becomes “compiler code.”
+The compiler front-end is responsible for taking model computation and translating it into a form that the compiler can understand.
 
-Compiler middle-end
+It acts as the bridge between the deep learning framework and the compiler system.
 
-This is the core of the system.
+### Responsibilities
 
-It is responsible for:
+- Inspect PyTorch operations
+- Capture model execution regions
+- Recognize SNN-specific semantics
+- Create compiler IR nodes
 
-representing operations in IR
-rewriting operations
-annotating device placement
-deciding scheduling
-planning execution order
-preparing a runnable execution plan
+This is the stage where framework-level code becomes compiler-level code.
 
-This is the actual compiler brain.
+---
 
-Backend
+## Compiler Middle-End
 
-This layer knows how to execute the plan on real hardware.
+The compiler middle-end is the core decision-making layer of the system.
 
-It maps compiler operations to:
+It represents, rewrites, schedules, and prepares operations before they are passed to the backend for execution.
 
-CPU routines
-CUDA kernels
-later possibly PTX modules or fused kernels
+### Responsibilities
 
-This is where abstract ops become hardware work
+- Represent operations in IR
+- Rewrite operations for optimization
+- Annotate device placement
+- Decide scheduling strategy
+- Plan execution order
+- Prepare a runnable execution plan
 
-Runtime
+This layer acts as the compiler brain.
 
-This layer manages actual execution.
+---
 
-It handles:
+## Backend
 
-memory allocation
-transfers
-streams
-kernel launch configuration
-synchronization
-profiling hooks
-execution feedback to the scheduler
+The backend is responsible for mapping the compiler execution plan onto real hardware.
+
+It takes abstract compiler operations and connects them to the appropriate hardware-level implementation.
+
+### It maps operations to:
+
+- CPU routines
+- CUDA kernels
+- Future PTX modules
+- Future fused kernels
+
+This is the stage where abstract operations become hardware work.
+
+---
+
+## Runtime
+
+The runtime layer manages the actual execution of the compiled plan.
+
+It is responsible for handling memory, execution control, synchronization, profiling, and runtime feedback.
+
+### Responsibilities
+
+- Memory allocation
+- Data transfers
+- Stream management
+- Kernel launch configuration
+- Synchronization
+- Profiling hooks
+- Execution feedback to the scheduler
+
+The runtime ensures that the compiled operations are executed efficiently and correctly on the target hardware.
+
+---
+
+## Summary
+
+Together, these four layers define the compiler workflow:
+
+```mermaid
+flowchart TD
+    A[PyTorch Model Operations] --> B[Compiler Front-End]
+    B --> C[Compiler Middle-End]
+    C --> D[Backend]
+    D --> E[Runtime]
+    E --> F[Hardware Execution]
