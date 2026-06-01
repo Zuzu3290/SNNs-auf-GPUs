@@ -1,102 +1,145 @@
 # SNNs-auf-GPUs
 
-A research platform for running Spiking Neural Networks on GPU hardware.
-The system moves from Python-based SNN frameworks toward a GPU-native runtime
-where a custom CUDA kernel owns the full execution path — event ingestion,
-neuron dynamics, weight updates, and memory management.
+This project implements a lightweight domain-specific compiler and runtime for spiking neural network workloads. The system integrates a PyTorch-based SNN front end with a native C++/CUDA execution back end. It lowers model computations into an internal intermediate representation, applies device-aware scheduling and planning, and executes optimized kernels on GPU depending on workload characteristics. The architecture is designed as a research-oriented foundation for future extensions such as operator fusion, PTX-based kernel execution, adaptive scheduling, and timestep-aware optimization.
 
----
+The repo covers a topic related to the refinement of Neural networks on Neomorphic AI hardware. 
 
-## What This Is
+From inside the snn_cuda/ directory:
+```
+python setup.py build_ext --inplace
+```
 
-Neuromorphic computing on commodity GPUs. The project bridges event-based
-sensor data (DVS / DAVIS cameras) with SNN training frameworks, while
-progressively replacing Python operations with compiled CUDA kernels.
+# Event Camera → SNN Real-Time Pipeline
 
-The codebase is structured in two planes that will converge over time:
-
-| Plane | Location | Role |
-|-------|----------|------|
-| Python | `src/learning/`, `event_data_workflow/`, `skeleton/` | Configuration, framework wrappers, fallback path |
-| CUDA | `src/crsc/`, `acceleration/` | Kernel execution — LIF dynamics, spike ops, memory |
-
-The compiler layer (`src/compiler/`) bridges them, dispatching operations to
-the kernel when available and falling back to Python otherwise.
-
----
-
-## Project Layout
+A complete, modular pipeline from raw event camera sensor data to
+spiking neural network classification, implemented in Python/CUDA.
 
 ```
-src/
-  learning/         SNN framework wrappers — SNNTorch, Norse, SpikingJelly
-  compiler/         JIT compiler, kernel loader, dispatch bridge
-  crsc/             CUDA kernels — membrane, spike, threshold, reset, decode
-skeleton/           Configuration and settings (SNN_module.yaml)
-event_data_workflow/ Neuromorphic data pipeline — caching, slicing, DataLoader
-acceleration/       GPU hardware attributes, PTX loader, SNN hardware mapping
-docs/               Architecture references and hardware notes
+Event Camera
+    ↓  raw (x, y, t, polarity) events
+Driver / SDK          [Module 2]  filters, bias tuning
+    ↓  filtered EventBatch stream
+Event Buffer          [Module 3]  time-window accumulation → voxel grid
+    ↓  (2, T, H, W) numpy tensor
+GPU Memory            [Module 4]  pinned memory + async H2D DMA
+    ↓  (2, T, H, W) CUDA tensor
+Custom CUDA Kernel    [Module 5]  LIF integration, threshold spike maps
+    ↓  (2, T, H, W) spike tensor
+SNN Simulation        [Module 6]  conv-LIF encoder + readout (snnTorch)
+    ↓  (T, B, C) output spike trains
+Output Decoder        [Module 7]  rate decode → class + confidence
 ```
 
 ---
 
-## Entry Point
+## Quick Start (no hardware required)
+
+```bash
+# 1. Install dependencies
+pip install torch numpy snntorch matplotlib
+
+# 2. Run the full pipeline with a mock camera
+python pipeline.py --backend mock --n_frames 20
+
+# 3. Run individual module demos
+python module1_camera/event_camera.py
+python module2_driver/camera_driver.py
+python module3_buffer/event_buffer.py
+python module4_gpu/gpu_memory.py
+python module5_cuda/spike_kernel.py
+python module6_snn/snn_model.py
+python module7_output/output_decoder.py
+```
+
+---
+
+## Hardware Setup
+
+### iniVation (DAVIS / DVS cameras)
+```bash
+pip install pyaer
+python pipeline.py --backend pyaer --width 346 --height 260
+```
+
+### Prophesee (EVK3, EVK4, SilkyEvCam)
+```bash
+# Install from https://docs.prophesee.ai/stable/installation/
+python pipeline.py --backend metavision --width 640 --height 480
+```
+
+---
+
+## Module Reference
+
+| Module | File | Key class |
+|--------|------|-----------|
+| 1 — Event Camera   | `module1_camera/event_camera.py`   | `EventCamera(backend)` |
+| 2 — Driver/SDK     | `module2_driver/camera_driver.py`  | `CameraDriver` |
+| 3 — Event Buffer   | `module3_buffer/event_buffer.py`   | `TimeWindowBuffer` |
+| 4 — GPU Memory     | `module4_gpu/gpu_memory.py`        | `GPUMemoryManager` |
+| 5 — CUDA Kernel    | `module5_cuda/spike_kernel.py`     | `SpikeKernel` |
+| 6 — SNN Simulation | `module6_snn/snn_model.py`         | `SpikingClassifier` |
+| 7 — Output         | `module7_output/output_decoder.py` | `RateDecoder` |
+| — Master pipeline  | `pipeline.py`                      | `run_pipeline(args)` |
+
+---
+
+## Pipeline CLI Options
 
 ```
-python src/learning/main.py
+python pipeline.py [options]
+
+  --backend          mock | pyaer | metavision  (default: mock)
+  --width            sensor width  (default: 346)
+  --height           sensor height (default: 260)
+  --event-rate       simulated events/s for mock (default: 500000)
+  --window-us        accumulation window µs (default: 10000)
+  --n-bins           temporal bins T (default: 5)
+  --n-classes        output classes (default: 10)
+  --n-frames         stop after N windows, 0=forever (default: 20)
+  --sensitivity      camera bias 1–10 (default: 5)
+  --noise-filter-us  BAF filter window µs (default: 1500)
+  --checkpoint       path to .pt model checkpoint
 ```
 
-Reads `SNN_module.yaml`, loads the neuromorphic dataset via
-`event_data_workflow`, builds the SNN model, runs training, then evaluation.
+---
+
+## Event Representations (Module 3)
+
+| Method | Shape | Description |
+|--------|-------|-------------|
+| `get_voxel_grid()` | `(2, T, H, W)` | Bilinear-interpolated spatiotemporal bins |
+| `get_event_frame()` | `(2, H, W)` | ON/OFF event count per pixel |
+| `get_time_surface()` | `(2, H, W)` | Exponential decay timestamp surface |
 
 ---
 
-## Configuration
+## CUDA Kernels (Module 5)
 
-All runtime parameters live in `SNN_module.yaml` at the project root:
-architecture, training schedule, dataset path, device, compiler flags, and
-data pipeline settings. No hardcoded values in source files.
-
----
-
-## Framework Backends
-
-The trainer and inference pipeline are framework-agnostic at the model boundary.
-Any model that satisfies the `ModelInterface` contract can be plugged in — the
-pipeline does not care what runs inside.
-
-| Backend | Status | Notes |
-|---------|--------|-------|
-| SNNTorch | Working | Default |
-| Norse | Working | Current default in `main.py` |
-| SpikingJelly | Working | |
-| JAX + Flax/Haiku | Extension point | Trains via XLA; DLPack bridge to PyTorch at boundary |
-| TensorFlow | Extension point | DLPack bridge at boundary |
-| Custom / from scratch | Extension point | Return a PyTorch tensor — everything else is your choice |
-
-For details on how each backend cooperates with the training loop, backward pass,
-and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
+| Kernel | Function | Description |
+|--------|----------|-------------|
+| `event_to_spikes_kernel` | `kernel.event_to_spikes(voxel, threshold)` | Hard threshold |
+| `lif_membrane_kernel`    | `kernel.lif_spikes(voxel, v_thresh, leak)` | Stateful LIF |
+| `polarity_merge_kernel`  | `kernel.merge_polarities(spikes)`           | ON/OFF → ±1 |
 
 ---
 
-## Current Capabilities
+## SNN Architectures (Module 6)
 
-- Three SNN backends: SNNTorch, Norse, SpikingJelly — switchable via config
-- Adaptive data pipeline: selects memory, disk, hybrid, or GPU-VRAM cache
-  strategy automatically based on available system resources
-- Activity regularization and STDP as differentiable loss terms alongside BPTT
-- Fused LIF CUDA kernel with surrogate gradient for BPTT
-- JIT compiler pipeline that lowers SNN models to an IR and schedules
-  device-aware execution
-- Adversarial robustness evaluation via TRADES
+| Model | Requirements | Best for |
+|-------|-------------|----------|
+| `SpikingClassifier` | snnTorch | Single-window classification |
+| `SpikingEncoder`    | snnTorch | Feature extraction backbone |
+| `SpikingRecurrent`  | Norse    | Temporal sequence tasks |
 
 ---
 
-## Roadmap
+## Output Decoders (Module 7)
 
-The kernel dispatch layer (`src/compiler/runtime.py`) is the next build target.
-When complete, GPU detection at startup routes all operations — event decoding,
-tensor caching, neuron dynamics, weight updates — through `src/crsc/` kernels.
-Python implementations remain as the CPU fallback and correctness reference.
+| Decoder | Method | Best for |
+|---------|--------|----------|
+| `RateDecoder`    | Spike count argmax | Standard classification |
+| `LatencyDecoder` | Time-to-first-spike | Low-latency tasks |
 
-See `docs/kernel_dispatch_architecture.md` for the full plan.
+
+
