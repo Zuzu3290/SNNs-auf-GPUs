@@ -1,2 +1,2 @@
-from .compiler import compile_model, CompiledModel
-__all__ = ["compile_model", "CompiledModel"]
+from .compiler import compile_model
+__all__ = ["compile_model"]
