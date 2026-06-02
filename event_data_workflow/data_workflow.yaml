@@ -1,3 +1,9 @@
+framing:
+  mode: n_time_bins       # "n_time_bins" (fixed T per sample, no padding — recommended for Conv-SNN)
+                          # "time_window" (variable T, different samples span different durations — for analysis)
+  n_time_bins: 16
+  time_window_ms: 15.0
+
 temporal_slicing:
   enabled: false
   slice_duration_ms: 15.0
@@ -14,6 +20,4 @@ cache:
   max_cached_recordings: 500
   force_mode: null       # null | memory | disk | hybrid | no_cache
 
-dataloader:
-  batch_size: 128
-  num_workers: 4         # overridden at runtime by PipelineMemoryCoordinator
+# batch_size and num_workers live in SNN_module.yaml (training section)

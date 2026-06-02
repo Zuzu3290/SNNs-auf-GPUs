@@ -13,6 +13,7 @@ architecture:
 training:
   kernel: OFF                   # ON → use the compiled CRSC CUDA kernel for LIF forward pass.
                                 # Requires: python src/learning/setup.py build_ext --inplace
+  framework: norse           # YAML selector: norse | torch | sj
   loss_function: CrossEntropy
   optimizer: Adam
   epochs: 2
@@ -65,3 +66,28 @@ output:
   output_dir: ./outputs
   plot_dir: ./outputs/plots
   data_dir: ./outputs/data
+
+# Per-framework neuron / optimiser / loss params.
+# threshold=0.5: SNNTorch amplifies input 20x (V_eq=20I), Norse/SpikingJelly do not (V_eq=I).
+# threshold=1.0 kills Norse (dead neurons, confirmed EXP-004). 0.5 is a safe neutral starting point.
+frameworks:
+  snntorch:
+    beta:       0.95
+    threshold:  0.5
+    optimizer:  adam
+    loss_fn:    mse_count
+    # reset_mode: subtract    # activate when reset_mode is exposed in training loop
+
+  norse:
+    tau_mem_inv: 100.0
+    threshold:   0.5
+    optimizer:   adam
+    loss_fn:     cross_entropy
+    # reset_mode: zero        # Norse only supports hard reset
+
+  spikingjelly:
+    tau:         2.0
+    threshold:   0.5
+    optimizer:   adam
+    loss_fn:     cross_entropy
+    # reset_mode: zero

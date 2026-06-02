@@ -1,24 +1,14 @@
-import math
-
-import norse.torch as norse
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
 from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
+from learning.utilities import build_optimizer, build_loss, build_norse_layer
+# from learning.utilities import reset_mode_guard  # activate together with reset_mode_guard() call below
 
 
 class SNN_NORSE(ModelInterface, nn.Module):
-
-    IN_CHANNELS:  int = 2       # polarity channels from DVS event camera
-    CONV1_OUT:    int = 12      # first conv output channels
-    CONV1_KERNEL: int = 5       # first conv kernel size
-    CONV2_OUT:    int = 32      # second conv output channels
-    CONV2_KERNEL: int = 5       # second conv kernel size
-    POOL_KERNEL:  int = 2       # maxpool kernel (applied twice)
-    FC_IN:        int = 32 * 5 * 5  # flattened size after both conv+pool stages
 
     def __init__(self, cfg: Settings):
         super().__init__()
@@ -26,42 +16,33 @@ class SNN_NORSE(ModelInterface, nn.Module):
         self.cfg    = cfg
         self.device = torch.device(cfg.DEVICE)
 
-        # Convert beta (SNNTorch convention, 0–1) to tau_mem_inv (Norse convention, Hz).
-        # tau_mem_inv = -ln(beta) / dt  where dt=0.001s gives ~51 Hz for beta=0.95.
-        # TODO: add a norse-specific section to SNN_module.yaml so tau_mem_inv can be
-        # tuned independently from the SNNTorch beta value.
-        dt          = 0.001
-        tau_mem_inv = -math.log(cfg.BETA) / dt
-        lif_params  = norse.LIFParameters(
-            tau_mem_inv = torch.as_tensor(tau_mem_inv, dtype=torch.float32),
-            v_th        = torch.as_tensor(cfg.THRESHOLD, dtype=torch.float32),
-        )
+        # tau_mem_inv is read directly from the YAML frameworks.norse section.
+        # Do NOT convert from SNNTorch beta: they live in different coordinate systems.
+        # SNNTorch: V_eq = 20*I  (20x amplification).  Norse: V_eq = I (no amplification).
+        fw_cfg = {
+            **cfg.FRAMEWORK_CFG["norse"],
+            "learning_rate": cfg.LEARNING_RATE,
+            "weight_decay":  cfg.WEIGHT_DECAY,
+        }
+        # reset_mode_guard(fw_cfg, framework="norse")  # activate when reset_mode is in YAML
 
-        self.conv1   = nn.Conv2d(self.IN_CHANNELS, self.CONV1_OUT, self.CONV1_KERNEL)
-        self.lif1    = norse.LIFCell(p=lif_params)
-        self.pool1   = nn.MaxPool2d(self.POOL_KERNEL)
+        self.conv1   = nn.Conv2d(cfg.IN_CHANNELS, cfg.CONV1_OUT, cfg.CONV1_KERNEL)
+        self.lif1    = build_norse_layer("lif1",    cfg)
+        self.pool1   = nn.MaxPool2d(cfg.POOL_KERNEL)
 
-        self.conv2   = nn.Conv2d(self.CONV1_OUT, self.CONV2_OUT, self.CONV2_KERNEL)
-        self.lif2    = norse.LIFCell(p=lif_params)
-        self.pool2   = nn.MaxPool2d(self.POOL_KERNEL)
+        self.conv2   = nn.Conv2d(cfg.CONV1_OUT, cfg.CONV2_OUT, cfg.CONV2_KERNEL)
+        self.lif2    = build_norse_layer("lif2",    cfg)
+        self.pool2   = nn.MaxPool2d(cfg.POOL_KERNEL)
 
         self.flatten = nn.Flatten()
-        self.fc      = nn.Linear(self.FC_IN, cfg.NUM_CLASSES)
-        self.lif_out = norse.LIFCell(p=lif_params)
+        self.fc      = nn.Linear(cfg.FC_IN, cfg.NUM_CLASSES)
+        self.lif_out = build_norse_layer("lif_out", cfg)
 
         self.to(self.device)
 
-        self.optimizer = torch.optim.Adam(
-            self.parameters(),
-            lr=cfg.LEARNING_RATE,
-            betas=(0.9, 0.999),
-            weight_decay=cfg.WEIGHT_DECAY,
-        )
-        # CrossEntropy on spike counts — sums spikes over T, then maximises correct class logit.
-        # Simpler gradient signal than mse_count_loss; typically converges faster for classification.
-        self.loss_fn = lambda spk_rec, targets: F.cross_entropy(spk_rec.sum(0), targets)
+        self.optimizer = build_optimizer(self.parameters(), fw_cfg)
+        self.loss_fn   = build_loss(fw_cfg, framework="norse")
 
-        # lif1 and lif2 are the hidden LIFCell layers
         register_activity_hooks(self, {'lif1': self.lif1, 'lif2': self.lif2})
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
@@ -137,7 +118,7 @@ if __name__ == "__main__":
     trainer   = model.get_trainer(train_loader)
     inference = model.get_inference(test_loader)
 
-    print("\n✓ Norse model ready.")
+    print("\n Norse model ready.")
     print(f"  - Device : {model.device}")
-    print(f"  - FC_IN  : {SNN_NORSE.FC_IN}  (verify matches your sensor resolution)")
+    print(f"  - FC_IN  : {cfg.FC_IN}  (auto-computed from network_architecture.yaml)")
     print(f"  - Classes: {cfg.NUM_CLASSES}")

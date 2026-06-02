@@ -1,13 +1,14 @@
 import yaml
 from pathlib import Path
 
-# Absolute path to SNN_module.yaml — works regardless of working directory
-DEFAULT_YAML = Path(__file__).parent.parent / "SNN_module.yaml"
+DEFAULT_YAML      = Path(__file__).parent.parent / "SNN_module.yaml"
+NETWORK_ARCH_YAML = Path(__file__).parent.parent / "network_architecture.yaml"
+
 
 class Settings:
     def __init__(self, yaml_path=str(DEFAULT_YAML)):
         self.yaml_path = yaml_path
-        self.config = self.load_yaml_config(yaml_path)
+        self.config = self.load_yaml(yaml_path)
 
         architecture = self.config.get("architecture", {})
         training     = self.config.get("training", {})
@@ -15,41 +16,63 @@ class Settings:
         input_cfg    = self.config.get("input", {})
         output       = self.config.get("output", {})
         compiler     = self.config.get("compiler", {})
+        frameworks   = self.config.get("frameworks", {})
 
-        # Neural network architecture
-        self.INPUT_SIZE = int(architecture.get("input_size", 10))
-        self.HIDDEN_SIZE = int(architecture.get("hidden_size", 16))
-        self.HIDDEN_LAYERS = int(architecture.get("hidden_layers", 3))
-        self.OUTPUT_SIZE = int(architecture.get("output_size", 10))
-        self.THRESHOLD = float(architecture.get("threshold", 0.5))
-        self.LEAK = float(architecture.get("leak", 1.0))
-        self.OVERRIDE = bool(architecture.get("override", False))
-        self.NETWORK_STRUCT = architecture.get("network_struct", "S")
-        self.SIMULATOR = architecture.get("simulator", "OFF")
+        # Load conv-SNN architecture from network_architecture.yaml
+        network_arch = self.load_yaml(str(NETWORK_ARCH_YAML))
+        conv = network_arch.get("convolution", {})
+
+        # Legacy MLP architecture params (kept for backward compatibility)
+        self.INPUT_SIZE              = int(architecture.get("input_size", 10))
+        self.HIDDEN_SIZE             = int(architecture.get("hidden_size", 16))
+        self.HIDDEN_LAYERS           = int(architecture.get("hidden_layers", 3))
+        self.OUTPUT_SIZE             = int(architecture.get("output_size", 10))
+        self.THRESHOLD               = float(architecture.get("threshold", 0.5))
+        self.LEAK                    = float(architecture.get("leak", 1.0))
+        self.OVERRIDE                = bool(architecture.get("override", False))
+        self.NETWORK_STRUCT          = architecture.get("network_struct", "S")
+        self.SIMULATOR               = architecture.get("simulator", "OFF")
         self.TEMPORAL_SLICE_DURATION = int(architecture.get("temporal_slice_duration", 15000))
-        self.TEMPORAL_OVERLAP = int(architecture.get("temporal_overlap", 0))
-        self.TOTAL_TIME_WINDOW = int(architecture.get("total_time_window", 30000))
-        self.NUM_WORKERS = int(architecture.get("num_workers", 2))
+        self.TEMPORAL_OVERLAP        = int(architecture.get("temporal_overlap", 0))
+        self.TOTAL_TIME_WINDOW       = int(architecture.get("total_time_window", 30000))
+        self.NUM_WORKERS             = int(architecture.get("num_workers", 2))
+
+        # Conv-SNN architecture (from network_architecture.yaml)
+        self.SENSOR_H     = int(conv.get("sensor_h",     34))
+        self.SENSOR_W     = int(conv.get("sensor_w",     34))
+        self.IN_CHANNELS  = int(conv.get("in_channels",  2))
+        self.CONV1_OUT    = int(conv.get("conv1_out",    12))
+        self.CONV1_KERNEL = int(conv.get("conv1_kernel", 5))
+        self.CONV2_OUT    = int(conv.get("conv2_out",    32))
+        self.CONV2_KERNEL = int(conv.get("conv2_kernel", 5))
+        self.POOL_KERNEL  = int(conv.get("pool_kernel",  2))
+
+        # Auto-compute flattened size after both conv+pool stages
+        h = (self.SENSOR_H - self.CONV1_KERNEL + 1) // self.POOL_KERNEL
+        h = (h - self.CONV2_KERNEL + 1) // self.POOL_KERNEL
+        self.FC_IN = self.CONV2_OUT * h * h
+
+        self.NEURON_TYPES = network_arch.get("neuron_types", {})
 
         # Training parameters
-        self.LOSS_FUNCTION = training.get("loss_function", "CrossEntropy")
-        self.OPTIMIZER = training.get("optimizer", "Adam")
-        self.EPOCHS = int(training.get("epochs", 10))
-        self.ITERA = int(training.get("iterations_per_epoch", 100))
-        self.TIMESTEPS = int(training.get("timesteps", 25))
-        self.BATCH_SIZE = int(training.get("batch_size", 128))
-        self.BETA = float(training.get("beta", 0.95))
-        self.NAP_TIMES = int(training.get("nap_times", 1))
-        self.LEARNING_RATE = float(training.get("learning_rate", 0.001))
-        self.WEIGHT_DECAY = float(training.get("weight_decay", 0.0001))
-        self.NUM_CLASSES = int(training.get("num_classes", self.OUTPUT_SIZE))
-        self.DEVICE = training.get("device", "cuda")
-        self.KERNEL = training.get("kernel", "OFF")
-        self.DDP = training.get("DDP", "OFF")
-        self.NUM_WORKERS = int(training.get("num_workers", 4))
-        self.USE_AMP = bool(training.get("use_amp", True))
-        self.GRAD_ACCUM_STEPS = max(1, int(training.get("grad_accum_steps", 1)))
-        self.LR_SCHEDULER = training.get("lr_scheduler", "cosine")
+        self.LOSS_FUNCTION            = training.get("loss_function", "CrossEntropy")
+        self.OPTIMIZER                = training.get("optimizer", "Adam")
+        self.EPOCHS                   = int(training.get("epochs", 10))
+        self.ITERA                    = int(training.get("iterations_per_epoch", 100))
+        self.TIMESTEPS                = int(training.get("timesteps", 25))
+        self.BATCH_SIZE               = int(training.get("batch_size", 128))
+        self.NAP_TIMES                = int(training.get("nap_times", 1))
+        self.LEARNING_RATE            = float(training.get("learning_rate", 0.001))
+        self.WEIGHT_DECAY             = float(training.get("weight_decay", 0.0001))
+        self.NUM_CLASSES              = int(training.get("num_classes", self.OUTPUT_SIZE))
+        self.DEVICE                   = training.get("device", "cuda")
+        self.KERNEL                   = training.get("kernel", "OFF")
+        self.DDP                      = training.get("DDP", "OFF")
+        self.NUM_WORKERS              = int(training.get("num_workers", 4))
+        self.USE_AMP                  = bool(training.get("use_amp", True))
+        self.GRAD_ACCUM_STEPS         = max(1, int(training.get("grad_accum_steps", 1)))
+        self.LR_SCHEDULER             = training.get("lr_scheduler", "cosine")
+
         self.TRADES_ENABLED           = bool(training.get("trades_enabled", False))
         self.TRADES_EPSILON           = float(training.get("trades_epsilon", 0.05))
         self.TRADES_LAMBDA            = float(training.get("trades_lambda", 6.0))
@@ -61,34 +84,65 @@ class Settings:
         self.ACTIVITY_REG_LAMBDA_LOW  = float(training.get("activity_reg_lambda_low", 0.1))
         self.ACTIVITY_REG_LAMBDA_HIGH = float(training.get("activity_reg_lambda_high", 0.1))
 
-        self.STDP_ENABLED = bool(training.get("stdp_enabled", False))
-        self.STDP_TAU     = float(training.get("stdp_tau", 20.0))
-        self.STDP_A_PLUS  = float(training.get("stdp_a_plus", 0.01))
-        self.STDP_A_MINUS = float(training.get("stdp_a_minus", 0.01))
+        self.STDP_ENABLED             = bool(training.get("stdp_enabled", False))
+        self.STDP_TAU                 = float(training.get("stdp_tau", 20.0))
+        self.STDP_A_PLUS              = float(training.get("stdp_a_plus", 0.01))
+        self.STDP_A_MINUS             = float(training.get("stdp_a_minus", 0.01))
+
+        # Framework selector
+        self.FRAMEWORK = training.get("framework", "norse")
+
+        # Per-framework config blocks
+        snt = frameworks.get("snntorch",     {})
+        nor = frameworks.get("norse",        {})
+        spj = frameworks.get("spikingjelly", {})
+
+        self.FRAMEWORK_CFG = {
+            "snntorch": {
+                "beta":       float(snt.get("beta", 0.95)),
+                "threshold":  float(snt.get("threshold", 0.5)),
+                "optimizer":  snt.get("optimizer", "adam"),
+                "loss_fn":    snt.get("loss_fn", "mse_count"),
+                "reset_mode": snt.get("reset_mode", "subtract"),
+            },
+            "norse": {
+                "tau_mem_inv": float(nor.get("tau_mem_inv", 100.0)),
+                "threshold":   float(nor.get("threshold", 0.5)),
+                "optimizer":   nor.get("optimizer", "adam"),
+                "loss_fn":     nor.get("loss_fn", "cross_entropy"),
+                "reset_mode":  nor.get("reset_mode", "zero"),
+            },
+            "spikingjelly": {
+                "tau":        float(spj.get("tau", 2.0)),
+                "threshold":  float(spj.get("threshold", 0.5)),
+                "optimizer":  spj.get("optimizer", "adam"),
+                "loss_fn":    spj.get("loss_fn", "cross_entropy"),
+                "reset_mode": spj.get("reset_mode", "zero"),
+            },
+        }
+
+        # Backward-compatible shorthands
+        self.BETA        = self.FRAMEWORK_CFG["snntorch"]["beta"]
+        self.TAU_MEM_INV = self.FRAMEWORK_CFG["norse"]["tau_mem_inv"]
+        self.TAU         = self.FRAMEWORK_CFG["spikingjelly"]["tau"]
 
         # Compiler
         self.TORCH_COMPILE = bool(compiler.get("torch_compile", False))
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
-        self.DATA_PATH = dataset.get("data_path", "./data")
-
-        # # Input control
-        # self.INPUT_MODE = input_cfg.get("input_mode", "2D")
-        # self.IMAGE_CHANNELS = int(input_cfg.get("image_channels", 1))
-        # self.IMAGE_HEIGHT = int(input_cfg.get("image_height", 28))
-        # self.IMAGE_WIDTH = int(input_cfg.get("image_width", 28))
+        self.DATA_PATH    = dataset.get("data_path", "./data")
 
         # Output control
         self.OUTPUT_DIR = output.get("output_dir", "./outputs")
-        self.PLOT_DIR = output.get("plot_dir", "./outputs/plots")
-        self.DATA_DIR = output.get("data_dir", "./outputs/data")
+        self.PLOT_DIR   = output.get("plot_dir",   "./outputs/plots")
+        self.DATA_DIR   = output.get("data_dir",   "./outputs/data")
 
         # Generated network structure
         self.network_structure = self.generate_network_structure()
 
 
-    def load_yaml_config(self, yaml_path):
+    def load_yaml(self, yaml_path):
         with open(yaml_path, "r") as file:
             return yaml.safe_load(file)
 
@@ -140,7 +194,7 @@ class Settings:
 
         # Append output layer separately
         layers.append(self.OUTPUT_SIZE)
-    
+
         return layers
 
     def display(self):
@@ -149,10 +203,12 @@ class Settings:
         print("=" * 60)
 
         print(f"Network architecture : {self.network_structure}")
+        print(f"Framework            : {self.FRAMEWORK}")
         print(f"Epochs               : {self.EPOCHS}")
         print(f"Device               : {self.DEVICE}")
         print(f"Kernel               : {self.KERNEL}")
         print(f"Threshold            : {self.THRESHOLD}")
+        print(f"FC_IN (auto)         : {self.FC_IN}")
         print(f"torch.compile        : {'ENABLED' if self.TORCH_COMPILE else 'DISABLED'}")
 
         print("=" * 60)
