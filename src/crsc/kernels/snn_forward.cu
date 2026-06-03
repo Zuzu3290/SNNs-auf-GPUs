@@ -1,3 +1,6 @@
+// Defines lif_kernel (__global__) and two PyTorch-callable wrappers for the LIF forward pass over [B, N, T] tensors.
+// snn_forward_cuda: occupancy-auto-tuned launch via compute_1d_launch; returns spikes [B, N, T] with no profiling cost.
+// snn_forward_profiled: same kernel bracketed by EnergyProfiler; returns spikes plus six energy/timing metrics as a tuple.
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>

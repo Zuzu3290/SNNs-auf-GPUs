@@ -1,3 +1,6 @@
+// Declares LaunchConfig (grid_size, block_size, theoretical_occupancy) and two throughput helpers.
+// compute_1d_launch queries cudaOccupancyMaxPotentialBlockSize to find the block size maximising SM occupancy.
+// warp_aligned_block rounds a desired thread count up to the nearest multiple of 32 (warp boundary).
 #pragma once
 #include <cuda_runtime.h>
 

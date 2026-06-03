@@ -1,4 +1,7 @@
 
+// Visualization and documentation-in-code for the SNN-to-neuromorphic-hardware mapping concept (ANN vs SNN comparison).
+// Also contains the actual PyTorch/pybind11 C++ wrapper that calls snn_forward_kernel on the CUDA device.
+// Only the pybind11 section at the bottom is part of the live execution path; the class above is illustrative only.
 //C++ wrapper
 // some code below is just for explanation and visualization of the mapping process, not actual implementation
 #include <iostream>

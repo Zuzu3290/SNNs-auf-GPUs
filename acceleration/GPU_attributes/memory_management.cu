@@ -1,3 +1,6 @@
+// Thin abort-on-failure wrappers around cudaMalloc, cudaMallocHost, and cudaMemGetInfo.
+// snn_malloc_device / snn_malloc_pinned allocate device and page-locked host memory respectively; both abort on failure.
+// Used by dispatch_accelerated in engine.cu to audit VRAM headroom before allocating the output spike tensor.
 #include "memory_management.h"
 #include <cstdio>
 #include <cstdlib>

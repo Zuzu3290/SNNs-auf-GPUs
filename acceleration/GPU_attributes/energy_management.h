@@ -1,3 +1,6 @@
+// Declares KernelEnergyResult (elapsed_ms, power_before/after_mw, energy_mj, nvml_available) and EnergyProfiler.
+// EnergyProfiler is a RAII class: call start(stream) before the kernel, stop(stream) after to get the result.
+// NVML power fields are zero when NVML headers are absent; elapsed_ms is always populated via CUDA events.
 #pragma once
 #include <cuda_runtime.h>
 

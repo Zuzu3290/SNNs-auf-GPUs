@@ -1,3 +1,6 @@
+# Python-side GPU kernel stack for converting DVS event voxel grids into spike tensors for SNN consumption.
+# Provides three operations — hard-threshold spiking, per-pixel LIF membrane integration, and ON/OFF polarity merging.
+# SpikeKernel class auto-selects CuPy (custom compiled kernels) or PyTorch (pure ops fallback) backend at construction.
 """
 Module 5: Custom CUDA Kernel — Event → Spike Map
 ==================================================

@@ -24,3 +24,6 @@ https://docs.nvidia.com/cuda/cuda-programming-guide/index.html
 TPUs:
 https://towardsdatascience.com/the-rise-of-pallas-unlocking-tpu-potential-with-custom-kernels-67be10ab846a/
 
+
+
+Alright the operators branch is focuse on completing on clear objective the scalabiity of the project performnce on using thre custom kernel. SO we need to address a basic kernel in crsc and then appliy a short conigurtaion file I guess in crossrefernce to C++/CUDA such that if we say to acclerate then we call the ideal folder acceleration that confines to operational optimized algotihrme ts to enhance overall use of the kernell, from energy supply, to memeory, to throughout optimization

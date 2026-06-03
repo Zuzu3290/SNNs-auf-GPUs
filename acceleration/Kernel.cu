@@ -1,3 +1,6 @@
+// Standalone PyTorch-callable LIF forward kernel with all three GPU-attribute modules (energy, memory, throughput) integrated.
+// Provides snn_forward_cuda (auto-tuned block/grid via compute_1d_launch) and snn_forward_profiled (adds NVML energy tracking).
+// Self-contained acceleration-folder entry point; independent of src/crsc and usable directly from Python via pybind11.
 //below is an example snippet of a CUDA kernel for a simple leaky integrate-and-fire neuron model.
 //simple kernel for one timestep over a batch of neurons:
 //This is a toy example; in practice you’d split across timesteps and optimize memory layout 

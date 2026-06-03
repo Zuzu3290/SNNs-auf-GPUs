@@ -1,0 +1,21 @@
+# Python-readable mirror of KernelConfig in kernel_config.h; set accelerate: true to enable the full GPU-attribute stack.
+# Each sub-flag (optimize_throughput, optimize_memory, profile_energy) can be toggled independently of the master switch.
+# memory_warn_threshold_mb sets the free-VRAM floor below which dispatch_accelerated prints a warning before launch.
+# ---------------------------------------------------------------------------
+# Acceleration configuration — mirrors KernelConfig in kernel_config.h
+#
+# Set `accelerate: true` to route through the full acceleration stack:
+#   - optimize_throughput: auto-tunes block/grid via cudaOccupancyMaxPotentialBlockSize
+#   - optimize_memory:     audits free GPU memory before launch (warns if < threshold_mb)
+#   - profile_energy:      wraps kernel with NVML power / timing profiler
+#
+# Change `accelerate: false` for the bare-minimum LIF kernel (fixed 256 threads).
+# ---------------------------------------------------------------------------
+
+accelerate: false
+
+optimize_throughput: true
+optimize_memory: true
+profile_energy: false        # requires NVML headers; set true only on supported hardware
+
+memory_warn_threshold_mb: 512   # warn if free GPU memory drops below this

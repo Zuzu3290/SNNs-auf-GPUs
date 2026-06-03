@@ -1,3 +1,6 @@
+// Implements EnergyProfiler: RAII profiler bracketing kernel launches with CUDA event timing and optional NVML power sampling.
+// NVML is initialised lazily once per process via a static guard; compiles and runs cleanly when NVML headers are absent.
+// Reports elapsed_ms (always), power draw in mW, and estimated energy in mJ; nvml_available signals whether power data is real.
 #include "energy_management.h"
 #include <cstdio>
 

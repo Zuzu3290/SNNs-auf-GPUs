@@ -1,3 +1,6 @@
+// pybind11 binding stub exposing snn_forward to Python under the TORCH_EXTENSION_NAME module.
+// Also contains SNNCompiler: maps HardwareConfig (n_neurons, timesteps, energy_target) to a KernelConfig (grid, block, fusion, stream).
+// SNNCompiler.compile() is the compile-time kernel selection layer sitting above the runtime dispatcher in engine.cu.
 #include <torch/extension.h>
 
 // 1. Declare the function defined in your .cu file

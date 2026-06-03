@@ -1,3 +1,6 @@
+// Implements compute_1d_launch: calls cudaOccupancyMaxPotentialBlockSize to find the block size maximising SM occupancy.
+// Computes grid size from n_elements and reports the theoretical occupancy fraction for diagnostics.
+// Also provides warp_aligned_block for rounding a desired thread count up to the nearest 32-thread warp boundary.
 #include "throughput_optimization.h"
 #include <cstdio>
 

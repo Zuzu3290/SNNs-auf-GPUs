@@ -1,3 +1,6 @@
+// Declares five memory management helpers: snn_malloc_device, snn_free_device, snn_malloc_pinned, snn_free_pinned, snn_query_memory.
+// Device and pinned allocations abort on failure rather than returning nullptr, preventing silent OOM conditions.
+// snn_query_memory exposes cudaMemGetInfo so callers can audit free VRAM headroom before large allocations.
 #pragma once
 #include <cuda_runtime.h>
 #include <cstddef>
