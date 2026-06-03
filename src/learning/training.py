@@ -72,12 +72,12 @@ class SNNTrainer:
         self.use_custom_kernel = False
         if cfg.KERNEL == "ON":
             try:
-                import snn_cuda.snn_forward as km  # type: ignore[import]
+                import snn_forward as km  # type: ignore[import]
                 self.kernel_module = km
                 self.use_custom_kernel = True
                 print("[kernel] SNNTrainer: custom CRSC CUDA kernel active")
             except ImportError:
-                print("[kernel] snn_cuda not built — run: python src/learning/setup.py build_ext --inplace")
+                print("[kernel] snn_forward not built — run: python src/learning/setup.py build_ext --inplace")
         self._voltage_buf: torch.Tensor | None = None
 
         self.loss_hist       = []

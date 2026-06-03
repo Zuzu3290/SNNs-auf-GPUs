@@ -14,10 +14,10 @@ except Exception:
     _cuda_inc = []
 
 setup(
-    name="snn_cuda",
+    name="snn_forward",
     ext_modules=[
         CUDAExtension(
-            name="snn_cuda.snn_forward",
+            name="snn_forward",
             sources=[
                 os.path.join(CRSC_KERN, "snn_binding.cpp"),
                 os.path.join(CRSC_KERN, "snn_forward.cu"),
