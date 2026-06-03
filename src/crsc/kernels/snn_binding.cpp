@@ -80,20 +80,35 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("v_th")    = 1.0f,
           py::arg("tau_inv") = 0.1f);
 
-    // ---- Warp-oriented path (SM-saturation grid-stride, correct LIF) ----
+    // ---- Warp-oriented: async hot path (no CPU-GPU sync) ----
     m.def("warp_oriented_forward",
           [](torch::Tensor input, torch::Tensor voltage,
              float v_th, float tau_inv, int target_bps) {
               auto r = lif_warp_oriented_cuda(input, voltage, v_th, tau_inv, target_bps);
+              return py::make_tuple(r.spikes, r.blocks_launched, r.neurons_per_thread);
+          },
+          "SM-saturating warp-oriented LIF (async, no sync overhead).\n"
+          "Returns (spikes [B,N,T], blocks_launched, neurons_per_thread).",
+          py::arg("input"),
+          py::arg("voltage"),
+          py::arg("v_th")                 = 1.0f,
+          py::arg("tau_inv")              = 0.1f,
+          py::arg("target_blocks_per_sm") = 8);
+
+    // ---- Warp-oriented: timed variant (syncs once — for benchmarking) ----
+    m.def("warp_oriented_timed",
+          [](torch::Tensor input, torch::Tensor voltage,
+             float v_th, float tau_inv, int target_bps) {
+              auto r = lif_warp_oriented_timed(input, voltage, v_th, tau_inv, target_bps);
               return py::make_tuple(r.spikes, r.elapsed_ms,
                                    r.blocks_launched, r.neurons_per_thread);
           },
-          "SM-saturating warp-oriented LIF forward.\n"
-          "Fills all SMs via grid-stride loop; correct sequential LIF at any B*N size.\n"
+          "SM-saturating warp-oriented LIF with GPU timing (syncs once).\n"
+          "Call periodically for energy feedback — not on every forward pass.\n"
           "Returns (spikes [B,N,T], elapsed_ms, blocks_launched, neurons_per_thread).",
           py::arg("input"),
           py::arg("voltage"),
-          py::arg("v_th")              = 1.0f,
-          py::arg("tau_inv")           = 0.1f,
+          py::arg("v_th")                 = 1.0f,
+          py::arg("tau_inv")              = 0.1f,
           py::arg("target_blocks_per_sm") = 8);
 }

@@ -151,10 +151,12 @@ static torch::Tensor dispatch_accelerated(
 // ---------------------------------------------------------------------------
 
 // Process-wide adaptive state — persists across forward calls.
-static float s_last_elapsed_ms    = 0.f;
-static int   s_blocks_per_sm      = 8;       // initial target
-static const int s_bps_min        = 2;
-static const int s_bps_max        = 16;
+static float    s_last_elapsed_ms = 0.f;
+static int      s_blocks_per_sm   = 8;
+static unsigned s_call_count      = 0;
+static const int   s_bps_min      = 2;
+static const int   s_bps_max      = 16;
+static const unsigned s_sample_every = 50;  // time GPU every N calls, not every call
 
 static torch::Tensor dispatch_warp_oriented(
     const KernelConfig& cfg,
@@ -166,7 +168,7 @@ static torch::Tensor dispatch_warp_oriented(
     const int64_t N = input.size(1);
     const int64_t T = input.size(2);
 
-    // --- Memory audit (reused from accelerated path) -------------------
+    // --- Memory audit --------------------------------------------------
     if (cfg.optimize_memory) {
         size_t free_bytes = 0, total_bytes = 0;
         snn_query_memory(&free_bytes, &total_bytes);
@@ -176,32 +178,29 @@ static torch::Tensor dispatch_warp_oriented(
                    free_bytes / 1048576.0, needed * 2 / 1048576.0);
     }
 
-    // --- Energy feedback: adapt blocks_per_sm from last run ------------
-    // First call (s_last_elapsed_ms == 0) skips adaptation.
+    // --- Energy feedback: adapt blocks_per_sm from sampled elapsed -----
+    // Only update when we have a real measurement (from a timed call).
     if (s_last_elapsed_ms > 0.f) {
-        // If last kernel was fast (< 0.5 ms): push harder, add a block/SM.
-        // If last kernel was slow (> 2.0 ms): back off, remove a block/SM.
-        // Dead-band [0.5, 2.0] ms: leave unchanged.
-        if (s_last_elapsed_ms < 0.5f && s_blocks_per_sm < s_bps_max)
+        if      (s_last_elapsed_ms < 0.5f && s_blocks_per_sm < s_bps_max)
             s_blocks_per_sm++;
         else if (s_last_elapsed_ms > 2.0f && s_blocks_per_sm > s_bps_min)
             s_blocks_per_sm--;
-
-        printf("[EnergyFeedback] last=%.3f ms  blocks_per_sm=%d\n",
-               s_last_elapsed_ms, s_blocks_per_sm);
     }
 
-    // --- Launch warp-oriented kernel -----------------------------------
-    WarpOrientedResult r = lif_warp_oriented_cuda(
-        input, voltage, v_th, tau_inv, s_blocks_per_sm
-    );
+    WarpOrientedResult r;
 
-    // Store elapsed for next call's feedback decision.
-    s_last_elapsed_ms = r.elapsed_ms;
+    // --- Every s_sample_every calls: sync and measure for feedback -----
+    // All other calls: fully async, zero sync overhead.
+    if (s_call_count % s_sample_every == 0) {
+        r = lif_warp_oriented_timed(input, voltage, v_th, tau_inv, s_blocks_per_sm);
+        s_last_elapsed_ms = r.elapsed_ms;
+        printf("[EnergyFeedback] call=%u  elapsed=%.4f ms  bps=%d\n",
+               s_call_count, s_last_elapsed_ms, s_blocks_per_sm);
+    } else {
+        r = lif_warp_oriented_cuda(input, voltage, v_th, tau_inv, s_blocks_per_sm);
+    }
 
-    printf("[WarpOriented] elapsed=%.3f ms  neurons/thread=%.2f\n",
-           r.elapsed_ms, r.neurons_per_thread);
-
+    ++s_call_count;
     return r.spikes;
 }
 

@@ -14,12 +14,22 @@ struct WarpOrientedResult {
     float         neurons_per_thread; // B*N / total_threads — workload density
 };
 
-// Standard warp-oriented forward: SM-saturating grid, grid-stride loop over neurons.
-// Returns WarpOrientedResult; caller uses elapsed_ms to tune next launch via feedback.
+// Hot path — fully async, no CPU-GPU sync. elapsed_ms = 0 in returned result.
+// Use this in every training forward pass.
 WarpOrientedResult lif_warp_oriented_cuda(
-    torch::Tensor input,      // [B, N, T] float32 CUDA
-    torch::Tensor voltage,    // [B, N]    float32 CUDA — updated in place
+    torch::Tensor input,
+    torch::Tensor voltage,
     float v_th              = 1.0f,
     float tau_inv           = 0.1f,
-    int   target_blocks_per_sm = 8    // tunable: higher = more occupancy pressure
+    int   target_blocks_per_sm = 8
+);
+
+// Timed variant — syncs GPU once to measure elapsed_ms accurately.
+// Call periodically (e.g. every 50 steps) for energy feedback, not every call.
+WarpOrientedResult lif_warp_oriented_timed(
+    torch::Tensor input,
+    torch::Tensor voltage,
+    float v_th              = 1.0f,
+    float tau_inv           = 0.1f,
+    int   target_blocks_per_sm = 8
 );
