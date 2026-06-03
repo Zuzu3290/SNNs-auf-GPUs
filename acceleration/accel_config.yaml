@@ -17,5 +17,6 @@ accelerate: false
 optimize_throughput: true
 optimize_memory: true
 profile_energy: false        # requires NVML headers; set true only on supported hardware
+temporal: true               # use T-in-register kernel (correct LIF, warp ballot mask)
 
 memory_warn_threshold_mb: 512   # warn if free GPU memory drops below this

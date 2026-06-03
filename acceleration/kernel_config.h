@@ -15,6 +15,7 @@ struct KernelConfig {
     bool optimize_throughput;  // auto-tune block/grid via occupancy API
     bool optimize_memory;      // audit GPU memory headroom before launch
     bool profile_energy;       // wrap kernel with NVML energy profiler
+    bool temporal;             // use T-in-register kernel (correct LIF, warp ballot)
 };
 
 // Standard mode — no acceleration overhead
@@ -22,13 +23,15 @@ constexpr KernelConfig KERNEL_CONFIG_DEFAULT = {
     /*accelerate*/          false,
     /*optimize_throughput*/ false,
     /*optimize_memory*/     false,
-    /*profile_energy*/      false
+    /*profile_energy*/      false,
+    /*temporal*/            false
 };
 
-// Full acceleration — all three GPU attributes active
+// Full acceleration — all GPU attributes + temporal register kernel
 constexpr KernelConfig KERNEL_CONFIG_ACCELERATED = {
     /*accelerate*/          true,
     /*optimize_throughput*/ true,
     /*optimize_memory*/     true,
-    /*profile_energy*/      true
+    /*profile_energy*/      true,
+    /*temporal*/            true
 };

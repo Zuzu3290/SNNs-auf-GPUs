@@ -1,6 +1,6 @@
-// Main CRSC kernel dispatcher: reads KernelConfig and routes to dispatch_basic or dispatch_accelerated.
-// dispatch_basic runs lif_basic with a fixed 256-thread block and zero profiling overhead.
-// dispatch_accelerated applies all three GPU-attribute modules: memory audit, occupancy-tuned launch, and optional NVML energy profiling.
+// Main CRSC kernel dispatcher: reads KernelConfig and routes to dispatch_basic, dispatch_accelerated,
+// or dispatch_temporal. dispatch_temporal uses the T-in-register lif_temporal_cuda (correct LIF,
+// warp ballot) and wraps it with the full GPU-attribute stack when accelerate:true + temporal:true.
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -10,6 +10,7 @@
 #include "../../acceleration/GPU_attributes/energy_management.h"
 #include "../../acceleration/GPU_attributes/memory_management.h"
 #include "../../acceleration/GPU_attributes/throughput_optimization.h"
+#include "kernels/lif_temporal.h"
 
 // ---------------------------------------------------------------------------
 // Basic LIF kernel — fixed 256-thread launch, no GPU-attribute overhead.
@@ -66,10 +67,12 @@ static torch::Tensor dispatch_basic(
 }
 
 // ---------------------------------------------------------------------------
-// Accelerated path — applies the three GPU-attribute modules in order:
-//   1. memory      → audit free headroom before allocating output tensor
-//   2. throughput  → auto-tune block/grid via occupancy API
-//   3. energy      → wrap launch with NVML-backed EnergyProfiler
+// Accelerated path — applies GPU-attribute modules then selects kernel:
+//   temporal:true  → lif_temporal_cuda  (T-in-register, correct LIF)
+//   temporal:false → lif_basic          (B*N*T threads, benchmark reference)
+//   1. memory      → audit free VRAM headroom
+//   2. throughput  → occupancy-tuned block/grid (B*N work items for temporal)
+//   3. energy      → optional NVML energy profiler
 // ---------------------------------------------------------------------------
 static torch::Tensor dispatch_accelerated(
     const KernelConfig& cfg,
@@ -77,57 +80,63 @@ static torch::Tensor dispatch_accelerated(
     torch::Tensor voltage,
     float v_th, float tau_inv
 ) {
-    const int64_t B = input.size(0);
-    const int64_t N = input.size(1);
-    const int64_t T = input.size(2);
-    const int64_t total = B * N * T;
+    const int64_t B       = input.size(0);
+    const int64_t N       = input.size(1);
+    const int64_t T       = input.size(2);
+    const int64_t neurons = B * N;           // work items for temporal kernel
+    const int64_t total   = neurons * T;     // work items for basic kernel
 
     // --- 1. Memory audit -----------------------------------------------
     if (cfg.optimize_memory) {
         size_t free_bytes = 0, total_bytes = 0;
         snn_query_memory(&free_bytes, &total_bytes);
-        const size_t needed = total * sizeof(float);   // output spikes tensor
-        if (free_bytes < needed * 2) {
-            // 2× headroom: spikes + any internal allocations
-            printf("[MemoryMgr] WARNING: %.1f MB free, need ~%.1f MB — "
-                   "consider reducing batch size\n",
-                   free_bytes  / 1048576.0,
-                   needed * 2  / 1048576.0);
-        }
+        const size_t needed = (size_t)total * sizeof(float);
+        if (free_bytes < needed * 2)
+            printf("[MemoryMgr] WARNING: %.1f MB free, need ~%.1f MB\n",
+                   free_bytes / 1048576.0, needed * 2 / 1048576.0);
     }
 
-    auto spikes = torch::zeros_like(input);
-
-    // --- 2. Throughput: auto-tune block/grid ---------------------------
+    // --- 2. Throughput: temporal uses B*N work items, basic uses B*N*T ---
+    const int64_t work = cfg.temporal ? neurons : total;
     LaunchConfig lc;
     if (cfg.optimize_throughput) {
-        lc = compute_1d_launch((const void*)lif_basic, (int)total);
-        printf("[Throughput] block=%d  grid=%d  occupancy=%.1f%%\n",
+        lc = compute_1d_launch((const void*)lif_basic, (int)work);
+        printf("[Throughput] kernel=%s  block=%d  grid=%d  occupancy=%.1f%%\n",
+               cfg.temporal ? "temporal" : "basic",
                lc.block_size, lc.grid_size,
                lc.theoretical_occupancy * 100.f);
     } else {
         lc.block_size = 256;
-        lc.grid_size  = static_cast<int>((total + 255) / 256);
+        lc.grid_size  = static_cast<int>((work + 255) / 256);
         lc.theoretical_occupancy = 0.f;
     }
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-    // --- 3. Energy profiler --------------------------------------------
+    // --- 3. Energy profiler (start) ------------------------------------
     EnergyProfiler* prof = nullptr;
     if (cfg.profile_energy) {
         prof = new EnergyProfiler();
         prof->start(stream);
     }
 
-    lif_basic<<<lc.grid_size, lc.block_size, 0, stream>>>(
-        input.data_ptr<float>(), voltage.data_ptr<float>(),
-        spikes.data_ptr<float>(), v_th, tau_inv, B, N, T
-    );
+    // --- Kernel dispatch -----------------------------------------------
+    torch::Tensor spikes;
+    if (cfg.temporal) {
+        // T-in-register: correct sequential LIF, voltage in registers
+        spikes = lif_temporal_cuda(input, voltage, v_th, tau_inv);
+    } else {
+        spikes = torch::zeros_like(input);
+        lif_basic<<<lc.grid_size, lc.block_size, 0, stream>>>(
+            input.data_ptr<float>(), voltage.data_ptr<float>(),
+            spikes.data_ptr<float>(), v_th, tau_inv, B, N, T
+        );
+    }
 
+    // --- 3. Energy profiler (stop) -------------------------------------
     if (prof) {
         KernelEnergyResult r = prof->stop(stream);
-        EnergyProfiler::print_result(r, "lif_basic [accelerated]");
+        EnergyProfiler::print_result(r, cfg.temporal ? "lif_temporal" : "lif_basic");
         delete prof;
     }
 
@@ -135,9 +144,10 @@ static torch::Tensor dispatch_accelerated(
 }
 
 // ---------------------------------------------------------------------------
-// Public dispatcher — routes based on KernelConfig::accelerate flag.
-// Call with KERNEL_CONFIG_DEFAULT or KERNEL_CONFIG_ACCELERATED (from
-// kernel_config.h), or build a custom KernelConfig from accel_config.yaml.
+// Public dispatcher — three routes based on KernelConfig:
+//   accelerate:false              → dispatch_basic  (benchmark reference)
+//   accelerate:true, temporal:false → dispatch_accelerated with lif_basic
+//   accelerate:true, temporal:true  → dispatch_accelerated with lif_temporal
 // ---------------------------------------------------------------------------
 torch::Tensor snn_engine_dispatch(
     const KernelConfig& cfg,
