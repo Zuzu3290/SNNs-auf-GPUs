@@ -27,8 +27,8 @@ setup(
             ],
             include_dirs=[GPU_ATTRS] + _cuda_inc,
             extra_compile_args={
-                "cxx":  ["-O3"],
-                "nvcc": ["-O3", "--use_fast_math"],
+                "cxx":  ["-O3", "-DSNN_HAS_NVML=0"],
+                "nvcc": ["-O3", "--use_fast_math", "-DSNN_HAS_NVML=0"],
             },
         ),
     ],

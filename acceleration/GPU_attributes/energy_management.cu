@@ -4,14 +4,20 @@
 #include "energy_management.h"
 #include <cstdio>
 
-// Conditional NVML: header lives in the CUDA toolkit (cuda/include/nvml.h).
-// The stubs below let the file compile and link when NVML is absent; the
-// profiler then reports timing-only results without power readings.
-#if __has_include(<nvml.h>)
+// Conditional NVML: pass -DSNN_HAS_NVML=0 at compile time to force stub mode
+// (no libnvidia-ml linkage needed — safe on Colab and headless environments).
+// If SNN_HAS_NVML is not set externally, auto-detect via __has_include.
+#ifndef SNN_HAS_NVML
+  #if __has_include(<nvml.h>)
+    #define SNN_HAS_NVML 1
+  #else
+    #define SNN_HAS_NVML 0
+  #endif
+#endif
+
+#if SNN_HAS_NVML
   #include <nvml.h>
-  #define SNN_HAS_NVML 1
 #else
-  #define SNN_HAS_NVML 0
   typedef void* nvmlDevice_t;
   #define NVML_SUCCESS 0
   static inline int nvmlInit()                                            { return -1; }
