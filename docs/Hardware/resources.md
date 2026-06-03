@@ -27,3 +27,20 @@ https://towardsdatascience.com/the-rise-of-pallas-unlocking-tpu-potential-with-c
 
 
 Alright the operators branch is focuse on completing on clear objective the scalabiity of the project performnce on using thre custom kernel. SO we need to address a basic kernel in crsc and then appliy a short conigurtaion file I guess in crossrefernce to C++/CUDA such that if we say to acclerate then we call the ideal folder acceleration that confines to operational optimized algotihrme ts to enhance overall use of the kernell, from energy supply, to memeory, to throughout optimization
+
+
+Correct. They are fully independent subsystems with separate responsibilities:
+
+src/compiler/ — operates at the graph level. It takes an SNN model, runs passes (device annotation, op rewrite, fusion), builds an IR, and decides what to execute and in what order. lif_kernel.h there declares the fused forward/backward interface the compiler lowers IR nodes into.
+
+acceleration/ — operates at the hardware execution level. It doesn't know about computation graphs or IR. It only cares about how a single kernel launch runs: how much VRAM is free, what block size maximises SM occupancy, what the energy cost was.
+
+src/crsc/ is the meeting point. engine.cu sits at the bottom of the compiler's lowering stack and at the top of the acceleration stack. The compiler hands it a tensor operation; it picks the right kernel path (lif_basic, lif_temporal, lif_warp_oriented) using KernelConfig from the acceleration layer.
+
+
+src/compiler/   →  what to run, when, fused how
+                         ↓
+src/crsc/engine.cu  →  which kernel, which path
+                         ↓
+acceleration/   →  how to run it on the hardware
+Neither the compiler nor the acceleration layer imports from the other. src/crsc/ is the only layer that touches both.
