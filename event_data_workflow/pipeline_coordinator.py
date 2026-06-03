@@ -101,10 +101,17 @@ class PipelineMemoryCoordinator:
         return is_gpu_under_pressure(metrics)
 
     def effective_cache_gb(self) -> float:
-        fraction = self.budget.recording_cache_fraction
-        if self.is_gpu_under_pressure():
-            fraction *= 0.5
-        return self.budget.total_gb * fraction  # actual cache budget in GB for the model
+        # Prefer the runtime MemoryArbiter — it has the authoritative VRAM budget
+        # split and sets the cuMemPool release threshold at initialisation time.
+        try:
+            from runtime import MemoryArbiter, Zone
+            arb = MemoryArbiter.get(self.device_idx)
+            return arb.soft_limit_mb(Zone.DATASET_CACHE) / 1024.0
+        except Exception:
+            fraction = self.budget.recording_cache_fraction
+            if self.is_gpu_under_pressure():
+                fraction *= 0.5
+            return self.budget.total_gb * fraction
 
     def max_recordings(self, avg_recording_bytes: int) -> int:
         """Compute max_recordings cap for BoundedRecordingCache."""
@@ -216,7 +223,9 @@ class DenseTimestepBuffer:
     @property
     def num_spikes(self) -> int:
         with self.lock:
-            return int(sum(e.sum().item() for e in self.events))
+            if not self.events:
+                return 0
+            return int(torch.stack(self.events).sum().item())  # single sync
 
     @property
     def num_timesteps(self) -> int:
@@ -231,7 +240,8 @@ class DenseTimestepBuffer:
 
     @property
     def firing_rate(self) -> float:
-        """Fraction of possible spike slots that fired (0.0 – 1.0). For diagnostics only — .item() forces a CUDA sync per timestep."""
+        """Fraction of possible spike slots that fired (0.0 – 1.0).
+        Uses a single torch.stack().sum().item() — one CUDA sync instead of T syncs."""
         with self.lock:
             if not self.events or self.step_shape is None:
                 return 0.0
@@ -239,7 +249,7 @@ class DenseTimestepBuffer:
             for d in self.step_shape:
                 total_per_step *= d
             total = total_per_step * len(self.events)
-            fired = int(sum(e.sum().item() for e in self.events))
+            fired = int(torch.stack(self.events).sum().item())
             return fired / total if total > 0 else 0.0
 
     def __getstate__(self):

@@ -11,6 +11,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
 from event_data_workflow.gpu_stats import GPUStats
 from learning.frameworks.activity_reg import get_hidden_spike_recordings, activity_regularization, stdp_regularization, pause_hooks, resume_hooks
+from runtime import PhaseManager, SpikeRateBus, Phase
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,9 @@ class SNNTrainer:
         self.last_spk_rec    = None
         self.epoch_log       = []
 
+        self.phase_mgr = PhaseManager.get()
+        self.rate_bus  = SpikeRateBus.get()
+
         device_idx = (device.index or 0) if device.type == "cuda" else 0
         self.gpu_stats = GPUStats(device_idx=device_idx)
 
@@ -102,7 +106,9 @@ class SNNTrainer:
         """Single forward pass. Routes through the custom CRSC CUDA kernel when
         kernel: ON is set in SNN_module.yaml, otherwise uses the framework model."""
         if not self.use_custom_kernel:
-            return self.model(data)
+            result = self.model(data)
+            self.rate_bus.push_dense(result.detach())
+            return result
 
         # Custom kernel expects [B, N, T]; typical neuromorphic data is [T, B, C, H, W]
         if data.dim() == 5:
@@ -112,7 +118,9 @@ class SNNTrainer:
             T, B, C, N = data.shape
             inp = data.view(T, B, C * N).permute(1, 2, 0).contiguous()      # [B, N, T]
         else:
-            return self.model(data)  # unsupported shape — fall back silently
+            result = self.model(data)
+            self.rate_bus.push_dense(result.detach())
+            return result
 
         B_sz, N_sz = inp.size(0), inp.size(1)
         if self._voltage_buf is None or self._voltage_buf.shape != (B_sz, N_sz):
@@ -125,6 +133,7 @@ class SNNTrainer:
             inp, self._voltage_buf,
             float(self.cfg.THRESHOLD), tau_inv,
         )                                              # [B, N, T]
+        self.rate_bus.push_dense(spikes.detach())
         return spikes.permute(2, 0, 1).contiguous()   # [T, B, N]
 
     def save_checkpoint(self, path: str):
@@ -163,6 +172,8 @@ class SNNTrainer:
         best_acc = 0.0
 
         for epoch in range(epochs):
+            self.phase_mgr.enter(Phase.TRAIN)
+            self.rate_bus.reset()
             self.model.train_mode()
             epoch_loss, epoch_acc, epoch_spike, n, step_count = 0.0, 0.0, 0.0, 0, 0
             t0 = time.perf_counter()
@@ -239,7 +250,9 @@ class SNNTrainer:
                         loss_val = task_loss / accum
 
                 do_step = ((step_count + 1) % accum == 0)
+                self.phase_mgr.enter(Phase.BACKWARD)
                 self.model.backward_pass(loss_val, scaler=self.scaler, do_step=do_step)
+                self.phase_mgr.enter(Phase.TRAIN)
                 if do_step:
                     self.model.zero_grad()
                 step_count += 1
@@ -247,7 +260,7 @@ class SNNTrainer:
                 raw_loss   = loss_val.item() * accum
                 logits     = clean_logits.detach() if self.cfg.TRADES_ENABLED else aggregate_spike_output(spk_rec.detach().float())
                 acc        = (logits.argmax(dim=1) == targets).float().mean().item()
-                spike_rate = spk_rec.detach().float().mean().item()
+                spike_rate = self.rate_bus.rate  # EWMA from forward_pass — no extra .item() sync
 
                 self.loss_hist.append(raw_loss)
                 self.acc_hist.append(acc)
