@@ -19,7 +19,7 @@ setup(
         CUDAExtension(
             name="snn_cuda.snn_forward",
             sources=[
-                os.path.join(CRSC_KERN, "snn_forward.cpp"),
+                os.path.join(CRSC_KERN, "snn_binding.cpp"),
                 os.path.join(CRSC_KERN, "snn_forward.cu"),
                 os.path.join(GPU_ATTRS, "energy_management.cu"),
                 os.path.join(GPU_ATTRS, "memory_management.cu"),
