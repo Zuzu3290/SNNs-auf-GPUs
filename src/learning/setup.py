@@ -22,6 +22,7 @@ setup(
                 os.path.join(CRSC_KERN, "snn_binding.cpp"),
                 os.path.join(CRSC_KERN, "snn_forward.cu"),
                 os.path.join(CRSC_KERN, "lif_temporal.cu"),
+                os.path.join(CRSC_KERN, "lif_warp_oriented.cu"),
                 os.path.join(GPU_ATTRS, "energy_management.cu"),
                 os.path.join(GPU_ATTRS, "memory_management.cu"),
                 os.path.join(GPU_ATTRS, "throughput_optimiation.cu"),

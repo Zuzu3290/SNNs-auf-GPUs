@@ -35,6 +35,9 @@ lif_temporal_ballot_cuda(
     float tau_inv
 );
 
+// --- lif_warp_oriented.cu ---
+#include "lif_warp_oriented.h"
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "SNN LIF CUDA extension — basic, profiled, and temporal-register kernels";
 
@@ -76,4 +79,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("voltage"),
           py::arg("v_th")    = 1.0f,
           py::arg("tau_inv") = 0.1f);
+
+    // ---- Warp-oriented path (SM-saturation grid-stride, correct LIF) ----
+    m.def("warp_oriented_forward",
+          [](torch::Tensor input, torch::Tensor voltage,
+             float v_th, float tau_inv, int target_bps) {
+              auto r = lif_warp_oriented_cuda(input, voltage, v_th, tau_inv, target_bps);
+              return py::make_tuple(r.spikes, r.elapsed_ms,
+                                   r.blocks_launched, r.neurons_per_thread);
+          },
+          "SM-saturating warp-oriented LIF forward.\n"
+          "Fills all SMs via grid-stride loop; correct sequential LIF at any B*N size.\n"
+          "Returns (spikes [B,N,T], elapsed_ms, blocks_launched, neurons_per_thread).",
+          py::arg("input"),
+          py::arg("voltage"),
+          py::arg("v_th")              = 1.0f,
+          py::arg("tau_inv")           = 0.1f,
+          py::arg("target_blocks_per_sm") = 8);
 }

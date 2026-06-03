@@ -11,6 +11,7 @@
 #include "../../acceleration/GPU_attributes/memory_management.h"
 #include "../../acceleration/GPU_attributes/throughput_optimization.h"
 #include "kernels/lif_temporal.h"
+#include "kernels/lif_warp_oriented.h"
 
 // ---------------------------------------------------------------------------
 // Basic LIF kernel — fixed 256-thread launch, no GPU-attribute overhead.
@@ -144,7 +145,68 @@ static torch::Tensor dispatch_accelerated(
 }
 
 // ---------------------------------------------------------------------------
-// Public dispatcher — three routes based on KernelConfig:
+// Warp-oriented path — SM-saturating grid-stride kernel with adaptive energy
+// feedback. Stores the last elapsed_ms and adjusts target_blocks_per_sm for
+// the next call: slow → fewer blocks (less pressure); fast → more blocks.
+// ---------------------------------------------------------------------------
+
+// Process-wide adaptive state — persists across forward calls.
+static float s_last_elapsed_ms    = 0.f;
+static int   s_blocks_per_sm      = 8;       // initial target
+static const int s_bps_min        = 2;
+static const int s_bps_max        = 16;
+
+static torch::Tensor dispatch_warp_oriented(
+    const KernelConfig& cfg,
+    torch::Tensor input,
+    torch::Tensor voltage,
+    float v_th, float tau_inv
+) {
+    const int64_t B = input.size(0);
+    const int64_t N = input.size(1);
+    const int64_t T = input.size(2);
+
+    // --- Memory audit (reused from accelerated path) -------------------
+    if (cfg.optimize_memory) {
+        size_t free_bytes = 0, total_bytes = 0;
+        snn_query_memory(&free_bytes, &total_bytes);
+        const size_t needed = (size_t)(B * N * T) * sizeof(float);
+        if (free_bytes < needed * 2)
+            printf("[MemoryMgr] WARNING: %.1f MB free, need ~%.1f MB\n",
+                   free_bytes / 1048576.0, needed * 2 / 1048576.0);
+    }
+
+    // --- Energy feedback: adapt blocks_per_sm from last run ------------
+    // First call (s_last_elapsed_ms == 0) skips adaptation.
+    if (s_last_elapsed_ms > 0.f) {
+        // If last kernel was fast (< 0.5 ms): push harder, add a block/SM.
+        // If last kernel was slow (> 2.0 ms): back off, remove a block/SM.
+        // Dead-band [0.5, 2.0] ms: leave unchanged.
+        if (s_last_elapsed_ms < 0.5f && s_blocks_per_sm < s_bps_max)
+            s_blocks_per_sm++;
+        else if (s_last_elapsed_ms > 2.0f && s_blocks_per_sm > s_bps_min)
+            s_blocks_per_sm--;
+
+        printf("[EnergyFeedback] last=%.3f ms  blocks_per_sm=%d\n",
+               s_last_elapsed_ms, s_blocks_per_sm);
+    }
+
+    // --- Launch warp-oriented kernel -----------------------------------
+    WarpOrientedResult r = lif_warp_oriented_cuda(
+        input, voltage, v_th, tau_inv, s_blocks_per_sm
+    );
+
+    // Store elapsed for next call's feedback decision.
+    s_last_elapsed_ms = r.elapsed_ms;
+
+    printf("[WarpOriented] elapsed=%.3f ms  neurons/thread=%.2f\n",
+           r.elapsed_ms, r.neurons_per_thread);
+
+    return r.spikes;
+}
+
+// ---------------------------------------------------------------------------
+// Public dispatcher — four routes based on KernelConfig:
 //   accelerate:false              → dispatch_basic  (benchmark reference)
 //   accelerate:true, temporal:false → dispatch_accelerated with lif_basic
 //   accelerate:true, temporal:true  → dispatch_accelerated with lif_temporal
@@ -165,6 +227,9 @@ torch::Tensor snn_engine_dispatch(
 
     if (!cfg.accelerate)
         return dispatch_basic(input, voltage, v_th, tau_inv);
+
+    if (cfg.warp_oriented)
+        return dispatch_warp_oriented(cfg, input, voltage, v_th, tau_inv);
 
     return dispatch_accelerated(cfg, input, voltage, v_th, tau_inv);
 }
