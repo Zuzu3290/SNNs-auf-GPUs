@@ -54,7 +54,7 @@ class SNNTester:
 
         kernel = self.kernel_module
         assert kernel is not None
-        threshold = float(self.cfg.FRAMEWORK_CFG[self.cfg.FRAMEWORK]["threshold"])
+        threshold = float(self.cfg.active_fw_cfg["threshold"])
         spikes    = kernel.forward(
             inp, self._voltage_buf,
             threshold, 1.0 - float(self.cfg.BETA),

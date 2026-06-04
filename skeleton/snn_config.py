@@ -4,6 +4,13 @@ from pathlib import Path
 DEFAULT_YAML      = Path(__file__).parent.parent / "configuration" / "SNN_module.yaml"
 NETWORK_ARCH_YAML = Path(__file__).parent.parent / "configuration" / "network_architecture.yaml"
 
+# Maps training.framework selector → FRAMEWORK_CFG / NEURON_TYPES key
+FW_TO_CFG_KEY = {
+    "torch": "snntorch",
+    "norse": "norse",
+    "sj":    "spikingjelly",
+}
+
 
 class Settings:
     def __init__(self, yaml_path=str(DEFAULT_YAML)):
@@ -139,6 +146,11 @@ class Settings:
         self.network_structure = self.generate_network_structure()
 
 
+    @property
+    def active_fw_cfg(self) -> dict:
+        """Config dict for whichever framework is currently selected."""
+        return self.FRAMEWORK_CFG[FW_TO_CFG_KEY[self.FRAMEWORK]]
+
     def load_yaml(self, yaml_path):
         with open(yaml_path, "r") as file:
             return yaml.safe_load(file)
@@ -195,20 +207,85 @@ class Settings:
         return layers
 
     def display(self):
-        print("=" * 60)
-        print("SNN Configuration")
-        print("=" * 60)
+        W      = 76
+        fw     = self.FRAMEWORK.upper()
+        fw_cfg = self.active_fw_cfg
+        sep    = "─" * (W - 4)
 
-        print(f"Network architecture : {self.network_structure}")
-        print(f"Framework            : {self.FRAMEWORK}")
-        print(f"Epochs               : {self.EPOCHS}")
-        print(f"Device               : {self.DEVICE}")
-        print(f"Kernel               : {self.KERNEL}")
-        print(f"Threshold            : {self.FRAMEWORK_CFG[self.FRAMEWORK]['threshold']}")
-        print(f"FC_IN (auto)         : {self.FC_IN}")
-        print(f"torch.compile        : {'ENABLED' if self.TORCH_COMPILE else 'DISABLED'}")
+        def section(title):
+            print(f"\n  [{title}]")
+            print(f"  {sep}")
 
-        print("=" * 60)
+        def row(label, value, lw=22):
+            print(f"    {label:<{lw}}: {value}")
+
+        print()
+        print("=" * W)
+        print(f"{'SNN CONFIGURATION':^{W}}")
+        print(f"{'Framework : ' + fw + '   |   Device : ' + self.DEVICE:^{W}}")
+        print("=" * W)
+
+        section("ARCHITECTURE")
+        row("Sensor",          f"{self.SENSOR_H} × {self.SENSOR_W}   ({self.IN_CHANNELS} channels)")
+        row("Conv1",           f"{self.CONV1_OUT} filters   {self.CONV1_KERNEL}×{self.CONV1_KERNEL} kernel")
+        row("Conv2",           f"{self.CONV2_OUT} filters   {self.CONV2_KERNEL}×{self.CONV2_KERNEL} kernel")
+        row("Pool",            f"{self.POOL_KERNEL}×{self.POOL_KERNEL} MaxPool   (applied twice)")
+        row("FC input (auto)", str(self.FC_IN))
+        row("Output classes",  str(self.NUM_CLASSES))
+
+        cfg_key      = FW_TO_CFG_KEY[self.FRAMEWORK]
+        neuron_types = self.NEURON_TYPES.get(cfg_key, {})
+        section(f"NEURON TYPES — {fw}")
+        for layer, ntype in neuron_types.items():
+            row(layer, ntype)
+
+        section(f"FRAMEWORK PARAMS — {fw}")
+        for key, val in fw_cfg.items():
+            display_val = f"{val} Hz" if key == "tau_mem_inv" else str(val)
+            row(key, display_val)
+
+        section("TRAINING")
+        row("Epochs",             str(self.EPOCHS))
+        row("Iterations / epoch", str(self.ITERA))
+        row("Timesteps (T)",      str(self.TIMESTEPS))
+        row("Batch size",         str(self.BATCH_SIZE))
+        row("Learning rate",      str(self.LEARNING_RATE))
+        row("Weight decay",       str(self.WEIGHT_DECAY))
+        row("LR scheduler",       self.LR_SCHEDULER)
+        row("Grad accum steps",   str(self.GRAD_ACCUM_STEPS))
+        row("AMP (mixed prec.)",  "ENABLED" if self.USE_AMP else "DISABLED")
+        row("DataLoader workers", str(self.NUM_WORKERS))
+
+        section("REGULARIZATION")
+        if self.TRADES_ENABLED:
+            row("TRADES",       f"ENABLED   eps={self.TRADES_EPSILON}   lambda={self.TRADES_LAMBDA}   steps={self.TRADES_STEPS}")
+        else:
+            row("TRADES",       "DISABLED")
+        if self.ACTIVITY_REG_ENABLED:
+            row("Activity reg", f"ENABLED   min={self.ACTIVITY_REG_MIN_RATE * 100:.0f}%   max={self.ACTIVITY_REG_MAX_RATE * 100:.0f}%")
+        else:
+            row("Activity reg", "DISABLED")
+        if self.STDP_ENABLED:
+            row("STDP",         f"ENABLED   tau={self.STDP_TAU}   A+={self.STDP_A_PLUS}   A-={self.STDP_A_MINUS}")
+        else:
+            row("STDP",         "DISABLED")
+
+        section("DATASET")
+        row("Dataset",   self.DATASET_NAME)
+        row("Data path", self.DATA_PATH or "(default)")
+
+        section("OUTPUT")
+        row("Output dir", self.OUTPUT_DIR)
+        row("Plot dir",   self.PLOT_DIR)
+        row("Data dir",   self.DATA_DIR)
+
+        section("COMPILER")
+        row("CUDA kernel",   self.KERNEL)
+        row("torch.compile", "ENABLED" if self.TORCH_COMPILE else "DISABLED")
+
+        print()
+        print("=" * W)
+        print()
 
 if __name__ == "__main__":
     cfg = Settings()

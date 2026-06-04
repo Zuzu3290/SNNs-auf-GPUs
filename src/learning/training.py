@@ -121,7 +121,7 @@ class SNNTrainer:
         kernel  = self.kernel_module
         assert kernel is not None
         tau_inv   = 1.0 - float(self.cfg.BETA)
-        threshold = float(self.cfg.FRAMEWORK_CFG[self.cfg.FRAMEWORK]["threshold"])
+        threshold = float(self.cfg.active_fw_cfg["threshold"])
         spikes    = kernel.forward(
             inp, self._voltage_buf,
             threshold, tau_inv,
