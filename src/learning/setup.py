@@ -7,6 +7,7 @@ ROOT      = os.path.abspath(os.path.join(HERE, '..', '..'))  # project root
 GPU_ATTRS = os.path.join(ROOT, 'acceleration', 'GPU_attributes')
 CRSC_KERN = os.path.join(ROOT, 'src', 'crsc', 'kernels')
 RUNTIME   = os.path.join(ROOT, 'src', 'runtime')
+SKEL      = os.path.join(ROOT, 'skeleton')
 
 try:
     from torch.utils.cpp_extension import CUDA_HOME
@@ -41,8 +42,9 @@ setup(
             sources=[
                 os.path.join(RUNTIME,   "runtime_binding.cpp"),
                 os.path.join(GPU_ATTRS, "memory_arbiter.cu"),
+                os.path.join(SKEL,      "gpu_diagnostics.cu"),
             ],
-            include_dirs=[GPU_ATTRS] + _cuda_inc,
+            include_dirs=[GPU_ATTRS, SKEL] + _cuda_inc,
             extra_compile_args={"cxx": _cxx_flags, "nvcc": _nvcc_flags},
         ),
     ],

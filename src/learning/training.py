@@ -8,7 +8,7 @@ from contextlib import nullcontext
 import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from skeleton import Settings, ReliabilityTracker
+from skeleton import Settings, ReliabilityTracker, run_preflight
 from event_data_workflow.gpu_stats import GPUStats
 from learning.frameworks.activity_reg import get_hidden_spike_recordings, activity_regularization, stdp_regularization, pause_hooks, resume_hooks
 from runtime import PhaseManager, SpikeRateBus, Phase
@@ -69,6 +69,15 @@ class SNNTrainer:
         self.train_loader = train_loader
         self.cfg          = cfg
         self.device       = device
+        self.phase_mgr   = PhaseManager.get()
+        self.rate_bus    = SpikeRateBus.get(alpha=cfg.SPIKE_RATE_EWMA_ALPHA)
+        self.reliability = ReliabilityTracker()
+
+        device_idx_preflight = (device.index or 0) if device.type == "cuda" else 0
+        run_preflight(device_idx=device_idx_preflight,
+                      reliability=self.reliability,
+                      block_on_failure=True)
+
         self.kernel_module = None
         self.use_custom_kernel = False
         self.kernel_mode = cfg.KERNEL_MODE  # basic | temporal | warp_oriented
@@ -90,10 +99,6 @@ class SNNTrainer:
         self.spike_rate_hist = []
         self.last_spk_rec    = None
         self.epoch_log       = []
-
-        self.phase_mgr  = PhaseManager.get()
-        self.rate_bus   = SpikeRateBus.get(alpha=cfg.SPIKE_RATE_EWMA_ALPHA)
-        self.reliability = ReliabilityTracker()
 
         # Push YAML runtime config into MemoryArbiter before any subsystem calls get()
         try:

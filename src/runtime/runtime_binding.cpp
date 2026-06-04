@@ -3,6 +3,7 @@
 // Exposes CUDAMemoryArbiter and the SnnZone enum to Python.
 #include <torch/extension.h>
 #include "../../acceleration/GPU_attributes/memory_arbiter.h"
+#include "../../skeleton/gpu_diagnostics.h"
 
 namespace py = pybind11;
 
@@ -129,4 +130,35 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              "Return a dict with per-zone accounting and live cuMemPool stats.")
         .def("print_status", &CUDAMemoryArbiter::print_status,
              "Print formatted zone table and pool stats to stdout.");
+
+    // ---- GPU preflight diagnostics ---------------------------------------
+    py::class_<GpuDiagnosticReport>(m, "GpuDiagnosticReport")
+        .def_readonly("device_name",        &GpuDiagnosticReport::device_name)
+        .def_readonly("sm_count",           &GpuDiagnosticReport::sm_count)
+        .def_readonly("compute_major",      &GpuDiagnosticReport::compute_major)
+        .def_readonly("compute_minor",      &GpuDiagnosticReport::compute_minor)
+        .def_readonly("total_vram_bytes",   &GpuDiagnosticReport::total_vram_bytes)
+        .def_readonly("free_vram_bytes",    &GpuDiagnosticReport::free_vram_bytes)
+        .def_readonly("ecc_supported",      &GpuDiagnosticReport::ecc_supported)
+        .def_readonly("cuda_error_cleared", &GpuDiagnosticReport::cuda_error_cleared)
+        .def_readonly("nvml_available",     &GpuDiagnosticReport::nvml_available)
+        .def_readonly("temperature_c",      &GpuDiagnosticReport::temperature_c)
+        .def_readonly("power_draw_w",       &GpuDiagnosticReport::power_draw_w)
+        .def_readonly("power_limit_w",      &GpuDiagnosticReport::power_limit_w)
+        .def_readonly("ecc_uncorrected",    &GpuDiagnosticReport::ecc_uncorrected)
+        .def_readonly("ecc_corrected",      &GpuDiagnosticReport::ecc_corrected)
+        .def_readonly("throttle_reasons",   &GpuDiagnosticReport::throttle_reasons)
+        .def_readonly("healthy",            &GpuDiagnosticReport::healthy)
+        .def_readonly("failure_reason",     &GpuDiagnosticReport::failure_reason);
+
+    m.def("run_gpu_preflight",
+          [](int device_idx) { return run_gpu_preflight(device_idx); },
+          py::arg("device_idx") = 0,
+          "Run GPU hardware health checks before training.\n"
+          "Returns a GpuDiagnosticReport. Check .healthy before proceeding.");
+
+    m.def("print_diagnostic_report",
+          &print_diagnostic_report,
+          py::arg("report"),
+          "Print a formatted preflight report to stdout.");
 }
