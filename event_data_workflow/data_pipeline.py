@@ -30,13 +30,6 @@ from .pipeline_coordinator import PipelineMemoryCoordinator
 from .temporal_slicer import create_sliced_dataset
 from .workflow_config import WorkflowSettings
 
-# Tensor layout per framework: SNNTorch/Norse step over dim-0 (T,B,...); SpikingJelly uses (B,T,...)
-_FORMAT_MAP = {
-    "torch":        "TB",
-    "norse":        "TB",
-    "spikingjelly": "BT",
-}
-
 orig_tqdm_init = t.tqdm.__init__
 def mb_init(self, *a, **kw):
     if kw.get("total", 0) > 1_000_000:
@@ -59,12 +52,10 @@ class NeuromorphicEncoder:
         events_per_slice    : Switch to event-driven slicing (ignores slice_duration_ms)
     """
 
-    def __init__(self, cfg: Settings, framework: str = "norse", use_temporal_slicing: bool = None, slice_duration_ms: float = None, auto_tune_slicing: bool = False, events_per_slice: int = None ):
+    def __init__(self, cfg: Settings, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None, auto_tune_slicing: bool = False, events_per_slice: int | None = None):
 
-        self.cfg         = cfg
-        self.wf          = WorkflowSettings()
-        self.framework   = framework
-        self.data_format = _FORMAT_MAP.get(framework, "TB")
+        self.cfg = cfg
+        self.wf  = WorkflowSettings()
         # Explicit param overrides YAML; None means "read from data_workflow.yaml"
         self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else self.wf.TEMPORAL_SLICING_ENABLED
         self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)

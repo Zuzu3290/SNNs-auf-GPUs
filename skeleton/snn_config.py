@@ -43,6 +43,12 @@ class Settings:
         self.TOTAL_TIME_WINDOW       = int(architecture.get("total_time_window", 30000))
         self.NUM_WORKERS             = int(architecture.get("num_workers", 2))
 
+        # Input control (reserved for future use — expose when input_mode is needed)
+        # self.INPUT_MODE      = input_cfg.get("input_mode", "2D")
+        # self.IMAGE_CHANNELS  = int(input_cfg.get("image_channels", 1))
+        # self.IMAGE_HEIGHT    = int(input_cfg.get("image_height", 28))
+        # self.IMAGE_WIDTH     = int(input_cfg.get("image_width", 28))
+
         # Conv-SNN architecture (from network_architecture.yaml)
         self.SENSOR_H     = int(conv.get("sensor_h",     34))
         self.SENSOR_W     = int(conv.get("sensor_w",     34))
@@ -103,25 +109,22 @@ class Settings:
 
         self.FRAMEWORK_CFG = {
             "snntorch": {
-                "beta":       float(snt.get("beta", 0.95)),
-                "threshold":  float(snt.get("threshold", 0.5)),
-                "optimizer":  snt.get("optimizer", "adam"),
-                "loss_fn":    snt.get("loss_fn", "mse_count"),
-                "reset_mode": snt.get("reset_mode", "subtract"),
+                "beta":      float(snt.get("beta", 0.95)),
+                "threshold": float(snt.get("threshold", 0.5)),
+                "optimizer": snt.get("optimizer", "adam"),
+                "loss_fn":   snt.get("loss_fn", "mse_count"),
             },
             "norse": {
                 "tau_mem_inv": float(nor.get("tau_mem_inv", 100.0)),
                 "threshold":   float(nor.get("threshold", 0.5)),
                 "optimizer":   nor.get("optimizer", "adam"),
                 "loss_fn":     nor.get("loss_fn", "cross_entropy"),
-                "reset_mode":  nor.get("reset_mode", "zero"),
             },
             "spikingjelly": {
-                "tau":        float(spj.get("tau", 2.0)),
-                "threshold":  float(spj.get("threshold", 0.5)),
-                "optimizer":  spj.get("optimizer", "adam"),
-                "loss_fn":    spj.get("loss_fn", "cross_entropy"),
-                "reset_mode": spj.get("reset_mode", "zero"),
+                "tau":       float(spj.get("tau", 2.0)),
+                "threshold": float(spj.get("threshold", 0.5)),
+                "optimizer": spj.get("optimizer", "adam"),
+                "loss_fn":   spj.get("loss_fn", "cross_entropy"),
             },
         }
 

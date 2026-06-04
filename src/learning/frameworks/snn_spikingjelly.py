@@ -1,10 +1,34 @@
 import torch
 import torch.nn as nn
-from spikingjelly.activation_based import functional, surrogate
+from spikingjelly.activation_based import functional, neuron, surrogate
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
 from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
-from learning.utilities import build_optimizer, build_loss, build_sj_layer
+from learning.utilities import build_optimizer, build_loss
+
+
+def build_sj_layer(layer_name: str, cfg: Settings, spike_grad, **kwargs) -> nn.Module:
+    """
+    Build a SpikingJelly neuron for the given layer slot.
+
+    Neuron types (set per layer in network_architecture.yaml → neuron_types.spikingjelly):
+      izhikevich — neuron.IzhikevichNode. Default.
+      lif        — neuron.LIFNode.
+    """
+    neuron_type = cfg.NEURON_TYPES.get("spikingjelly", {}).get(layer_name, "izhikevich")
+    fw_cfg      = cfg.FRAMEWORK_CFG["spikingjelly"]
+    tau         = fw_cfg["tau"]
+    threshold   = fw_cfg["threshold"]
+
+    if neuron_type == "izhikevich":
+        return neuron.IzhikevichNode(
+            tau=tau, v_threshold=threshold,
+            surrogate_function=spike_grad, **kwargs,
+        )
+    return neuron.LIFNode(
+        tau=tau, v_threshold=threshold,
+        surrogate_function=spike_grad, **kwargs,
+    )
 
 
 class SNN_SJ(ModelInterface, nn.Module):
@@ -46,7 +70,7 @@ class SNN_SJ(ModelInterface, nn.Module):
         functional.reset_net(self.net)
 
         # data shape is [T, B, C, H, W]
-        sum_spikes = 0
+        sum_spikes = torch.zeros(data.size(1), self.cfg.NUM_CLASSES, device=self.device)
         for step in range(data.size(0)):
             sum_spikes = sum_spikes + self.net(data[step])
 

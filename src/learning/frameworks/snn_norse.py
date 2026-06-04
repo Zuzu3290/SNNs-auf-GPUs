@@ -1,11 +1,35 @@
 import torch
 import torch.nn as nn
+import norse.torch as norse
 
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
 from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
-from learning.utilities import build_optimizer, build_loss, build_norse_layer
-# from learning.utilities import reset_mode_guard  # activate together with reset_mode_guard() call below
+from learning.utilities import build_optimizer, build_loss
+
+
+def build_norse_layer(layer_name: str, cfg: Settings) -> nn.Module:
+    """
+    Build a Norse LIF neuron for the given layer slot.
+
+    Neuron types (set per layer in network_architecture.yaml → neuron_types.norse):
+      lif_cell       — norse.LIFCell  (standard LIF). Default.
+      lif_rec_cell   — norse.LIFRecurrentCell  (adds recurrent self-connection).
+    """
+    neuron_type = cfg.NEURON_TYPES.get("norse", {}).get(layer_name, "lif_cell")
+    fw_cfg      = cfg.FRAMEWORK_CFG["norse"]
+
+    lif_params = norse.LIFParameters(
+        tau_mem_inv = torch.as_tensor(fw_cfg["tau_mem_inv"], dtype=torch.float32),
+        v_th        = torch.as_tensor(fw_cfg["threshold"],   dtype=torch.float32),
+    )
+
+    if neuron_type == "lif_rec_cell":
+        raise NotImplementedError(
+            f"lif_rec_cell for layer '{layer_name}' requires input_size and hidden_size. "
+            "Subclass SNN_NORSE and override the layer construction for recurrent cells."
+        )
+    return norse.LIFCell(p=lif_params)
 
 
 class SNN_NORSE(ModelInterface, nn.Module):
@@ -16,15 +40,14 @@ class SNN_NORSE(ModelInterface, nn.Module):
         self.cfg    = cfg
         self.device = torch.device(cfg.DEVICE)
 
-        # tau_mem_inv is read directly from the YAML frameworks.norse section.
-        # Do NOT convert from SNNTorch beta: they live in different coordinate systems.
+        # tau_mem_inv is read directly from frameworks.norse in YAML.
+        # Do NOT convert from SNNTorch beta: different coordinate systems.
         # SNNTorch: V_eq = 20*I  (20x amplification).  Norse: V_eq = I (no amplification).
         fw_cfg = {
             **cfg.FRAMEWORK_CFG["norse"],
             "learning_rate": cfg.LEARNING_RATE,
             "weight_decay":  cfg.WEIGHT_DECAY,
         }
-        # reset_mode_guard(fw_cfg, framework="norse")  # activate when reset_mode is in YAML
 
         self.conv1   = nn.Conv2d(cfg.IN_CHANNELS, cfg.CONV1_OUT, cfg.CONV1_KERNEL)
         self.lif1    = build_norse_layer("lif1",    cfg)

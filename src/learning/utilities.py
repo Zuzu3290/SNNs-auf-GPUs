@@ -2,9 +2,7 @@
 Shared helper factories used by all three SNN framework modules.
 
 Import pattern in each framework file:
-    from learning.utilities import build_optimizer, build_loss, reset_mode_guard
-    from learning.utilities import build_lif_layer   # SNNTorch only
-    from learning.utilities import build_sj_layer    # SpikingJelly only
+    from learning.utilities import build_optimizer, build_loss
 """
 import torch
 import torch.nn as nn
@@ -60,101 +58,3 @@ def build_loss(fw_cfg: dict, framework: str = "norse"):
     )
 
 
-def reset_mode_guard(fw_cfg: dict, framework: str = "norse") -> None:
-    """
-    Raises if the requested reset_mode is incompatible with the framework.
-    Norse only supports hard reset ('zero'). Call this in __init__ when
-    reset_mode is exposed in the YAML.
-    """
-    mode = fw_cfg.get("reset_mode", "zero")
-    if framework == "norse" and mode == "subtract":
-        raise NotImplementedError(
-            "Norse only supports reset_mode='zero' (hard reset). "
-            "Set reset_mode: zero in the norse section of SNN_module.yaml."
-        )
-
-
-def build_norse_layer(layer_name: str, cfg) -> nn.Module:
-    """
-    Build a Norse neuron, selecting the type from cfg.NEURON_TYPES.
-
-    Neuron types (set per layer in network_architecture.yaml under neuron_types.norse):
-      lif_cell       — norse.LIFCell  (standard leaky integrate-and-fire). Default.
-      lif_rec_cell   — norse.LIFRecurrentCell  (adds recurrent self-connection).
-
-    Uses tau_mem_inv and threshold from cfg.FRAMEWORK_CFG["norse"].
-    """
-    import norse.torch as norse
-    import torch
-
-    # layer_name: "lif1" | "lif2" | "lif_out"
-    neuron_type = cfg.NEURON_TYPES.get("norse", {}).get(layer_name, "lif_cell")
-    tau_mem_inv = cfg.FRAMEWORK_CFG["norse"]["tau_mem_inv"]
-    threshold   = cfg.FRAMEWORK_CFG["norse"]["threshold"]
-
-    lif_params = norse.LIFParameters(
-        tau_mem_inv = torch.as_tensor(tau_mem_inv, dtype=torch.float32),
-        v_th        = torch.as_tensor(threshold,   dtype=torch.float32),
-    )
-
-    if neuron_type == "lif_rec_cell":
-        return norse.LIFRecurrentCell(p=lif_params)
-    return norse.LIFCell(p=lif_params)
-
-
-def build_lif_layer(layer_name: str, cfg, spike_grad, **kwargs) -> nn.Module:
-    """
-    Build an SNNTorch LIF neuron, selecting the type from cfg.NEURON_TYPES.
-
-    Neuron types:
-      alpha  — snn.Alpha  (two-compartment: membrane + synaptic decay). Default.
-      leaky  — snn.Leaky  (single-compartment).
-
-    Uses threshold and beta from cfg.FRAMEWORK_CFG["snntorch"].
-    """
-    import snntorch as snn
-
-    # layer_name: "lif1" | "lif2" | "lif_out"
-    neuron_type = cfg.NEURON_TYPES.get("snntorch", {}).get(layer_name, "alpha")
-    beta        = cfg.FRAMEWORK_CFG["snntorch"]["beta"]
-    threshold   = cfg.FRAMEWORK_CFG["snntorch"]["threshold"]
-
-    if neuron_type == "alpha":
-        alpha_val = beta
-        beta_syn  = max(0.5, beta - 0.1)
-        return snn.Alpha(
-            alpha=alpha_val, beta=beta_syn,
-            threshold=threshold, spike_grad=spike_grad,
-            **kwargs,
-        )
-    return snn.Leaky(beta=beta, threshold=threshold, spike_grad=spike_grad, **kwargs)
-
-
-def build_sj_layer(layer_name: str, cfg, spike_grad, **kwargs) -> nn.Module:
-    """
-    Build a SpikingJelly neuron, selecting the type from cfg.NEURON_TYPES.
-
-    Neuron types:
-      izhikevich — neuron.IzhikevichNode. Default.
-      lif        — neuron.LIFNode.
-
-    Uses threshold and tau from cfg.FRAMEWORK_CFG["spikingjelly"].
-    """
-    from spikingjelly.activation_based import neuron
-
-    # layer_name: "lif1" | "lif2" | "lif_out"
-    neuron_type = cfg.NEURON_TYPES.get("spikingjelly", {}).get(layer_name, "izhikevich")
-    tau         = cfg.FRAMEWORK_CFG["spikingjelly"]["tau"]
-    threshold   = cfg.FRAMEWORK_CFG["spikingjelly"]["threshold"]
-
-    if neuron_type == "izhikevich":
-        return neuron.IzhikevichNode(
-            tau=tau, v_threshold=threshold,
-            surrogate_function=spike_grad,
-            **kwargs,
-        )
-    return neuron.LIFNode(
-        tau=tau, v_threshold=threshold,
-        surrogate_function=spike_grad,
-        **kwargs,
-    )

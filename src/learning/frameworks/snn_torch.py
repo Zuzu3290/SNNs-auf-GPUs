@@ -6,7 +6,29 @@ import torch.nn as nn
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
 from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
-from learning.utilities import build_optimizer, build_loss, build_lif_layer
+from learning.utilities import build_optimizer, build_loss
+
+
+def build_lif_layer(layer_name: str, cfg: Settings, spike_grad, **kwargs) -> nn.Module:
+    """
+    Build an SNNTorch LIF neuron for the given layer slot.
+
+    Neuron types (set per layer in network_architecture.yaml → neuron_types.snntorch):
+      alpha  — snn.Alpha  (two-compartment: membrane + synaptic decay). Default.
+      leaky  — snn.Leaky  (single-compartment).
+    """
+    neuron_type = cfg.NEURON_TYPES.get("snntorch", {}).get(layer_name, "alpha")
+    fw_cfg      = cfg.FRAMEWORK_CFG["snntorch"]
+    beta        = fw_cfg["beta"]
+    threshold   = fw_cfg["threshold"]
+
+    if neuron_type == "alpha":
+        return snn.Alpha(
+            alpha=beta, beta=max(0.5, beta - 0.1),
+            threshold=threshold, spike_grad=spike_grad,
+            **kwargs,
+        )
+    return snn.Leaky(beta=beta, threshold=threshold, spike_grad=spike_grad, **kwargs)
 
 
 class SNN_TORCH(ModelInterface, nn.Module):
