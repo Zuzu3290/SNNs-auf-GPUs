@@ -8,7 +8,7 @@ from contextlib import nullcontext
 import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from skeleton import Settings
+from skeleton import Settings, ReliabilityTracker
 from event_data_workflow.gpu_stats import GPUStats
 from learning.frameworks.activity_reg import get_hidden_spike_recordings, activity_regularization, stdp_regularization, pause_hooks, resume_hooks
 from runtime import PhaseManager, SpikeRateBus, Phase
@@ -82,6 +82,7 @@ class SNNTrainer:
                 self._report_kernel_compatibility()
             except ImportError:
                 print("[kernel] snn_forward not built — run: python src/learning/setup.py build_ext --inplace")
+                self.reliability.record_interruption("kernel import failed — falling back to framework forward")
         self._voltage_buf: torch.Tensor | None = None
 
         self.loss_hist       = []
@@ -90,8 +91,9 @@ class SNNTrainer:
         self.last_spk_rec    = None
         self.epoch_log       = []
 
-        self.phase_mgr = PhaseManager.get()
-        self.rate_bus  = SpikeRateBus.get(alpha=cfg.SPIKE_RATE_EWMA_ALPHA)
+        self.phase_mgr  = PhaseManager.get()
+        self.rate_bus   = SpikeRateBus.get(alpha=cfg.SPIKE_RATE_EWMA_ALPHA)
+        self.reliability = ReliabilityTracker()
 
         # Push YAML runtime config into MemoryArbiter before any subsystem calls get()
         try:
@@ -278,6 +280,8 @@ class SNNTrainer:
 
     def train(self, checkpoint_dir: str, checkpoint_name: str = "best_model.pt", csv_path: str = "./outputs/data/training_results.csv") -> dict:
 
+        self.reliability.start_session()
+
         epochs    = self.cfg.EPOCHS
         num_iters = self.cfg.ITERA
         accum     = self.grad_accum_steps
@@ -403,6 +407,12 @@ class SNNTrainer:
 
             epoch_duration = time.perf_counter() - t0
             gpu            = self.gpu_stats.end_epoch()
+
+            # Record GPU pressure interruption if peak memory exceeded 90% of total
+            if gpu.get("gpu_mem_peak_pct", 0) > 90:
+                self.reliability.record_interruption(
+                    f"GPU memory pressure — epoch {epoch+1} peak {gpu['gpu_mem_peak_pct']}% of VRAM"
+                )
             train_loss     = epoch_loss / n
             train_acc      = epoch_acc  / n
             current_lr     = self.model.get_lr()
@@ -470,6 +480,9 @@ class SNNTrainer:
             print(f"  • Peak VRAM used   : {overall['overall_peak_mem_gb']} GB / {overall['total_vram_gb']} GB  ({overall['overall_peak_mem_pct']}%)")
 
         self.write_csv(csv_path)
+
+        self.reliability.end_session(outcome="success")
+        self.reliability.print_report()
 
         return {
             "loss_history":       self.loss_hist,
