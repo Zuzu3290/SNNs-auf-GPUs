@@ -77,12 +77,6 @@ class SNNTrainer:
                 import snn_forward as km  # type: ignore[import]
                 self.kernel_module = km
                 self.use_custom_kernel = True
-                km.set_dispatch_config(
-                    cfg.BPS_MIN, cfg.BPS_MAX,
-                    cfg.ENERGY_SAMPLE_EVERY,
-                    cfg.ENERGY_FAST_THRESHOLD_MS,
-                    cfg.ENERGY_SLOW_THRESHOLD_MS,
-                )
                 self._report_kernel_compatibility()
             except ImportError:
                 print("[kernel] snn_forward not built — run: python src/learning/setup.py build_ext --inplace")
