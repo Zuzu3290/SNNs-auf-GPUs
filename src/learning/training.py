@@ -71,12 +71,13 @@ class SNNTrainer:
         self.device       = device
         self.kernel_module = None
         self.use_custom_kernel = False
+        self.kernel_mode = cfg.KERNEL_MODE  # basic | temporal | warp_oriented
         if cfg.KERNEL == "ON":
             try:
                 import snn_forward as km  # type: ignore[import]
                 self.kernel_module = km
                 self.use_custom_kernel = True
-                print("[kernel] SNNTrainer: custom CRSC CUDA kernel active")
+                self._report_kernel_compatibility()
             except ImportError:
                 print("[kernel] snn_forward not built — run: python src/learning/setup.py build_ext --inplace")
         self._voltage_buf: torch.Tensor | None = None
@@ -101,6 +102,100 @@ class SNNTrainer:
         lr_sched = getattr(cfg, "LR_SCHEDULER", "cosine")
         opt = getattr(self.model, "optimizer", None)
         self.scheduler = (CosineAnnealingLR(opt, T_max=cfg.EPOCHS) if opt is not None and lr_sched == "cosine" else None)
+
+    def _report_kernel_compatibility(self) -> None:
+        """Inspect the loaded architecture against the kernel's contract and print a status report.
+
+        Kernel contract:
+          - Input must be reshapeable to [B, N, T] float32 on CUDA
+          - T = cfg.TIMESTEPS > 0
+          - Model must produce spike-like outputs (SNN framework with binary activations)
+          - N = flattened spatial input dimension
+
+        Does NOT disable the kernel — reports only. The user decides based on the output.
+        """
+        model_name = type(self.model).__name__
+        N = self.cfg.INPUT_SIZE
+        T = self.cfg.TIMESTEPS
+        B = self.cfg.BATCH_SIZE
+
+        checks = []
+        compatible = True
+
+        # Timesteps
+        if T > 0:
+            checks.append(("T = timesteps", f"{T}", True))
+        else:
+            checks.append(("T = timesteps", f"{T} — kernel requires T > 0", False))
+            compatible = False
+
+        # Spatial input dimension.
+        # N here is the flattened input to the kernel layer, not the total neuron count.
+        # The full network structure (input → hidden layers → output) is owned by the SNN
+        # framework above the kernel. The kernel processes one LIF layer at a time — the
+        # input tensor reshaped to [B, N, T] where N = flattened spatial dimension of the data.
+        # Hidden and output layers remain with Norse / SpikingJelly / snn_torch.
+        if N > 0:
+            checks.append((
+                "N = kernel layer width",
+                f"{N} (flattened input)  →  [{B}, {N}, {T}]  "
+                f"|  full network: {self.cfg.network_structure}",
+                True
+            ))
+        else:
+            checks.append(("N = kernel layer width", f"{N} — cannot form [B, N, T]", False))
+            compatible = False
+
+        # CUDA
+        if torch.cuda.is_available():
+            checks.append(("CUDA", torch.cuda.get_device_name(0), True))
+        else:
+            checks.append(("CUDA", "not available — kernel requires GPU", False))
+            compatible = False
+
+        # SNN framework detection — looks at class name for known SNN frameworks.
+        # If you add a new model class, ensure its name contains one of the markers below
+        # or the report will flag it as unverified (kernel still runs — this is advisory only).
+        SNN_MARKERS = ("snn", "lif", "norse", "spiking", "spike", "leaky", "neuron")
+        name_lower = model_name.lower()
+        is_snn = any(m in name_lower for m in SNN_MARKERS)
+        if is_snn:
+            checks.append(("Model framework", f"{model_name} — SNN type confirmed", True))
+        else:
+            checks.append((
+                "Model framework",
+                f"{model_name} — not recognised as SNN. "
+                "Kernel expects binary spike output [B, N, T]. "
+                "CNN / RNN / Transformer outputs are not compatible unless adapted to spike format.",
+                False
+            ))
+            compatible = False
+
+        # Kernel mode availability
+        available_modes = [x for x in dir(self.kernel_module) if not x.startswith("_")]
+        mode_fn_map = {
+            "warp_oriented": "warp_oriented_forward",
+            "temporal":      "temporal_forward",
+            "basic":         "forward",
+        }
+        required_fn = mode_fn_map.get(self.kernel_mode, "forward")
+        if required_fn in available_modes:
+            checks.append(("Kernel mode", f"{self.kernel_mode}  →  {required_fn}()", True))
+        else:
+            checks.append(("Kernel mode", f"{self.kernel_mode}  →  {required_fn}() NOT FOUND in built module", False))
+            compatible = False
+
+        # Print report
+        status = "COMPATIBLE" if compatible else "INCOMPATIBLE"
+        print(f"\n[kernel] Architecture compatibility — {status}")
+        print(f"[kernel]   Network : {self.cfg.network_structure}")
+        for label, detail, ok in checks:
+            mark = "ok" if ok else "!!"
+            print(f"[kernel]   [{mark}] {label:<22}  {detail}")
+        if not compatible:
+            print("[kernel]   Kernel is ON but architecture does not fully meet the contract above.")
+            print("[kernel]   Review the flagged items — kernel will attempt to run as configured.")
+        print()
 
     def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
         """Single forward pass. Routes through the custom CRSC CUDA kernel when
@@ -129,10 +224,15 @@ class SNNTrainer:
         kernel  = self.kernel_module
         assert kernel is not None
         tau_inv = 1.0 - float(self.cfg.BETA)
-        spikes  = kernel.forward(
-            inp, self._voltage_buf,
-            float(self.cfg.THRESHOLD), tau_inv,
-        )                                              # [B, N, T]
+        v_th    = float(self.cfg.THRESHOLD)
+
+        if self.kernel_mode == "warp_oriented":
+            spikes, _, _ = kernel.warp_oriented_forward(inp, self._voltage_buf, v_th, tau_inv)
+        elif self.kernel_mode == "temporal":
+            spikes = kernel.temporal_forward(inp, self._voltage_buf, v_th, tau_inv)
+        else:
+            spikes = kernel.forward(inp, self._voltage_buf, v_th, tau_inv)
+
         self.rate_bus.push_dense(spikes.detach())
         return spikes.permute(2, 0, 1).contiguous()   # [T, B, N]
 

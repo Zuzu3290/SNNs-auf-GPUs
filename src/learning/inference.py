@@ -23,12 +23,13 @@ class SNNTester:
         self.batch_log   = []
         self.kernel_module = None
         self.use_custom_kernel = False
+        self.kernel_mode = cfg.KERNEL_MODE
         if cfg.KERNEL == "ON":
             try:
                 import snn_forward as km  # type: ignore[import]
                 self.kernel_module = km
                 self.use_custom_kernel = True
-                print("[kernel] SNNTester: custom CRSC CUDA kernel active")
+                print(f"[kernel] SNNTester: CRSC CUDA kernel active  mode={self.kernel_mode}")
             except ImportError:
                 print("[kernel] snn_forward not built — run: python src/learning/setup.py build_ext --inplace")
         self._voltage_buf: torch.Tensor | None = None
@@ -52,12 +53,18 @@ class SNNTester:
         if self._voltage_buf is None or self._voltage_buf.shape != (B_sz, N_sz):
             self._voltage_buf = torch.zeros(B_sz, N_sz, device=self.device)
 
-        kernel = self.kernel_module
+        kernel  = self.kernel_module
         assert kernel is not None
-        spikes = kernel.forward(
-            inp, self._voltage_buf,
-            float(self.cfg.THRESHOLD), 1.0 - float(self.cfg.BETA),
-        )
+        v_th    = float(self.cfg.THRESHOLD)
+        tau_inv = 1.0 - float(self.cfg.BETA)
+
+        if self.kernel_mode == "warp_oriented":
+            spikes, _, _ = kernel.warp_oriented_forward(inp, self._voltage_buf, v_th, tau_inv)
+        elif self.kernel_mode == "temporal":
+            spikes = kernel.temporal_forward(inp, self._voltage_buf, v_th, tau_inv)
+        else:
+            spikes = kernel.forward(inp, self._voltage_buf, v_th, tau_inv)
+
         return spikes.permute(2, 0, 1).contiguous()
 
     def class_metrics(self, cm: np.ndarray) -> list[dict]:
