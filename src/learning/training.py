@@ -74,7 +74,9 @@ class SNNTrainer:
         self.kernel_mode = cfg.KERNEL_MODE  # basic | temporal | warp_oriented
         if cfg.KERNEL == "ON":
             try:
-                import snn_forward as km  # type: ignore[import]
+                import sys as _sys
+                # Reuse already-loaded module if present — avoids reimporting on trainer reinit
+                km = _sys.modules.get("snn_forward") or __import__("snn_forward")
                 self.kernel_module = km
                 self.use_custom_kernel = True
                 self._report_kernel_compatibility()
