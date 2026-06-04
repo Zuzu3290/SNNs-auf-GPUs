@@ -59,6 +59,24 @@ training:
   stdp_a_plus: 0.01             # LTP strength — how strongly to reinforce causal (pre→post) spike order.
   stdp_a_minus: 0.01            # LTD strength — how strongly to penalise anticausal (post→pre) spike order.
   
+acceleration:
+  target_blocks_per_sm: 8      # Initial SM fill target. Adaptive feedback adjusts this at runtime.
+  bps_min: 2                   # Minimum blocks per SM the feedback loop will reduce to.
+  bps_max: 16                  # Maximum blocks per SM the feedback loop will increase to.
+  energy_sample_every: 50      # Sample kernel elapsed time every N forward calls for feedback.
+  energy_fast_threshold_ms: 0.5  # Below this → kernel finishing fast → increase blocks.
+  energy_slow_threshold_ms: 2.0  # Above this → kernel too slow → decrease blocks.
+  block_size: 256              # CUDA threads per block. Power of 2. Rarely needs changing.
+
+runtime:
+  spike_rate_ewma_alpha: 0.1         # EWMA smoothing factor for SpikeRateBus (0–1, lower = smoother).
+  memory_allocator_overhead_mb: 512  # VRAM reserved for PyTorch caching allocator before zone split.
+  vram_dataset_cache_ratio: 0.40     # Fraction of budget for dataset cache (soft limit only).
+  vram_model_params_ratio: 0.30      # Fraction for model parameters (hard enforced).
+  vram_kernel_workspace_ratio: 0.20  # Fraction for kernel temporary buffers (hard enforced).
+  vram_emergency_ratio: 0.10         # Fraction held as emergency reserve and cuMemPool floor.
+  gpu_pressure_threshold: 0.75       # VRAM utilisation above which cache allocation is halved.
+
 compiler:
   torch_compile: false      # true → wrap model with torch.compile() (TorchInductor kernel fusion).
                             # First run is slower (compilation overhead); subsequent runs are faster.

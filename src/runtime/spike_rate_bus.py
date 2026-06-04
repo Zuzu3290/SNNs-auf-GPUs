@@ -17,20 +17,21 @@ class SpikeRateBus:
     EWMA formula:  rate(t) = α × raw(t) + (1−α) × rate(t−1),  α = 0.1
     """
 
-    ALPHA    = 0.1
     singleton: "SpikeRateBus | None" = None
     class_lock = threading.Lock()
 
-    def __init__(self) -> None:
-        self.ema  = 0.0   # EWMA-smoothed spike rate
-        self.raw  = 0.0   # last unsmoothed sample
-        self.lock = threading.Lock()
+    def __init__(self, alpha: float = 0.1) -> None:
+        self.ALPHA = alpha
+        self.ema   = 0.0   # EWMA-smoothed spike rate
+        self.raw   = 0.0   # last unsmoothed sample
+        self.lock  = threading.Lock()
 
     @classmethod
-    def get(cls) -> "SpikeRateBus":
+    def get(cls, alpha: float = 0.1) -> "SpikeRateBus":
+        """Return the singleton. First call sets alpha — subsequent calls ignore it."""
         with cls.class_lock:
             if cls.singleton is None:
-                cls.singleton = cls()
+                cls.singleton = cls(alpha)
             return cls.singleton
 
     def push_dense(self, spikes: torch.Tensor) -> None:

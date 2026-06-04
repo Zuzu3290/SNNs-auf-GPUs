@@ -20,7 +20,7 @@ class Zone(IntEnum):
     EMERGENCY        = 3
 
 
-ZONE_RATIOS: Dict[Zone, float] = {
+DEFAULT_ZONE_RATIOS: Dict[Zone, float] = {
     Zone.DATASET_CACHE:    0.40,
     Zone.MODEL_PARAMS:     0.30,
     Zone.KERNEL_WORKSPACE: 0.20,
@@ -53,16 +53,21 @@ class MemoryArbiter:
 
     registry: Dict[int, "MemoryArbiter"] = {}
     class_lock = threading.Lock()
+    pending_ratios: Dict[Zone, float] = {}
+    pending_overhead_mb: int = 512
 
-    def __init__(self, device_idx: int = 0) -> None:
+    def __init__(self, device_idx: int = 0,
+                 zone_ratios: Dict[Zone, float] | None = None,
+                 overhead_mb: int = 512) -> None:
         self.device_idx = device_idx
         self.lock       = threading.Lock()
 
+        ratios = zone_ratios if zone_ratios else DEFAULT_ZONE_RATIOS
         free_bytes, total_bytes = torch.cuda.mem_get_info(device_idx)
-        budget_mb = (total_bytes - 512 * 1024 * 1024) / (1024.0 * 1024.0)
+        budget_mb = (total_bytes - overhead_mb * 1024 * 1024) / (1024.0 * 1024.0)
 
         self.zones: Dict[Zone, ZoneRecord] = {}
-        for z, ratio in ZONE_RATIOS.items():
+        for z, ratio in ratios.items():
             soft = budget_mb * ratio
             self.zones[z] = ZoneRecord(
                 name          = z.name.lower(),
@@ -71,10 +76,27 @@ class MemoryArbiter:
             )
 
     @classmethod
+    def configure(cls, dataset_ratio: float, model_ratio: float,
+                  workspace_ratio: float, emergency_ratio: float,
+                  overhead_mb: int = 512) -> None:
+        """Call before get() to set ratios from SNN_module.yaml. No-op after first get()."""
+        cls.pending_ratios = {
+            Zone.DATASET_CACHE:    dataset_ratio,
+            Zone.MODEL_PARAMS:     model_ratio,
+            Zone.KERNEL_WORKSPACE: workspace_ratio,
+            Zone.EMERGENCY:        emergency_ratio,
+        }
+        cls.pending_overhead_mb = overhead_mb
+
+    @classmethod
     def get(cls, device_idx: int = 0) -> "MemoryArbiter":
         with cls.class_lock:
             if device_idx not in cls.registry:
-                cls.registry[device_idx] = cls(device_idx)
+                cls.registry[device_idx] = cls(
+                    device_idx,
+                    zone_ratios = cls.pending_ratios if cls.pending_ratios else None,
+                    overhead_mb = cls.pending_overhead_mb,
+                )
             return cls.registry[device_idx]
 
     def soft_limit_mb(self, zone: Zone) -> float:

@@ -77,6 +77,12 @@ class SNNTrainer:
                 import snn_forward as km  # type: ignore[import]
                 self.kernel_module = km
                 self.use_custom_kernel = True
+                km.set_dispatch_config(
+                    cfg.BPS_MIN, cfg.BPS_MAX,
+                    cfg.ENERGY_SAMPLE_EVERY,
+                    cfg.ENERGY_FAST_THRESHOLD_MS,
+                    cfg.ENERGY_SLOW_THRESHOLD_MS,
+                )
                 self._report_kernel_compatibility()
             except ImportError:
                 print("[kernel] snn_forward not built — run: python src/learning/setup.py build_ext --inplace")
@@ -89,7 +95,20 @@ class SNNTrainer:
         self.epoch_log       = []
 
         self.phase_mgr = PhaseManager.get()
-        self.rate_bus  = SpikeRateBus.get()
+        self.rate_bus  = SpikeRateBus.get(alpha=cfg.SPIKE_RATE_EWMA_ALPHA)
+
+        # Push YAML runtime config into MemoryArbiter before any subsystem calls get()
+        try:
+            from runtime import MemoryArbiter, Zone
+            MemoryArbiter.configure(
+                dataset_ratio   = cfg.VRAM_DATASET_CACHE_RATIO,
+                model_ratio     = cfg.VRAM_MODEL_PARAMS_RATIO,
+                workspace_ratio = cfg.VRAM_KERNEL_WORKSPACE_RATIO,
+                emergency_ratio = cfg.VRAM_EMERGENCY_RATIO,
+                overhead_mb     = cfg.MEMORY_ALLOCATOR_OVERHEAD_MB,
+            )
+        except Exception:
+            pass
 
         device_idx = (device.index or 0) if device.type == "cuda" else 0
         self.gpu_stats = GPUStats(device_idx=device_idx)
@@ -227,7 +246,10 @@ class SNNTrainer:
         v_th    = float(self.cfg.THRESHOLD)
 
         if self.kernel_mode == "warp_oriented":
-            spikes, _, _ = kernel.warp_oriented_forward(inp, self._voltage_buf, v_th, tau_inv)
+            spikes, _, _ = kernel.warp_oriented_forward(
+                inp, self._voltage_buf, v_th, tau_inv,
+                self.cfg.TARGET_BLOCKS_PER_SM,
+            )
         elif self.kernel_mode == "temporal":
             spikes = kernel.temporal_forward(inp, self._voltage_buf, v_th, tau_inv)
         else:

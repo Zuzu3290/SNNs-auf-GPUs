@@ -68,6 +68,26 @@ class Settings:
         self.STDP_A_PLUS  = float(training.get("stdp_a_plus", 0.01))
         self.STDP_A_MINUS = float(training.get("stdp_a_minus", 0.01))
 
+        # Acceleration (kernel dispatch tuning)
+        accel = self.config.get("acceleration", {})
+        self.TARGET_BLOCKS_PER_SM       = int(accel.get("target_blocks_per_sm",       8))
+        self.BPS_MIN                    = int(accel.get("bps_min",                    2))
+        self.BPS_MAX                    = int(accel.get("bps_max",                    16))
+        self.ENERGY_SAMPLE_EVERY        = int(accel.get("energy_sample_every",        50))
+        self.ENERGY_FAST_THRESHOLD_MS   = float(accel.get("energy_fast_threshold_ms", 0.5))
+        self.ENERGY_SLOW_THRESHOLD_MS   = float(accel.get("energy_slow_threshold_ms", 2.0))
+        self.BLOCK_SIZE                 = int(accel.get("block_size",                 256))
+
+        # Runtime coordination layer
+        rt = self.config.get("runtime", {})
+        self.SPIKE_RATE_EWMA_ALPHA          = float(rt.get("spike_rate_ewma_alpha",          0.1))
+        self.MEMORY_ALLOCATOR_OVERHEAD_MB   = int(rt.get("memory_allocator_overhead_mb",     512))
+        self.VRAM_DATASET_CACHE_RATIO       = float(rt.get("vram_dataset_cache_ratio",       0.40))
+        self.VRAM_MODEL_PARAMS_RATIO        = float(rt.get("vram_model_params_ratio",        0.30))
+        self.VRAM_KERNEL_WORKSPACE_RATIO    = float(rt.get("vram_kernel_workspace_ratio",    0.20))
+        self.VRAM_EMERGENCY_RATIO           = float(rt.get("vram_emergency_ratio",           0.10))
+        self.GPU_PRESSURE_THRESHOLD         = float(rt.get("gpu_pressure_threshold",         0.75))
+
         # Compiler
         self.TORCH_COMPILE = bool(compiler.get("torch_compile", False))
 

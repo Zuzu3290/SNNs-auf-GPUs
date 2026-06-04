@@ -151,12 +151,28 @@ static torch::Tensor dispatch_accelerated(
 // ---------------------------------------------------------------------------
 
 // Process-wide adaptive state — persists across forward calls.
-static float    s_last_elapsed_ms = 0.f;
-static int      s_blocks_per_sm   = 8;
-static unsigned s_call_count      = 0;
-static const int   s_bps_min      = 2;
-static const int   s_bps_max      = 16;
-static const unsigned s_sample_every = 50;  // time GPU every N calls, not every call
+// All values are configurable via snn_set_dispatch_config() called at trainer init.
+static float    s_last_elapsed_ms       = 0.f;
+static int      s_blocks_per_sm         = 8;
+static unsigned s_call_count            = 0;
+static int      s_bps_min               = 2;
+static int      s_bps_max               = 16;
+static unsigned s_sample_every          = 50;
+static float    s_fast_threshold_ms     = 0.5f;
+static float    s_slow_threshold_ms     = 2.0f;
+
+// Called once at trainer init to propagate SNN_module.yaml acceleration values.
+void snn_set_dispatch_config(int bps_min, int bps_max, int sample_every,
+                             float fast_threshold_ms, float slow_threshold_ms) {
+    s_bps_min           = bps_min;
+    s_bps_max           = bps_max;
+    s_sample_every      = static_cast<unsigned>(sample_every);
+    s_fast_threshold_ms = fast_threshold_ms;
+    s_slow_threshold_ms = slow_threshold_ms;
+    s_blocks_per_sm     = (bps_min + bps_max) / 2;  // reset to midpoint on reconfigure
+    s_call_count        = 0;
+    s_last_elapsed_ms   = 0.f;
+}
 
 static torch::Tensor dispatch_warp_oriented(
     const KernelConfig& cfg,
@@ -181,9 +197,9 @@ static torch::Tensor dispatch_warp_oriented(
     // --- Energy feedback: adapt blocks_per_sm from sampled elapsed -----
     // Only update when we have a real measurement (from a timed call).
     if (s_last_elapsed_ms > 0.f) {
-        if      (s_last_elapsed_ms < 0.5f && s_blocks_per_sm < s_bps_max)
+        if      (s_last_elapsed_ms < s_fast_threshold_ms && s_blocks_per_sm < s_bps_max)
             s_blocks_per_sm++;
-        else if (s_last_elapsed_ms > 2.0f && s_blocks_per_sm > s_bps_min)
+        else if (s_last_elapsed_ms > s_slow_threshold_ms && s_blocks_per_sm > s_bps_min)
             s_blocks_per_sm--;
     }
 

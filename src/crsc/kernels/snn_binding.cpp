@@ -35,6 +35,10 @@ lif_temporal_ballot_cuda(
     float tau_inv
 );
 
+// --- engine.cu dispatch config ---
+void snn_set_dispatch_config(int bps_min, int bps_max, int sample_every,
+                             float fast_threshold_ms, float slow_threshold_ms);
+
 // --- lif_warp_oriented.cu ---
 #include "lif_warp_oriented.h"
 
@@ -79,6 +83,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("voltage"),
           py::arg("v_th")    = 1.0f,
           py::arg("tau_inv") = 0.1f);
+
+    // ---- Dispatch config — call once at trainer init to push YAML values into engine.cu ----
+    m.def("set_dispatch_config",
+          &snn_set_dispatch_config,
+          "Push acceleration config from SNN_module.yaml into the engine.cu adaptive state.\n"
+          "Call once after loading the module, before the first forward pass.",
+          py::arg("bps_min"),
+          py::arg("bps_max"),
+          py::arg("sample_every"),
+          py::arg("fast_threshold_ms"),
+          py::arg("slow_threshold_ms"));
 
     // ---- Warp-oriented: async hot path (no CPU-GPU sync) ----
     m.def("warp_oriented_forward",
