@@ -1,8 +1,8 @@
 import yaml
 from pathlib import Path
 
-DEFAULT_YAML      = Path(__file__).parent.parent / "SNN_module.yaml"
-NETWORK_ARCH_YAML = Path(__file__).parent.parent / "network_architecture.yaml"
+DEFAULT_YAML      = Path(__file__).parent.parent / "configuration" / "SNN_module.yaml"
+NETWORK_ARCH_YAML = Path(__file__).parent.parent / "configuration" / "network_architecture.yaml"
 
 
 class Settings:
@@ -27,7 +27,6 @@ class Settings:
         self.HIDDEN_SIZE             = int(architecture.get("hidden_size", 16))
         self.HIDDEN_LAYERS           = int(architecture.get("hidden_layers", 3))
         self.OUTPUT_SIZE             = int(architecture.get("output_size", 10))
-        self.THRESHOLD               = float(architecture.get("threshold", 0.5))
         self.LEAK                    = float(architecture.get("leak", 1.0))
         self.OVERRIDE                = bool(architecture.get("override", False))
         self.NETWORK_STRUCT          = architecture.get("network_struct", "S")
@@ -55,8 +54,6 @@ class Settings:
         self.NEURON_TYPES = network_arch.get("neuron_types", {})
 
         # Training parameters
-        self.LOSS_FUNCTION            = training.get("loss_function", "CrossEntropy")
-        self.OPTIMIZER                = training.get("optimizer", "Adam")
         self.EPOCHS                   = int(training.get("epochs", 10))
         self.ITERA                    = int(training.get("iterations_per_epoch", 100))
         self.TIMESTEPS                = int(training.get("timesteps", 25))
@@ -207,7 +204,7 @@ class Settings:
         print(f"Epochs               : {self.EPOCHS}")
         print(f"Device               : {self.DEVICE}")
         print(f"Kernel               : {self.KERNEL}")
-        print(f"Threshold            : {self.THRESHOLD}")
+        print(f"Threshold            : {self.FRAMEWORK_CFG[self.FRAMEWORK]['threshold']}")
         print(f"FC_IN (auto)         : {self.FC_IN}")
         print(f"torch.compile        : {'ENABLED' if self.TORCH_COMPILE else 'DISABLED'}")
 

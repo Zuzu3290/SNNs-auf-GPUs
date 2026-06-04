@@ -3,7 +3,6 @@ architecture:
   hidden_size: 50
   hidden_layers: 5
   output_size: 10
-  threshold: 0.5
   leak: 1.0
   override: false
   network_struct: S
@@ -14,13 +13,10 @@ training:
   kernel: OFF                   # ON → use the compiled CRSC CUDA kernel for LIF forward pass.
                                 # Requires: python src/learning/setup.py build_ext --inplace
   framework: norse           # YAML selector: norse | torch | sj
-  loss_function: CrossEntropy
-  optimizer: Adam
   epochs: 2
   iterations_per_epoch: 100
   timesteps: 25
   batch_size: 128
-  beta: 0.95
   nap_times: 1
   learning_rate: 0.001
   weight_decay: 0.0001

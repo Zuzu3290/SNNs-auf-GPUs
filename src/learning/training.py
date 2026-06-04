@@ -120,10 +120,11 @@ class SNNTrainer:
 
         kernel  = self.kernel_module
         assert kernel is not None
-        tau_inv = 1.0 - float(self.cfg.BETA)
-        spikes  = kernel.forward(
+        tau_inv   = 1.0 - float(self.cfg.BETA)
+        threshold = float(self.cfg.FRAMEWORK_CFG[self.cfg.FRAMEWORK]["threshold"])
+        spikes    = kernel.forward(
             inp, self._voltage_buf,
-            float(self.cfg.THRESHOLD), tau_inv,
+            threshold, tau_inv,
         )                                              # [B, N, T]
         return spikes.permute(2, 0, 1).contiguous()   # [T, B, N]
 

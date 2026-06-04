@@ -1,7 +1,7 @@
 import yaml
 from pathlib import Path
 
-DEFAULT_YAML = Path(__file__).parent / "data_workflow.yaml"
+DEFAULT_YAML = Path(__file__).parent.parent / "configuration" / "data_workflow.yaml"
 
 
 class WorkflowSettings:
