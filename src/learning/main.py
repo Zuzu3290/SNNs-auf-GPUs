@@ -1,6 +1,5 @@
 import sys
 import os
-import argparse
 from pathlib import Path
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -32,15 +31,6 @@ _MODELS = {
 }
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train an SNN model")
-    parser.add_argument(
-        "--model",
-        choices=_MODELS.keys(),
-        default="norse",
-        help="Model backend: norse | torch | sj  (default: norse)",
-    )
-    args = parser.parse_args()
-
     os.makedirs("./checkpoints", exist_ok=True)
 
     cfg    = Settings()
@@ -49,8 +39,13 @@ if __name__ == "__main__":
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model = _MODELS[args.model](cfg)
-    print(f"\n  Model backend  : {args.model.upper()}")
+    ModelClass = _MODELS.get(cfg.FRAMEWORK)
+    if ModelClass is None:
+        raise ValueError(
+            f"Unknown framework '{cfg.FRAMEWORK}'. Valid: {list(_MODELS)}"
+        )
+    model = ModelClass(cfg)
+    print(f"\n  Model backend  : {cfg.FRAMEWORK.upper()}")
 
     if cfg.TORCH_COMPILE:
         model = compile_model(model, cfg)

@@ -52,11 +52,12 @@ class NeuromorphicEncoder:
         events_per_slice    : Switch to event-driven slicing (ignores slice_duration_ms)
     """
 
-    def __init__(self, cfg: Settings, use_temporal_slicing: bool = False, slice_duration_ms: float = None, auto_tune_slicing: bool = False, events_per_slice: int = None ):
+    def __init__(self, cfg: Settings, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None, auto_tune_slicing: bool = False, events_per_slice: int | None = None):
 
         self.cfg = cfg
-        self.wf = WorkflowSettings()
-        self.use_temporal_slicing = use_temporal_slicing
+        self.wf  = WorkflowSettings()
+        # Explicit param overrides YAML; None means "read from data_workflow.yaml"
+        self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else self.wf.TEMPORAL_SLICING_ENABLED
         self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)
         self.auto_tune_slicing = auto_tune_slicing
         self.events_per_slice = events_per_slice
@@ -99,7 +100,11 @@ class NeuromorphicEncoder:
         self.validate_first_sample(raw_test, "test")
         logger.info(f"[PIPELINE] First train sample size: {train_sample_bytes / 1024:.1f} KB — dataset non-empty, proceeding to cache strategy")
 
-        frame_tf = transforms.Compose([transforms.Denoise(filter_time=10000), transforms.ToFrame(sensor_size=sensor_size, time_window=time_window)])
+        if self.wf.FRAME_MODE == "n_time_bins":
+            to_frame = transforms.ToFrame(sensor_size=sensor_size, n_time_bins=self.wf.N_TIME_BINS)
+        else:
+            to_frame = transforms.ToFrame(sensor_size=sensor_size, time_window=self.wf.TIME_WINDOW_US)
+        frame_tf = transforms.Compose([transforms.Denoise(filter_time=10000), to_frame])
         return raw_train, raw_test, frame_tf
 
     def apply_pipeline(self, raw_train, raw_test, frame_tf):

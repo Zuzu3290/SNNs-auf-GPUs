@@ -23,6 +23,7 @@ psutil>=5.9
 # Spiking Neural Network frameworks (choose one or both)
 snntorch>=0.9.1          # primary SNN library
 norse>=0.0.7             # Norse SNN framework
+spikingjelly>=0.0.0.0.14 # SpikingJelly SNN framework
 
 # Event camera drivers (uncomment the one matching your hardware)
 # pyaer>=0.1.2           # iniVation DAVIS / DVS cameras

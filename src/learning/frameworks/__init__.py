@@ -1,6 +1,12 @@
+<<<<<<< HEAD
 # Lazy imports — each framework loads only when first accessed.
 # Importing this package does not pull in snntorch, norse, or spikingjelly
 # until the specific class is actually used.
+=======
+from .snn_torch import SNN_TORCH
+from .snn_norse import SNN_NORSE
+from .snn_spikingjelly import SNN_SJ
+>>>>>>> main
 
 def __getattr__(name: str):
     if name == "SNN_TORCH":

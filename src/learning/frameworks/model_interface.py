@@ -58,6 +58,18 @@ class ModelInterface(ABC):
     def get_state(self) -> dict:
         """Return serialisable state for checkpointing via torch.save()."""
 
+    def tensor_format(self) -> str:
+        """
+        Tensor layout this model's forward() expects from the DataLoader.
+
+        "TB" — [T, B, C, H, W]  time-first  (default — SNNTorch, Norse, SpikingJelly)
+        "BT" — [B, T, C, H, W]  batch-first
+
+        The trainer transposes automatically before calling forward().
+        Only override this if your framework needs batch-first input.
+        """
+        return "TB"
+
     def reset_state(self) -> None:
         """Reset hidden neuron state between sequences. Override if needed."""
 

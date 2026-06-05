@@ -3,7 +3,6 @@ architecture:
   hidden_size: 50
   hidden_layers: 5
   output_size: 10
-  threshold: 0.5
   leak: 1.0
   override: false
   network_struct: S
@@ -19,13 +18,11 @@ training:
                                 # warp_oriented — SM-saturating grid-stride, adaptive energy feedback (recommended).
   kernel_profile_energy: false  # Wrap timed calls with CUDA event energy estimation.
                                 # Requires NVML on the GPU tier (not available on free Colab T4).
-  loss_function: CrossEntropy
-  optimizer: Adam
+  framework: norse           # YAML selector: norse | torch | sj
   epochs: 2
   iterations_per_epoch: 100
   timesteps: 25
   batch_size: 128
-  beta: 0.95
   nap_times: 1
   learning_rate: 0.001
   weight_decay: 0.0001
@@ -89,3 +86,25 @@ output:
   output_dir: ./outputs
   plot_dir: ./outputs/plots
   data_dir: ./outputs/data
+
+# Per-framework neuron / optimiser / loss params.
+# threshold=0.5: SNNTorch amplifies input 20x (V_eq=20I), Norse/SpikingJelly do not (V_eq=I).
+# threshold=1.0 kills Norse (dead neurons, confirmed EXP-004). 0.5 is a safe neutral starting point.
+frameworks:
+  snntorch:
+    beta:       0.95
+    threshold:  0.5
+    optimizer:  adam
+    loss_fn:    mse_count
+
+  norse:
+    tau_mem_inv: 100.0
+    threshold:   0.5
+    optimizer:   adam
+    loss_fn:     cross_entropy
+
+  spikingjelly:
+    tau:         2.0
+    threshold:   0.5
+    optimizer:   adam
+    loss_fn:     cross_entropy

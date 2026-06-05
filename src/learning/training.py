@@ -218,9 +218,15 @@ class SNNTrainer:
         """Single forward pass. Routes through the custom CRSC CUDA kernel when
         kernel: ON is set in SNN_module.yaml, otherwise uses the framework model."""
         if not self.use_custom_kernel:
+<<<<<<< HEAD
             result = self.model(data)
             self.rate_bus.push_dense(result.detach())
             return result
+=======
+            if self.model.tensor_format() == "BT":
+                data = data.permute(1, 0, 2, 3, 4).contiguous()
+            return self.model(data)
+>>>>>>> main
 
         # Custom kernel expects [B, N, T]; typical neuromorphic data is [T, B, C, H, W]
         if data.dim() == 5:
@@ -238,8 +244,9 @@ class SNNTrainer:
         if self._voltage_buf is None or self._voltage_buf.shape != (B_sz, N_sz):
             self._voltage_buf = torch.zeros(B_sz, N_sz, device=self.device)
 
-        kernel  = self.kernel_module
+        kernel    = self.kernel_module
         assert kernel is not None
+<<<<<<< HEAD
         tau_inv = 1.0 - float(self.cfg.BETA)
         v_th    = float(self.cfg.THRESHOLD)
 
@@ -254,6 +261,23 @@ class SNNTrainer:
             spikes = kernel.forward(inp, self._voltage_buf, v_th, tau_inv)
 
         self.rate_bus.push_dense(spikes.detach())
+=======
+        fw_cfg    = self.cfg.active_fw_cfg
+        fw        = self.cfg.FRAMEWORK
+        if fw == "torch":
+            tau_inv = 1.0 - float(fw_cfg["beta"])
+        elif fw == "norse":
+            tau_inv = float(fw_cfg["tau_mem_inv"])
+        elif fw == "sj":
+            tau_inv = 1.0 / float(fw_cfg["tau"])
+        else:
+            raise ValueError(f"Custom kernel: no tau_inv mapping for framework '{fw}'. Add it here.")
+        threshold = float(fw_cfg["threshold"])
+        spikes    = kernel.forward(
+            inp, self._voltage_buf,
+            threshold, tau_inv,
+        )                                              # [B, N, T]
+>>>>>>> main
         return spikes.permute(2, 0, 1).contiguous()   # [T, B, N]
 
     def save_checkpoint(self, path: str):
