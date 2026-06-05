@@ -54,9 +54,10 @@ class SNNTester:
 
         kernel = self.kernel_module
         assert kernel is not None
-        spikes = kernel.forward(
+        threshold = float(self.cfg.active_fw_cfg["threshold"])
+        spikes    = kernel.forward(
             inp, self._voltage_buf,
-            float(self.cfg.THRESHOLD), 1.0 - float(self.cfg.BETA),
+            threshold, 1.0 - float(self.cfg.BETA),
         )
         return spikes.permute(2, 0, 1).contiguous()
 

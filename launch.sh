@@ -1,31 +1,26 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────
 # SNN Training Launcher
+# Framework is set via training.framework in configuration/SNN_module.yaml
 #
-# Usage:
-#   ./launch.sh              # defaults to norse
-#   ./launch.sh norse
-#   ./launch.sh torch
-#   ./launch.sh sj
+# Usage (local):
+#   ./launch.sh
+#
+# Usage (Colab):
+#   !bash /content/SNNs-auf-GPUs/launch.sh
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-MODEL="${1:-norse}"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-case "$MODEL" in
-    norse|torch|sj) ;;
-    *)
-        echo "Unknown model: '$MODEL'"
-        echo "Valid options: norse | torch | sj"
-        exit 1
-        ;;
-esac
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Make project root (skeleton, event_data_workflow) and src/ (learning, compiler) importable.
+export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "──────────────────────────────────────────"
-echo "  Model backend  : ${MODEL^^}"
-echo "  Script         : $SCRIPT_DIR/learning/main.py"
+echo "  SNN Training Launcher"
+echo "  Framework set via:"
+echo "  configuration/SNN_module.yaml"
+echo "  PYTHONPATH : $PYTHONPATH"
 echo "──────────────────────────────────────────"
 
-python "$SCRIPT_DIR/learning/main.py" --model "$MODEL"
+python3 "$PROJECT_ROOT/src/learning/main.py"
