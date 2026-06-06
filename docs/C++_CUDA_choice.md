@@ -1,3 +1,6 @@
+<<<<<<< HEAD
+ this is the precise architectural reason why C++/CUDA was the right choice, not just a performance preference.
+=======
 # C++/CUDA vs JAX/XLA — Architectural Choice
 
 This document explains why C++/CUDA was chosen over JAX/XLA for this codebase.
@@ -69,6 +72,7 @@ source of training bugs in PyTorch, do not exist in JAX by design.
 ## Where C++/CUDA is the only option — the original analysis
 
 This is the precise architectural reason why C++/CUDA was the right choice, not just a performance preference.
+>>>>>>> Operators
 
 The specific capabilities that make our system what it is sit below where XLA operates. XLA is a compiler that transforms HLO operations into GPU code. It cannot express nor expose what lives at the CUDA driver and runtime level. Here is exactly what is exclusive to our implementation:
 

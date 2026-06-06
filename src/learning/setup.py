@@ -14,6 +14,8 @@ HERE      = os.path.dirname(os.path.abspath(__file__))
 ROOT      = os.path.abspath(os.path.join(HERE, '..', '..'))
 GPU_ATTRS = os.path.join(ROOT, 'acceleration', 'GPU_attributes')
 CRSC_KERN = os.path.join(ROOT, 'src', 'crsc', 'kernels')
+RUNTIME   = os.path.join(ROOT, 'src', 'runtime')
+SKEL      = os.path.join(ROOT, 'skeleton')
 
 def get_compute_capability_from_nvidia_smi():
     """Auto-detect GPU compute capability from nvidia-smi."""
@@ -95,6 +97,18 @@ setup(
                 os.path.join(CRSC_KERN, "snn_forward.cu"),
             ],
             include_dirs=[GPU_ATTRS] + _cuda_inc,
+            extra_compile_args={"cxx": _cxx_flags, "nvcc": _nvcc_flags},
+        ),
+        # --- Runtime extension: CUDAMemoryArbiter + cuMemPool API -------
+        CUDAExtension(
+            name="snn_runtime",
+            sources=[
+                os.path.join(RUNTIME,   "runtime_binding.cpp"),
+                os.path.join(GPU_ATTRS, "memory_arbiter.cu"),
+                os.path.join(SKEL,      "gpu_diagnostics.cu"),
+            ],
+            include_dirs=[GPU_ATTRS, SKEL] + _cuda_inc,
+            extra_compile_args={"cxx": _cxx_flags, "nvcc": _nvcc_flags},
             extra_compile_args={
                 "cxx":  ["-O3", "/Zc:preprocessor"],
                 "nvcc": ["-O3", "--use_fast_math", "-allow-unsupported-compiler", f"-gencode=arch=compute_{compute_arch},code=sm_{compute_arch}", "-Xcompiler=/Zc:preprocessor"],
