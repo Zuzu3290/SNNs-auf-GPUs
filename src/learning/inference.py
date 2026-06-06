@@ -23,7 +23,7 @@ class SNNTester:
         self.batch_log   = []
         self.kernel_module = None
         self.use_custom_kernel = False
-        self.kernel_mode = cfg.KERNEL_MODE
+        self.kernel_mode = cfg.KERNEL
         if cfg.KERNEL == "ON":
             try:
                 import snn_forward as km  # type: ignore[import]
