@@ -10,7 +10,7 @@ architecture:
   simulator: ON
 
 training:
-  kernel: OFF                   # ON → use the compiled CRSC CUDA kernel for LIF forward pass.
+  kernel: ON                   # ON → use the compiled CRSC CUDA kernel for LIF forward pass.
                                 # Requires: python src/learning/setup.py build_ext --inplace
   kernel_mode: warp_oriented    # Which kernel path to use when kernel: ON.
                                 # basic         — fixed 256-thread LIF, benchmark reference.
@@ -19,8 +19,8 @@ training:
   kernel_profile_energy: false  # Wrap timed calls with CUDA event energy estimation.
                                 # Requires NVML on the GPU tier (not available on free Colab T4).
   framework: norse           # YAML selector: norse | torch | sj
-  epochs: 2
-  iterations_per_epoch: 100
+  epochs: 5
+  iterations_per_epoch: 200
   timesteps: 25
   batch_size: 128
   nap_times: 1

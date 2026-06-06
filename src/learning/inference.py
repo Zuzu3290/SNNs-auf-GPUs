@@ -23,7 +23,7 @@ class SNNTester:
         self.batch_log   = []
         self.kernel_module = None
         self.use_custom_kernel = False
-        self.kernel_mode = cfg.KERNEL_MODE
+        self.kernel_mode = cfg.KERNEL
         if cfg.KERNEL == "ON":
             try:
                 import snn_forward as km  # type: ignore[import]
@@ -55,7 +55,6 @@ class SNNTester:
 
         kernel  = self.kernel_module
         assert kernel is not None
-<<<<<<< HEAD
         v_th    = float(self.cfg.THRESHOLD)
         tau_inv = 1.0 - float(self.cfg.BETA)
 
@@ -66,13 +65,6 @@ class SNNTester:
         else:
             spikes = kernel.forward(inp, self._voltage_buf, v_th, tau_inv)
 
-=======
-        threshold = float(self.cfg.active_fw_cfg["threshold"])
-        spikes    = kernel.forward(
-            inp, self._voltage_buf,
-            threshold, 1.0 - float(self.cfg.BETA),
-        )
->>>>>>> main
         return spikes.permute(2, 0, 1).contiguous()
 
     def class_metrics(self, cm: np.ndarray) -> list[dict]:

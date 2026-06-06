@@ -71,7 +71,7 @@ class SNNTrainer:
         self.device       = device
         self.kernel_module = None
         self.use_custom_kernel = False
-        self.kernel_mode = cfg.KERNEL_MODE  # basic | temporal | warp_oriented
+        self.kernel_mode = cfg.KERNEL
         if cfg.KERNEL == "ON":
             try:
                 import sys as _sys
@@ -218,15 +218,12 @@ class SNNTrainer:
         """Single forward pass. Routes through the custom CRSC CUDA kernel when
         kernel: ON is set in SNN_module.yaml, otherwise uses the framework model."""
         if not self.use_custom_kernel:
-<<<<<<< HEAD
             result = self.model(data)
             self.rate_bus.push_dense(result.detach())
             return result
-=======
-            if self.model.tensor_format() == "BT":
-                data = data.permute(1, 0, 2, 3, 4).contiguous()
+        if self.model.tensor_format() == "BT":
+            data = data.permute(1, 0, 2, 3, 4).contiguous()
             return self.model(data)
->>>>>>> main
 
         # Custom kernel expects [B, N, T]; typical neuromorphic data is [T, B, C, H, W]
         if data.dim() == 5:
@@ -246,7 +243,6 @@ class SNNTrainer:
 
         kernel    = self.kernel_module
         assert kernel is not None
-<<<<<<< HEAD
         tau_inv = 1.0 - float(self.cfg.BETA)
         v_th    = float(self.cfg.THRESHOLD)
 
@@ -261,7 +257,6 @@ class SNNTrainer:
             spikes = kernel.forward(inp, self._voltage_buf, v_th, tau_inv)
 
         self.rate_bus.push_dense(spikes.detach())
-=======
         fw_cfg    = self.cfg.active_fw_cfg
         fw        = self.cfg.FRAMEWORK
         if fw == "torch":
@@ -277,7 +272,6 @@ class SNNTrainer:
             inp, self._voltage_buf,
             threshold, tau_inv,
         )                                              # [B, N, T]
->>>>>>> main
         return spikes.permute(2, 0, 1).contiguous()   # [T, B, N]
 
     def save_checkpoint(self, path: str):
