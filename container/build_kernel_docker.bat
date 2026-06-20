@@ -6,7 +6,7 @@ setlocal enabledelayedexpansion
 
 set IMAGE_NAME=snn-cuda-kernel-builder
 set CONTAINER_NAME=snn-kernel-build
-set REPO_PATH=%cd%
+set REPO_PATH=%~dp0..
 
 echo ============================================
 echo SNN CUDA Kernel - Docker Build Environment
@@ -16,7 +16,7 @@ echo Step 1: Building Docker image...
 echo Image: %IMAGE_NAME%
 echo.
 
-docker build -t %IMAGE_NAME%:latest .
+docker build -t %IMAGE_NAME%:latest -f "%~dp0Dockerfile" "%REPO_PATH%"
 
 if errorlevel 1 (
     echo ERROR: Docker build failed
@@ -48,7 +48,7 @@ echo ============================================
 echo.
 echo Next steps:
 echo 1. Enable kernel in configuration/SNN_module.yaml (set kernel: ON)
-echo 2. Run: python src/learning/main.py
+echo 2. Run: launch.bat  (from repo root)
 echo.
 
 endlocal

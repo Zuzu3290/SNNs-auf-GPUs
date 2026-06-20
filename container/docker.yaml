@@ -1,0 +1,13 @@
+services:
+  snn-cuda-kernel-builder:
+    build:
+      context: ..
+      dockerfile: container/Dockerfile
+    image: snn-cuda-kernel-builder:latest
+    container_name: snn-kernel-build
+    volumes:
+      - ..:/workspace
+    gpus: all
+    stdin_open: true
+    tty: true
+    command: bash -c "cd /workspace && python src/learning/setup.py build_ext --inplace && bash"
