@@ -12,7 +12,7 @@ architecture:
 training:
   kernel: OFF                   # ON → use the compiled CRSC CUDA kernel for LIF forward pass.
                                 # Requires: python src/learning/setup.py build_ext --inplace
-  framework: norse           # YAML selector: norse | torch | sj
+  framework: norse           # YAML selector: norse | torch | sj | sinabs | bindsnet | spyx
   epochs: 2
   iterations_per_epoch: 100
   timesteps: 25
@@ -84,3 +84,32 @@ frameworks:
     threshold:   0.5
     optimizer:   adam
     loss_fn:     cross_entropy
+
+  sinabs:
+    tau_mem:     20.0
+    threshold:   0.5
+    optimizer:   adam
+    loss_fn:     cross_entropy
+
+  bindsnet:
+    nu_pre:      0.0001    # STDP pre-synaptic (LTP) learning rate
+    nu_post:     0.01      # STDP post-synaptic (LTD) learning rate
+    threshold:   0.5       # informational only — BindsNET's own -52.0/-65.0 mV neuron defaults are used internally
+    optimizer:   none      # no backprop — weights update via STDP inside forward()
+    loss_fn:     cross_entropy
+
+  spyx:
+    beta:        0.9
+    gamma:       0.9        # ALIF adaptation rate (only used when neuron_types.spyx.* = alif)
+    threshold:   0.5
+    optimizer:   adam
+    loss_fn:     cross_entropy
+
+  lava:                     # UNVERIFIED backend — see src/learning/frameworks/snn_lava.py
+    threshold:      1.25
+    current_decay:  0.25
+    voltage_decay:  0.03
+    tau_grad:       0.03
+    scale_grad:     3
+    optimizer:      adam
+    loss_fn:        cross_entropy
