@@ -6,9 +6,12 @@ NETWORK_ARCH_YAML = Path(__file__).parent.parent / "configuration" / "network_ar
 
 # Maps training.framework selector → FRAMEWORK_CFG / NEURON_TYPES key
 FW_TO_CFG_KEY = {
-    "torch": "snntorch",
-    "norse": "norse",
-    "sj":    "spikingjelly",
+    "torch":    "snntorch",
+    "norse":    "norse",
+    "sj":       "spikingjelly",
+    "sinabs":   "sinabs",
+    "bindsnet": "bindsnet",
+    "spyx":     "spyx",
 }
 
 
@@ -106,6 +109,9 @@ class Settings:
         snt = frameworks.get("snntorch",     {})
         nor = frameworks.get("norse",        {})
         spj = frameworks.get("spikingjelly", {})
+        sin = frameworks.get("sinabs",       {})
+        bds = frameworks.get("bindsnet",     {})
+        spx = frameworks.get("spyx",         {})
 
         self.FRAMEWORK_CFG = {
             "snntorch": {
@@ -125,6 +131,26 @@ class Settings:
                 "threshold": float(spj.get("threshold", 0.5)),
                 "optimizer": spj.get("optimizer", "adam"),
                 "loss_fn":   spj.get("loss_fn", "cross_entropy"),
+            },
+            "sinabs": {
+                "tau_mem":   float(sin.get("tau_mem", 20.0)),
+                "threshold": float(sin.get("threshold", 0.5)),
+                "optimizer": sin.get("optimizer", "adam"),
+                "loss_fn":   sin.get("loss_fn", "cross_entropy"),
+            },
+            "bindsnet": {
+                "nu_pre":    float(bds.get("nu_pre", 0.0001)),
+                "nu_post":   float(bds.get("nu_post", 0.01)),
+                "threshold": float(bds.get("threshold", 0.5)),
+                "optimizer": bds.get("optimizer", "none"),
+                "loss_fn":   bds.get("loss_fn", "cross_entropy"),
+            },
+            "spyx": {
+                "beta":      float(spx.get("beta", 0.9)),
+                "gamma":     float(spx.get("gamma", 0.9)),
+                "threshold": float(spx.get("threshold", 0.5)),
+                "optimizer": spx.get("optimizer", "adam"),
+                "loss_fn":   spx.get("loss_fn", "cross_entropy"),
             },
         }
 

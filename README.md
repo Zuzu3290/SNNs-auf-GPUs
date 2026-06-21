@@ -92,6 +92,25 @@ and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
 
 ---
 
+## Growing Analytics
+
+Diagnostic benchmark runs across framework backends are ongoing, with results
+and plots accumulating in [`docs/results/`](docs/results/). Latest snapshot:
+
+| Training Accuracy | Actual GPU Energy (Training) |
+|---|---|
+| ![accuracy curves](docs/results/plots/accuracy_curves.png) | ![training energy](docs/results/plots/train_energy.png) |
+
+| Spike Rate | Inference Latency per Sample |
+|---|---|
+| ![spike rate curves](docs/results/plots/spike_rate_curves.png) | ![test latency](docs/results/plots/test_latency.png) |
+
+See [`docs/results/README.md`](docs/results/README.md) for the full results
+table, all plots, caveats on what this run does and doesn't measure, and the
+real bugs this benchmarking work has already found and fixed.
+
+---
+
 ## Roadmap
 
 The kernel dispatch layer (`src/compiler/runtime.py`) is the next build target.

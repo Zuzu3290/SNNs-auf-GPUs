@@ -21,6 +21,14 @@ neuron_types:
     lif1:    izhikevich   # izhikevich | lif
     lif2:    izhikevich   # izhikevich | lif
     lif_out: izhikevich   # izhikevich | lif
+  sinabs:
+    lif1:    lif          # lif | iaf
+    lif2:    lif          # lif | iaf
+    lif_out: lif          # lif | iaf
+  spyx:
+    lif1:    lif          # lif | alif
+    lif2:    lif          # lif | alif
+    lif_out: lif          # lif | alif
 
 # Future: pure_snn:
 #   hidden_layers: [256, 128]

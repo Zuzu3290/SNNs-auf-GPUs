@@ -16,6 +16,9 @@ from skeleton import Settings
 from learning.frameworks.snn_torch import SNN_TORCH
 from learning.frameworks.snn_norse import SNN_NORSE
 from learning.frameworks.snn_spikingjelly import SNN_SJ
+from learning.frameworks.snn_sinabs import SNN_SINABS
+from learning.frameworks.snn_bindsnet import SNN_BINDSNET
+from learning.frameworks.snn_spyx import SNN_SPYX
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder
@@ -25,9 +28,12 @@ from compiler import compile_model
 torch.backends.cudnn.benchmark = True
 
 _MODELS = {
-    "norse": SNN_NORSE,
-    "torch": SNN_TORCH,
-    "sj":    SNN_SJ,
+    "norse":    SNN_NORSE,
+    "torch":    SNN_TORCH,
+    "sj":       SNN_SJ,
+    "sinabs":   SNN_SINABS,
+    "bindsnet": SNN_BINDSNET,
+    "spyx":     SNN_SPYX,
 }
 
 if __name__ == "__main__":
