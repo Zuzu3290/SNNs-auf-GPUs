@@ -27,7 +27,7 @@ from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
 
 
-class _BindsNetStage:
+class BindsNetStage:
     """
     One Input→Nodes hop trained by local STDP (PostPre): either a Conv2dConnection
     (conv stages) or a plain Connection (the final FC stage — BindsNET flattens
@@ -69,7 +69,7 @@ class _BindsNetStage:
 
 
 def build_bindsnet_stage(layer_name: str, in_shape: tuple, out_shape_or_n, cfg: Settings,
-                          kernel_size=None, is_fc: bool = False) -> _BindsNetStage:
+                          kernel_size=None, is_fc: bool = False) -> BindsNetStage:
     """
     Build one conv/FC + STDP stage.
 
@@ -88,7 +88,7 @@ def build_bindsnet_stage(layer_name: str, in_shape: tuple, out_shape_or_n, cfg: 
         connection = btopo.Conv2dConnection(source, target, kernel_size=kernel_size, stride=1,
                                              update_rule=blearning.PostPre, nu=nu)
 
-    return _BindsNetStage(source, target, connection, batch_size=cfg.BATCH_SIZE)
+    return BindsNetStage(source, target, connection, batch_size=cfg.BATCH_SIZE)
 
 
 class SNN_BINDSNET(ModelInterface):

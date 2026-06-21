@@ -5,20 +5,13 @@ added to give the GPU benchmarking work more than one framework "shape" to compa
 DVS-native, STDP-trained, and JAX-based. Switch to any of them the same way as the
 original three: set `training.framework` in `configuration/SNN_module.yaml`.
 
-| Selector | Class | File | Status |
-|---|---|---|---|
 | `sinabs`   | `SNN_SINABS`   | `src/learning/frameworks/snn_sinabs.py`   | Verified end-to-end on GPU |
 | `bindsnet` | `SNN_BINDSNET` | `src/learning/frameworks/snn_bindsnet.py` | Verified end-to-end on GPU |
 | `spyx`     | `SNN_SPYX`     | `src/learning/frameworks/snn_spyx.py`     | Verified end-to-end on CPU (JAX has no Windows CUDA wheels) |
 
-A fourth backend, Lava-dl, was evaluated and removed — it pins `torch<2.4.0`,
-incompatible with this project's `torch==2.10.0+cu128`. See `session_log.md` for
-the incident writeup; nothing Lava-related remains in the codebase.
 
-"Verified end-to-end" means: instantiated through the real `Settings()` config
-pipeline, ran a real forward pass at production `BATCH_SIZE`/`TIMESTEPS`, confirmed
-the loss computes, confirmed weights actually change after one training step, and
-confirmed eval mode works.
+"Verified end-to-end" means: instantiated through the real `Settings()` config pipeline, ran a real forward pass at production `BATCH_SIZE`/`TIMESTEPS`, confirmed
+the loss computes, confirmed weights actually change after one training step, and confirmed eval mode works.
 
 ---
 
@@ -123,13 +116,8 @@ with `framework: bindsnet` or `framework: spyx`.
 ---
 
 ## Two real incidents from installing these (read before adding more frameworks)
-
 1. **Never run two `pip install` commands in parallel against the same environment.**
    Installing `lava-dl` and `jax`/`spyx` at the same time caused a race on
    `numpy`'s metadata files mid-uninstall, corrupting the `jax` install. Re-ran them
    one at a time and it was clean.
-2. **Check `torch.cuda.is_available()` immediately after installing any new package
-   that touches `torch` as a dependency.** pip will silently satisfy a stricter pin
-   from a new package by downgrading torch out from under everything else already
-   relying on it. Caught here within one command; would otherwise have been a
-   confusing "training is suddenly on CPU" bug discovered much later.
+

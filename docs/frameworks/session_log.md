@@ -14,14 +14,6 @@ on import). Reference docs for the frameworks themselves live in
 pip install sinabs bindsnet
 ```
 
-Both installed cleanly. Output included this line, easy to miss:
-
-```
-tonic 1.6.0 requires numpy<2.0.0, but you have numpy 2.2.6 which is incompatible.
-tensorflow 2.10.1 requires protobuf<3.20,>=3.9.2, but you have protobuf 7.35.1 which is incompatible.
-tensorboard 2.10.1 requires protobuf<3.20,>=3.9.2, but you have protobuf 7.35.1 which is incompatible.
-```
-
 `sinabs` pulled in `tensorboardX` (a *different* package from `tensorboard` — it's
 a third-party library that writes TensorBoard-format logs without needing
 TensorFlow installed). That package wanted a much newer `protobuf` than the
@@ -37,18 +29,6 @@ this looked harmless — `tonic` and `torch` both still imported fine, so I move
 When verifying the new framework files against the real config pipeline, importing
 the `learning` package crashed:
 
-```python
-from skeleton import Settings
-```
-```
-File ".../norse/torch/__init__.py", line 331, in <module>
-    from norse.torch.utils.tensorboard.tensorboard import (...)
-File ".../torch/utils/tensorboard/writer.py", line 13, in <module>
-    from tensorboard.compat.proto import event_pb2
-...
-TypeError: Descriptors cannot be created directly.
-If this call came from a _pb2.py file, your generated code is out of date...
-```
 
 Here's the chain, since it's not obvious:
 
