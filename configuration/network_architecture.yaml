@@ -29,10 +29,6 @@ neuron_types:
     lif1:    lif          # lif | alif
     lif2:    lif          # lif | alif
     lif_out: lif          # lif | alif
-  lava:                   # UNVERIFIED backend — see src/learning/frameworks/snn_lava.py
-    lif1:    cuba         # cuba (only option implemented)
-    lif2:    cuba
-    lif_out: cuba
 
 # Future: pure_snn:
 #   hidden_layers: [256, 128]

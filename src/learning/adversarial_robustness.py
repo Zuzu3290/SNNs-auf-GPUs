@@ -81,12 +81,14 @@ class AdversarialEvaluator:
 
         attack: "clean" | "fgsm" | "pgd"
         """
-        self.model.eval()
+        self.model.eval_mode()
         correct = total = 0
 
         for data, targets in self.test_loader:
             data    = data.to(self.device)
             targets = targets.to(self.device).long()
+            if self.model.tensor_format() == "BT":
+                data = data.permute(1, 0, 2, 3, 4).contiguous()
 
             differentiable = getattr(self.model, "is_differentiable", lambda: True)()
             if attack == "fgsm" and differentiable:

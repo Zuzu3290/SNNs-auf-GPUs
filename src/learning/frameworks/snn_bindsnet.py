@@ -135,6 +135,11 @@ class SNN_BINDSNET(ModelInterface):
     def is_differentiable(self) -> bool:
         return False
 
+    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        """training.py calls models as model(data) — nn.Module gives the other
+        backends this for free via __call__; this one doesn't inherit nn.Module."""
+        return self.forward(data)
+
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """
         data: [T, B, C, H, W]  (default tensor_format — matches Network.run's own

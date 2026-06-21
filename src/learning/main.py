@@ -36,12 +36,6 @@ _MODELS = {
     "spyx":     SNN_SPYX,
 }
 
-try:
-    from learning.frameworks.snn_lava import SNN_LAVA
-    _MODELS["lava"] = SNN_LAVA
-except ImportError:
-    pass  # lava-dl needs its own isolated env — see snn_lava.py module docstring
-
 if __name__ == "__main__":
     os.makedirs("./checkpoints", exist_ok=True)
 

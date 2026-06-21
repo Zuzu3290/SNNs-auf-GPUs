@@ -104,12 +104,3 @@ frameworks:
     threshold:   0.5
     optimizer:   adam
     loss_fn:     cross_entropy
-
-  lava:                     # UNVERIFIED backend — see src/learning/frameworks/snn_lava.py
-    threshold:      1.25
-    current_decay:  0.25
-    voltage_decay:  0.03
-    tau_grad:       0.03
-    scale_grad:     3
-    optimizer:      adam
-    loss_fn:        cross_entropy

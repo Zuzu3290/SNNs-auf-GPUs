@@ -4,7 +4,7 @@ import sinabs.layers as sl
 
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
-from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
+from learning.frameworks.activity_reg import clear_hidden_spikes
 from learning.utilities import build_optimizer, build_loss
 
 
@@ -63,7 +63,13 @@ class SNN_SINABS(ModelInterface, nn.Module):
         self.optimizer = build_optimizer(self.parameters(), fw_cfg)
         self.loss_fn   = build_loss(fw_cfg, framework="sinabs")
 
-        register_activity_hooks(self, {'lif1': self.lif1, 'lif2': self.lif2})
+        # No register_activity_hooks() here: activity_reg.py's hooks assume the
+        # hooked layer is called once PER TIMESTEP (true for Norse/SNNTorch/
+        # SpikingJelly's per-timestep loop). Sinabs' LIF layers are called once
+        # per forward() with the whole (B,T,...) tensor — hooking them would
+        # record a single T=1 "timestep" containing all T internally, which
+        # silently breaks stdp_regularization's per-timestep trace math
+        # (confirmed: `ema_kernel (1x1) @ post_t` size mismatch).
 
     def tensor_format(self) -> str:
         """Sinabs LIF/IAF layers expect (Batch, Time, ...) — the trainer transposes for us."""

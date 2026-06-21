@@ -1,16 +1,19 @@
-# Additional Frameworks — Sinabs, BindsNET, Spyx, Lava-dl
+# Additional Frameworks — Sinabs, BindsNET, Spyx
 
-Four more SNN backends beyond the original three (Norse, snnTorch, SpikingJelly),
+Three more SNN backends beyond the original three (Norse, snnTorch, SpikingJelly),
 added to give the GPU benchmarking work more than one framework "shape" to compare —
-DVS-native, STDP-trained, JAX-based, and Loihi-targeted. Switch to any of them the
-same way as the original three: set `training.framework` in `configuration/SNN_module.yaml`.
+DVS-native, STDP-trained, and JAX-based. Switch to any of them the same way as the
+original three: set `training.framework` in `configuration/SNN_module.yaml`.
 
 | Selector | Class | File | Status |
 |---|---|---|---|
 | `sinabs`   | `SNN_SINABS`   | `src/learning/frameworks/snn_sinabs.py`   | Verified end-to-end on GPU |
 | `bindsnet` | `SNN_BINDSNET` | `src/learning/frameworks/snn_bindsnet.py` | Verified end-to-end on GPU |
 | `spyx`     | `SNN_SPYX`     | `src/learning/frameworks/snn_spyx.py`     | Verified end-to-end on CPU (JAX has no Windows CUDA wheels) |
-| `lava`     | `SNN_LAVA`     | `src/learning/frameworks/snn_lava.py`     | **Unverified** — written from memory, never run. See below. |
+
+A fourth backend, Lava-dl, was evaluated and removed — it pins `torch<2.4.0`,
+incompatible with this project's `torch==2.10.0+cu128`. See `session_log.md` for
+the incident writeup; nothing Lava-related remains in the codebase.
 
 "Verified end-to-end" means: instantiated through the real `Settings()` config
 pipeline, ran a real forward pass at production `BATCH_SIZE`/`TIMESTEPS`, confirmed
@@ -102,40 +105,6 @@ A real bug was found and fixed while verifying this one too: `hk.max_pool`'s
 (`(1, k, k, 1)` for a 4D `(B,H,W,C)` array), not just the 2D pooling extent
 `(k, k)` — passing the 2-tuple silently pools the wrong axes (width and channel
 instead of height and width) without raising an error.
-
----
-
-## Lava-dl — unverified, and why
-
-`pip install lava-dl` pins `torch<2.4.0,>=2.3.1`. This project runs
-`torch==2.10.0+cu128`. Installing lava-dl **silently downgraded torch to a CPU-only
-2.3.1 build** (and torchvision to 0.18.1) to satisfy that pin — pip doesn't block on
-version conflicts by default, it just resolves to whatever the newest-requested
-package needs and prints a warning afterward. That would have killed GPU training
-for every other framework in this project, not just a new one.
-
-This was caught immediately (`torch.cuda.is_available()` checked right after
-install, came back `False`) and fixed by reinstalling the pinned
-`torch==2.10.0+cu128` / `torchvision==0.25.0` from the PyTorch CUDA wheel index,
-then uninstalling `lava-dl`/`lava-nc` entirely. It is not currently installed
-anywhere in this environment.
-
-**This is a hard version-pin conflict, not a Linux-vs-Windows issue** — lava-dl
-needs its own fully isolated environment (separate venv/conda env, or its own stage
-in the `container` branch's Docker image) to ever coexist with the rest of this
-project's modern-torch dependency tree.
-
-`snn_lava.py` was written anyway, at the user's request, as a best-effort sketch of
-the integration — `slayer.block.cuba.{Conv,Pool,Dense}` blocks, `(B,C,H,W,T)`
-time-last tensor layout (SLAYER convolves the synaptic current decay directly along
-the time axis, which is genuinely different from how every other backend in this
-project treats time), full PyTorch-autograd training since SLAYER's spiking
-nonlinearity is a custom `Function` with a surrogate backward (unlike BindsNET/Spyx,
-`is_differentiable()` should be `True` here). **None of this has been run.** Treat
-every API name in that file as something to verify against the real package once
-it's installed in an isolated environment — not as confirmed-working code. `main.py`
-imports it inside a `try/except ImportError` so its absence doesn't break anything
-else.
 
 ---
 

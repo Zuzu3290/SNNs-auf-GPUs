@@ -135,11 +135,16 @@ class SNN_SPYX(ModelInterface):
         dummy = jnp.zeros((cfg.TIMESTEPS, cfg.BATCH_SIZE, cfg.SENSOR_H, cfg.SENSOR_W, cfg.IN_CHANNELS))
         self.params = self.net.init(self.rng, dummy)
 
-        self.optimizer = _build_optax_optimizer(fw_cfg)
-        self.opt_state = self.optimizer.init(self.params)
+        self.optax_opt = _build_optax_optimizer(fw_cfg)
+        self.opt_state = self.optax_opt.init(self.params)
         self.loss_fn   = self._jax_loss_and_update
 
         self._last_jax_input = None
+
+    def __call__(self, data: torch.Tensor) -> torch.Tensor:
+        """training.py calls models as model(data) — nn.Module gives the other
+        backends this for free via __call__; this one doesn't inherit nn.Module."""
+        return self.forward(data)
 
     def tensor_format(self) -> str:
         return "TB"
@@ -179,7 +184,7 @@ class SNN_SPYX(ModelInterface):
         loss_val, grads = jax.value_and_grad(loss_fn)(self.params)
 
         if self._is_training:
-            updates, self.opt_state = self.optimizer.update(grads, self.opt_state, self.params)
+            updates, self.opt_state = self.optax_opt.update(grads, self.opt_state, self.params)
             self.params = optax.apply_updates(self.params, updates)
 
         return torch.tensor(float(loss_val), device=self.device)

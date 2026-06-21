@@ -38,11 +38,6 @@ spyx>=0.1.20             # jax[cuda12] there for real GPU execution).
 # with protobuf 7.x anyway.
 tensorboard>=2.20.0
 
-# lava-dl is NOT installable alongside the rest of this file: it pins torch<2.4.0, which
-# silently downgrades torch (and drops CUDA) for every other framework above. It needs
-# its own isolated venv/conda env or Docker stage. See src/learning/frameworks/snn_lava.py.
-# lava-dl>=0.6.0
-
 # Event camera drivers (uncomment the one matching your hardware)
 # pyaer>=0.1.2           # iniVation DAVIS / DVS cameras
 # metavision-sdk-core    # Prophesee cameras (install from Prophesee website)

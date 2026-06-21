@@ -12,7 +12,6 @@ FW_TO_CFG_KEY = {
     "sinabs":   "sinabs",
     "bindsnet": "bindsnet",
     "spyx":     "spyx",
-    "lava":     "lava",   # UNVERIFIED backend — see src/learning/frameworks/snn_lava.py
 }
 
 
@@ -113,7 +112,6 @@ class Settings:
         sin = frameworks.get("sinabs",       {})
         bds = frameworks.get("bindsnet",     {})
         spx = frameworks.get("spyx",         {})
-        lav = frameworks.get("lava",         {})
 
         self.FRAMEWORK_CFG = {
             "snntorch": {
@@ -153,16 +151,6 @@ class Settings:
                 "threshold": float(spx.get("threshold", 0.5)),
                 "optimizer": spx.get("optimizer", "adam"),
                 "loss_fn":   spx.get("loss_fn", "cross_entropy"),
-            },
-            "lava": {
-                # UNVERIFIED backend — see src/learning/frameworks/snn_lava.py
-                "threshold":     float(lav.get("threshold", 1.25)),
-                "current_decay": float(lav.get("current_decay", 0.25)),
-                "voltage_decay": float(lav.get("voltage_decay", 0.03)),
-                "tau_grad":      float(lav.get("tau_grad", 0.03)),
-                "scale_grad":    float(lav.get("scale_grad", 3)),
-                "optimizer":     lav.get("optimizer", "adam"),
-                "loss_fn":       lav.get("loss_fn", "cross_entropy"),
             },
         }
 

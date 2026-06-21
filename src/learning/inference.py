@@ -37,6 +37,8 @@ class SNNTester:
 
     def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
         if not self.use_custom_kernel:
+            if self.model.tensor_format() == "BT":
+                data = data.permute(1, 0, 2, 3, 4).contiguous()
             return self.model(data)
 
         if data.dim() == 5:
