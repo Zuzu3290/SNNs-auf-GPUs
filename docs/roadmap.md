@@ -109,6 +109,10 @@ graph TD
     style INPUT_LAYER fill:#FFFFFF,stroke:#000000,stroke-width:1px,color:#000000
     style EBC fill:#FFFFFF,stroke:#000000,stroke-width:2px,color:#000000
 ```
+## Scope Notes
+
+- **Compiler subsystem (`src/compiler/`) deprioritized.** The IR/lowering/planner/scheduler/backend layers described in `src/compiler/README.md` are shelved for now and not part of active development. They remain in the tree for future exploration but should not be assumed buildable (e.g. `src/CMakeLists.txt` still references C++/CUDA sources that don't match the current Python-based implementation). Baseline priority is the event-camera → GPU → SNN pipeline, not the custom compiler.
+
 ## To-Dos
 This section contains all the tasks and research items planned for the project.  
 

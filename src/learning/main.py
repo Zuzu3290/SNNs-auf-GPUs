@@ -5,7 +5,7 @@ from pathlib import Path
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # project root → skeleton, event_data_workflow
-sys.path.insert(0, str(Path(__file__).parent.parent))          # src/ → learning, compiler
+sys.path.insert(0, str(Path(__file__).parent.parent))          # src/ → learning
 
 import torch
 
@@ -20,7 +20,6 @@ from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder
 from learning.adversarial_robustness import AdversarialEvaluator
-from compiler import compile_model
 
 torch.backends.cudnn.benchmark = True
 
@@ -48,7 +47,7 @@ if __name__ == "__main__":
     print(f"\n  Model backend  : {cfg.FRAMEWORK.upper()}")
 
     if cfg.TORCH_COMPILE:
-        model = compile_model(model, cfg)
+        model = torch.compile(model)
 
     cfg.display()
 

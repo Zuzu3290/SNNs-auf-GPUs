@@ -13,7 +13,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Make project root (skeleton, event_data_workflow) and src/ (learning, compiler) importable.
+# Make project root (skeleton, event_data_workflow) and src/ (learning) importable.
 export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "──────────────────────────────────────────"
