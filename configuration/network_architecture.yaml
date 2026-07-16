@@ -10,17 +10,17 @@ convolution:
 
 neuron_types:
   snntorch:
-    lif1:    alpha        # alpha | leaky
-    lif2:    alpha        # alpha | leaky
-    lif_out: alpha        # alpha | leaky
+    lif1:    leaky        # alpha | leaky
+    lif2:    leaky        # alpha | leaky
+    lif_out: leaky        # alpha | leaky
   norse:
     lif1:    lif_cell     # lif_cell | lif_rec_cell
     lif2:    lif_cell     # lif_cell | lif_rec_cell
     lif_out: lif_cell     # lif_cell | lif_rec_cell
   spikingjelly:
-    lif1:    izhikevich   # izhikevich | lif
-    lif2:    izhikevich   # izhikevich | lif
-    lif_out: izhikevich   # izhikevich | lif
+    lif1:    lif   # izhikevich | lif
+    lif2:    lif   # izhikevich | lif
+    lif_out: lif   # izhikevich | lif
   sinabs:
     lif1:    lif          # lif | iaf
     lif2:    lif          # lif | iaf

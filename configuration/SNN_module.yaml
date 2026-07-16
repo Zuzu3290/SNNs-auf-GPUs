@@ -71,7 +71,7 @@ frameworks:
     beta:       0.95
     threshold:  0.5
     optimizer:  adam
-    loss_fn:    mse_count
+    loss_fn:    cross_entropy
 
   norse:
     tau_mem_inv: 100.0
