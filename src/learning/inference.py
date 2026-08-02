@@ -21,47 +21,14 @@ class SNNTester:
         self.device      = device
         self.num_classes = cfg.NUM_CLASSES
         self.batch_log   = []
-        self.kernel_module = None
-        self.use_custom_kernel = False
-        if cfg.KERNEL == "ON":
-            try:
-                import snn_cuda.snn_forward as km  # type: ignore[import]
-                self.kernel_module = km
-                self.use_custom_kernel = True
-                print("[kernel] SNNTester: custom CRSC CUDA kernel active")
-            except ImportError:
-                print("[kernel] snn_cuda not built — run: python src/learning/setup.py build_ext --inplace")
-        self._voltage_buf: torch.Tensor | None = None
         device_idx = (device.index or 0) if device.type == "cuda" else 0
         self.gpu_stats = GPUStats(device_idx=device_idx)
 
     def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
-        if not self.use_custom_kernel:
-            if self.model.tensor_format() == "BT":
-                data = data.permute(1, 0, 2, 3, 4).contiguous()
-            return self.model(data)
-
-        if data.dim() == 5:
-            T, B, C, H, W = data.shape
-            inp = data.view(T, B, C * H * W).permute(1, 2, 0).contiguous()
-        elif data.dim() == 4:
-            T, B, C, N = data.shape
-            inp = data.view(T, B, C * N).permute(1, 2, 0).contiguous()
-        else:
-            return self.model(data)
-
-        B_sz, N_sz = inp.size(0), inp.size(1)
-        if self._voltage_buf is None or self._voltage_buf.shape != (B_sz, N_sz):
-            self._voltage_buf = torch.zeros(B_sz, N_sz, device=self.device)
-
-        kernel = self.kernel_module
-        assert kernel is not None
-        threshold = float(self.cfg.active_fw_cfg["threshold"])
-        spikes    = kernel.forward(
-            inp, self._voltage_buf,
-            threshold, 1.0 - float(self.cfg.BETA),
-        )
-        return spikes.permute(2, 0, 1).contiguous()
+        """Single forward pass, adapting tensor layout to what the model expects."""
+        if self.model.tensor_format() == "BT":
+            data = data.permute(1, 0, 2, 3, 4).contiguous()
+        return self.model(data)
 
     def class_metrics(self, cm: np.ndarray) -> list[dict]:
         total = cm.sum()

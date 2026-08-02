@@ -32,8 +32,8 @@
 |----|------|---------------|--------|
 | E1 | Event Data Pipeline | Architecture + Implementation | Done |
 | E2 | SNN Learning Framework | Architecture + Implementation | Done |
-| E3 | Compiler & GPU Acceleration | Architecture + Implementation | Done |
-| E4 | Unit Test Coverage | Unit Tests | In Progress (compiler only) |
+| E3 | GPU Kernel & Energy Measurement | Architecture + Implementation | Done |
+| E4 | Unit Test Coverage | Unit Tests | Not Started |
 | E5 | Integration Test Suite | Integration Tests | Not Started |
 | E6 | Requirements Documentation | User + Technical Requirements | Not Started |
 | E7 | System Verification | System Verification | Not Started |
@@ -155,39 +155,20 @@ Stories are listed under each epic, ordered by priority within the epic. Each st
 
 ---
 
-### Epic E3 — Compiler & GPU Acceleration
+### Epic E3 — GPU Kernel & Energy Measurement
 
 ---
 
-**E3-S1 — Compiler IR represents a model as a ComputeGraph** ✅ Done
-> As a **Future Developer**, I want SNN operations represented as an IR so that hardware-specific optimizations are decoupled from the framework layer.
-
-*Implemented in:* [`src/compiler/src/ir.py`](../src/compiler/src/ir.py)
-
----
-
-**E3-S2 — Compiler passes run in order: rewrite → annotate → fuse** ✅ Done
-> As a **Future Developer**, I want compiler passes to be composable and ordered so that new passes can be added without breaking existing ones.
-
-*Implemented in:* [`src/compiler/src/scheduler.py`](../src/compiler/src/scheduler.py), [`src/compiler/passes/`](../src/compiler/passes/)
-
----
-
-**E3-S3 — Runtime dispatches LIF quartet to custom CUDA kernel** ✅ Done
+**E3-S3 — Trainer/Tester dispatch the LIF forward pass to a custom CUDA kernel** 🟠 Reverted
 > As a **Researcher**, I want the fused LIF kernel (membrane update + threshold + spike gen + reset) to execute as a single CUDA kernel so that GPU throughput is maximized.
 
-*Implemented in:* [`src/compiler/src/runtime.py`](../src/compiler/src/runtime.py), [`src/compiler/kernels/lif_kernel.cu`](../src/compiler/kernels/lif_kernel.cu)
+An auto-dispatch toggle (`training.kernel: ON`) existed in `SNNTrainer`/`SNNTester` but was found broken on review and removed rather than fixed:
+- It bypassed `self.model` entirely — ran a single flat LIF directly over the raw flattened input `[B, C×H×W, T]`, never touching Conv1/LIF1/Pool/Conv2/LIF2/Pool/FC/LIF_out
+- `snn_forward_cuda` is a plain pybind11 function, not a `torch.autograd.Function` — the output had no `grad_fn`, so `loss.backward()` would fail the moment this path actually ran
+- The membrane-voltage buffer (`_voltage_buf`) was never reset between batches or epochs
+- `inference.py` additionally hardcoded the SNNTorch `tau_inv` formula regardless of the configured framework, diverging from `training.py`'s per-framework branching
 
----
-
-**E3-S4 — Runtime falls back to PyTorch when CUDA is unavailable** ✅ Done
-> As a **Future Developer**, I want the runtime to fall back to a pure-PyTorch LIF when the CUDA kernel is not loaded so that CPU development and CI are unblocked.
-
-*Acceptance Criteria:*
-- FusedStep tries CUDA kernel, then framework neuron, then pure-Python LIF
-- No error is raised on a CPU-only machine
-
-*Implemented in:* [`src/compiler/src/runtime.py`](../src/compiler/src/runtime.py)
+`src/crsc/kernels/snn_forward.cu` remains buildable and usable standalone (`snn_cuda.snn_forward.forward(...)`) — it just isn't wired into the training loop anymore.
 
 ---
 
@@ -212,20 +193,6 @@ Stories are listed under each epic, ordered by priority within the epic. Each st
 ---
 
 ### Epic E4 — Unit Test Coverage
-
----
-
-**E4-S1 — Compiler IR unit tests** ✅ Done
-> As a **CI System**, I want tests for the ComputeGraph so that IR construction regressions are caught immediately.
-
-*Existing:* [`src/compiler/tests/test_ir.py`](../src/compiler/tests/test_ir.py)
-
----
-
-**E4-S2 — Compiler scheduler and runtime unit tests** ✅ Done
-> As a **CI System**, I want tests for the scheduler pass chain and runtime execution so that compiler regressions are caught.
-
-*Existing:* [`src/compiler/tests/test_scheduler.py`](../src/compiler/tests/test_scheduler.py), [`src/compiler/tests/test_runtime.py`](../src/compiler/tests/test_runtime.py)
 
 ---
 
@@ -308,16 +275,16 @@ Stories are listed under each epic, ordered by priority within the epic. Each st
 
 ---
 
-**E5-S3 — Compiler CUDA / PyTorch parity test** 🔴 Not Started
-> As a **Future Developer**, I want a test that runs the same input through the FusedStep (CUDA) and AtomicStep (PyTorch) paths and confirms numerical equivalence so that kernel correctness is verifiable.
+**E5-S3 — CRSC kernel / PyTorch parity test** 🔴 Not Started
+> As a **Future Developer**, I want a test that runs the same input through the `src/crsc` custom CUDA kernel and the plain PyTorch fallback path and confirms numerical equivalence so that kernel correctness is verifiable.
 
 *Acceptance Criteria:*
 - Output spike tensors agree to within `1e-4` absolute tolerance
 - Membrane voltage at each timestep agrees to within `1e-4`
-- Test is skipped if CUDA is unavailable (not failed)
+- Test is skipped if CUDA is unavailable or the extension is not built (not failed)
 
-*File to create:* `tests/integration/test_compiler_cuda_parity.py`
-*V-Model:* Integration Tests (IT-03)
+*File to create:* `tests/integration/test_crsc_kernel_parity.py`
+*V-Model:* System Verification (TR-04)
 
 ---
 
@@ -417,7 +384,7 @@ Suggested 2-week sprints, ordered to unblock CI first, then close V-model gaps f
 |--------|------|---------|
 | **Sprint 1** | Green CI on every commit | E5-S1 (e2e smoke test), E4-S3 (cache unit tests), E4-S4 (activity reg unit tests) |
 | **Sprint 2** | Close unit test gaps | E4-S5 (temporal slicer), E4-S6 (config), E5-S2 (data→training boundary) |
-| **Sprint 3** | Compiler & kernel verification | E5-S3 (CUDA parity), E5-S4 (framework swap), E5-S5 (config propagation) |
+| **Sprint 3** | Kernel verification | E5-S3 (CUDA parity), E5-S4 (framework swap), E5-S5 (config propagation) |
 | **Sprint 4** | Requirements docs | E6-S1 (URS), E6-S2 (SRS with pass criteria) |
 | **Sprint 5** | System verification | E7-S1 (GPU budget), E7-S3 (metrics correctness), E3-S6 (real energy measurement) |
 | **Sprint 6** | ADAS validation | E1-S4 (DAVIS dataset), E8-S1, E8-S2, E8-S3 |
@@ -444,14 +411,14 @@ A story is **Done** when all of the following are true:
 |----------|--------------|------|-------------|-------------|
 | E1 — Data Pipeline | 4 | 3 | 0 | 1 |
 | E2 — Learning | 6 | 5 | 0 | 1 |
-| E3 — Compiler & GPU | 6 | 5 | 0 | 1 |
-| E4 — Unit Tests | 6 | 2 | 0 | 4 |
+| E3 — GPU Kernel & Energy | 3 | 1 | 0 | 2 |
+| E4 — Unit Tests | 4 | 0 | 0 | 4 |
 | E5 — Integration Tests | 5 | 0 | 0 | 5 |
 | E6 — Requirements Docs | 2 | 0 | 0 | 2 |
 | E7 — System Verification | 3 | 0 | 0 | 3 |
 | E8 — ADAS Validation | 3 | 0 | 0 | 3 |
-| **Total** | **35** | **15** | **0** | **20** |
+| **Total** | **30** | **9** | **0** | **21** |
 
-**Completion: 15 / 35 stories (43%)**
+**Completion: 9 / 30 stories (30%)**
 
 The implementation plane is ~90% done. The verification and validation plane is almost entirely open — which is the expected state for a research project that prioritised getting the system working before hardening it.

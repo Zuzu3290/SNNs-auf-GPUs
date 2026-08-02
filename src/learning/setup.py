@@ -4,7 +4,6 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 HERE      = os.path.dirname(os.path.abspath(__file__))       # src/learning/
 ROOT      = os.path.abspath(os.path.join(HERE, '..', '..'))  # project root
-GPU_ATTRS = os.path.join(ROOT, 'acceleration', 'GPU_attributes')
 CRSC_KERN = os.path.join(ROOT, 'src', 'crsc', 'kernels')
 
 try:
@@ -21,11 +20,11 @@ setup(
             sources=[
                 os.path.join(CRSC_KERN, "snn_forward.cpp"),
                 os.path.join(CRSC_KERN, "snn_forward.cu"),
-                os.path.join(GPU_ATTRS, "energy_management.cu"),
-                os.path.join(GPU_ATTRS, "memory_management.cu"),
-                os.path.join(GPU_ATTRS, "throughput_optimiation.cu"),
+                os.path.join(CRSC_KERN, "energy_management.cu"),
+                os.path.join(CRSC_KERN, "memory_management.cu"),
+                os.path.join(CRSC_KERN, "throughput_optimiation.cu"),
             ],
-            include_dirs=[GPU_ATTRS] + _cuda_inc,
+            include_dirs=[CRSC_KERN] + _cuda_inc,
             extra_compile_args={
                 "cxx":  ["-O3"],
                 "nvcc": ["-O3", "--use_fast_math"],

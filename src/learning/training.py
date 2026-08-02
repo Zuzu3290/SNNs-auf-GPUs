@@ -68,17 +68,6 @@ class SNNTrainer:
         self.train_loader = train_loader
         self.cfg          = cfg
         self.device       = device
-        self.kernel_module = None
-        self.use_custom_kernel = False
-        if cfg.KERNEL == "ON":
-            try:
-                import snn_cuda.snn_forward as km  # type: ignore[import]
-                self.kernel_module = km
-                self.use_custom_kernel = True
-                print("[kernel] SNNTrainer: custom CRSC CUDA kernel active")
-            except ImportError:
-                print("[kernel] snn_cuda not built — run: python src/learning/setup.py build_ext --inplace")
-        self._voltage_buf: torch.Tensor | None = None
 
         self.loss_hist       = []
         self.acc_hist        = []
@@ -99,45 +88,14 @@ class SNNTrainer:
         self.scheduler = (CosineAnnealingLR(opt, T_max=cfg.EPOCHS) if opt is not None and lr_sched == "cosine" else None)
 
     def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
-        """Single forward pass. Routes through the custom CRSC CUDA kernel when
-        kernel: ON is set in SNN_module.yaml, otherwise uses the framework model."""
-        if not self.use_custom_kernel:
-            if self.model.tensor_format() == "BT":
-                data = data.permute(1, 0, 2, 3, 4).contiguous()
-            return self.model(data)
+        """Single forward pass, adapting tensor layout to what the model expects.
 
-        # Custom kernel expects [B, N, T]; typical neuromorphic data is [T, B, C, H, W]
-        if data.dim() == 5:
-            T, B, C, H, W = data.shape
-            inp = data.view(T, B, C * H * W).permute(1, 2, 0).contiguous()  # [B, N, T]
-        elif data.dim() == 4:
-            T, B, C, N = data.shape
-            inp = data.view(T, B, C * N).permute(1, 2, 0).contiguous()      # [B, N, T]
-        else:
-            return self.model(data)  # unsupported shape — fall back silently
-
-        B_sz, N_sz = inp.size(0), inp.size(1)
-        if self._voltage_buf is None or self._voltage_buf.shape != (B_sz, N_sz):
-            self._voltage_buf = torch.zeros(B_sz, N_sz, device=self.device)
-
-        kernel    = self.kernel_module
-        assert kernel is not None
-        fw_cfg    = self.cfg.active_fw_cfg
-        fw        = self.cfg.FRAMEWORK
-        if fw == "torch":
-            tau_inv = 1.0 - float(fw_cfg["beta"])
-        elif fw == "norse":
-            tau_inv = float(fw_cfg["tau_mem_inv"])
-        elif fw == "sj":
-            tau_inv = 1.0 / float(fw_cfg["tau"])
-        else:
-            raise ValueError(f"Custom kernel: no tau_inv mapping for framework '{fw}'. Add it here.")
-        threshold = float(fw_cfg["threshold"])
-        spikes    = kernel.forward(
-            inp, self._voltage_buf,
-            threshold, tau_inv,
-        )                                              # [B, N, T]
-        return spikes.permute(2, 0, 1).contiguous()   # [T, B, N]
+        Shared by every call site in train() (clean pass, TRADES adversarial pass)
+        so the tensor_format() transpose isn't repeated at each one.
+        """
+        if self.model.tensor_format() == "BT":
+            data = data.permute(1, 0, 2, 3, 4).contiguous()
+        return self.model(data)
 
     def save_checkpoint(self, path: str):
         ckpt = {

@@ -2,7 +2,7 @@
 
 The `source/` folder contains the core implementation structure of the project. It is organized into five main modules, where each folder focuses on a specific part of the SNN development and optimization workflow.
 
-Each module is designed to work independently, while also supporting the overall project pipeline for model configuration, learning, compilation, acceleration, runtime diagnostics, and future hardware-oriented integration.
+Each module is designed to work independently, while also supporting the overall project pipeline for model configuration, learning, runtime diagnostics, and future hardware-oriented integration.
 
 ---
 
@@ -11,9 +11,7 @@ Each module is designed to work independently, while also supporting the overall
 | Folder | Purpose |
 |---|---|
 | [`learning/`](./learning/) | Handles model learning, training setup, dataset configuration, and training parameter flow. |
-| [`CRC/`](./CRC/) | Supports computation-related logic, verification, and integration with optimized components. |
-| [`compiler/`](./compiler/) | Provides compiler-related support for preparing, translating, or optimizing model execution. |
-| [`acceleration/`](./acceleration/) | Focuses on GPU acceleration, custom kernel development, and performance optimization. |
+| [`crsc/`](./crsc/) | Custom CUDA kernels — LIF forward pass plus GPU energy/memory/throughput utilities. |
 | [`skeleton/`](./skeleton/) | Acts as the configuration and runtime diagnostics bridge between learning, GPU setup, and performance evaluation. |
 
 ---
@@ -22,7 +20,7 @@ Each module is designed to work independently, while also supporting the overall
 
 The `source/` folder acts as the implementation backbone of the project.
 
-It connects configuration files, model architecture, learning setup, GPU runtime behavior, logging, diagnostics, and acceleration components into one structured framework.
+It connects configuration files, model architecture, learning setup, GPU runtime behavior, logging, and diagnostics into one structured framework.
 
 Its purpose is to support a modular SNN implementation pipeline that can be trained, evaluated, optimized, and extended over time.
 
@@ -38,7 +36,6 @@ flowchart TD
     C --> D[Learning & Execution]
     D --> E[GPU Runtime Monitoring]
     E --> F[Performance Evaluation]
-    F --> G[Acceleration & Optimization]
 ``` 
 
 --- 
@@ -114,26 +111,6 @@ It is intended to provide a simple application-level entry point for running the
 
 ---
 
-## Acceleration
-
-The `acceleration/` folder is designed for GPU-focused optimization.
-
-It includes custom kernel development intended to interface with the `CRC/` layer. The purpose of this module is to improve computational performance, reduce execution time, and support more efficient GPU usage.
-
-The acceleration layer supports the broader goal of making SNN implementations more practical for GPU-based deployment.
-
-It focuses on:
-
-- Custom kernel implementation
-- GPU performance optimization
-- Efficient computation
-- Reduced training and execution time
-- Better deployment applicability
-- Energy-aware GPU usage
-- Support for biologically inspired neuron computation
-
----
-
 ## Overall Goal
 
 The overall purpose of the source structure is to support an efficient and modular SNN implementation pipeline.
@@ -145,7 +122,6 @@ Each folder contributes to a different part of the system, but together they hel
 - GPU runtime setup
 - Computational efficiency
 - Logging and reporting
-- Acceleration support
 - Deployment readiness
 - Future hardware integration
 

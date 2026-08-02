@@ -66,9 +66,8 @@ User Requirements        ◄─────────────────�
 | TR-01 | Must support NMNIST, DAVIS, and custom event datasets | `event_data_workflow/data_pipeline.py` | **Implemented** |
 | TR-02 | Must support Norse, SNNTorch, SpikingJelly backends interchangeably | `src/learning/frameworks/` | **Implemented** |
 | TR-03 | GPU VRAM usage must stay within configurable phase-based budgets | `event_data_workflow/cache_engine.py` | **Implemented** |
-| TR-04 | LIF dynamics must be computable via custom CUDA kernel | `src/crsc/`, `src/compiler/kernels/` | **Implemented** |
+| TR-04 | LIF dynamics must be computable via custom CUDA kernel | `src/crsc/` | **Implemented** |
 | TR-05 | Adaptive cache must implement S3-FIFO replacement policy | `event_data_workflow/cache_engine.py` | **Implemented** |
-| TR-06 | Compiler must support op-rewrite, device annotation, and fusion passes | `src/compiler/passes/` | **Implemented** |
 | TR-07 | System must produce per-class precision, recall, F1 at evaluation | `src/learning/inference.py` | **Implemented** |
 | TR-08 | Adversarial attacks (FGSM, PGD, TRADES) must be framework-agnostic | `src/learning/adversarial_robustness.py` | **Implemented** |
 | TR-09 | Configuration must be driven by a single YAML file | `SNN_module.yaml`, `skeleton/snn_config.py` | **Implemented** |
@@ -91,10 +90,8 @@ User Requirements        ◄─────────────────�
 
 **Existing artifacts (well-covered):**
 - [`src/README.md`](../src/README.md) — overall architecture and data flow narrative
-- [`src/compiler/README.md`](../src/compiler/README.md) — compiler layer with pass pipeline description
 - [`src/learning/README.md`](../src/learning/README.md) — learning module structure
 - [`event_data_workflow/README.md`](../event_data_workflow/README.md) — pipeline usage and limitations
-- [`acceleration/README.md`](../acceleration/README.md) — GPU kernel application layer
 - [`skeleton/README.md`](../skeleton/README.md) — configuration bridge role
 - [`docs/roadmap.md`](roadmap.md) — Mermaid diagrams of system roadmap
 
@@ -114,18 +111,20 @@ User Requirements        ◄─────────────────�
 │  │   slicer     │    │  SNNTorch / SpikingJelly  │  │
 │  └──────────────┘    └───────────┬────────────────┘  │
 │                                  │                   │
-│  ┌──────────────┐    ┌───────────▼────────────────┐  │
-│  │  Skeleton    │    │       Compiler Layer        │  │
-│  │  (config)    │───►│  IR → Passes → Runtime     │  │
-│  │              │    │  AtomicStep / FusedStep     │  │
-│  │ snn_config   │    └───────────┬────────────────┘  │
-│  │ snn_logging  │                │                   │
-│  └──────────────┘    ┌───────────▼────────────────┐  │
-│                      │    Acceleration Layer       │  │
-│                      │  CUDA Kernels / PTX loader  │  │
-│                      │  LIF kernel, energy mgmt   │  │
-│                      └────────────────────────────┘  │
+│  ┌──────────────┐                                    │
+│  │  Skeleton    │                                    │
+│  │  (config)    │                                    │
+│  │              │                                    │
+│  │ snn_config   │                                    │
+│  │ snn_logging  │                                    │
+│  └──────────────┘                                    │
 └─────────────────────────────────────────────────────┘
+
+    src/crsc/  — standalone CUDA kernel (LIF forward pass, GPU
+    energy/memory/throughput utilities). Buildable and callable
+    directly (snn_cuda.snn_forward.forward(...)); not wired into
+    SNNTrainer/SNNTester — an earlier auto-dispatch toggle bypassed
+    the model and was removed, not fixed. See CLAUDE.md.
 ```
 
 **Gap:** No formal Architecture Description Document (ADD) with interface control tables. The two-plane (Python/CUDA) boundary is described narratively but not specified with explicit API contracts or data format specifications at each inter-subsystem boundary.
@@ -149,12 +148,10 @@ User Requirements        ◄─────────────────�
 |--------|---------------|---------|
 | `event_data_workflow/cache_engine.py` | README + coordinator doc | Moderate |
 | `event_data_workflow/pipeline_coordinator.py` | Dedicated MD file | Good |
-| `src/compiler/` | README + IR source comments | Good |
 | `src/learning/frameworks/` | model_interface.py ABC | Good |
-| `acceleration/` | README | Minimal |
 | `src/crsc/` | No design doc | None |
 
-**Gap:** No class diagrams or formal UML for the compiler IR, cache engine, or CUDA binding layers. No data format specification for the event tensor shape conventions (T × B × C × H × W) used at the boundary between the data pipeline and the learning module.
+**Gap:** No class diagrams or formal UML for the cache engine or CUDA binding layers. No data format specification for the event tensor shape conventions (T × B × C × H × W) used at the boundary between the data pipeline and the learning module.
 
 ---
 
@@ -170,20 +167,17 @@ User Requirements        ◄─────────────────�
 | Adversarial Robustness | `src/learning/adversarial_robustness.py` | Complete |
 | Activity Regularization | `src/learning/frameworks/activity_reg.py` | Complete |
 | STDP Loss | `src/learning/frameworks/activity_reg.py` | Complete |
-| Compiler IR | `src/compiler/src/ir.py` | Complete |
-| Compiler Passes | `src/compiler/passes/` (3 passes) | Complete |
-| Compiler Runtime | `src/compiler/src/runtime.py` | Complete |
-| CUDA LIF Kernel | `src/compiler/kernels/lif_kernel.cu` | Complete |
+| CUDA LIF Kernel | `src/crsc/kernels/snn_forward.cu` | Complete |
+| GPU Energy/Memory/Throughput Utilities | `src/crsc/kernels/` | Complete |
 | Data Pipeline | `event_data_workflow/data_pipeline.py` | Complete |
 | Adaptive Cache | `event_data_workflow/cache_engine.py` | Complete |
 | Temporal Slicer | `event_data_workflow/temporal_slicer.py` | Complete |
 | Pipeline Coordinator | `event_data_workflow/pipeline_coordinator.py` | Complete |
 | System Monitor | `event_data_workflow/system_monitor.py` | Complete |
-| GPU Acceleration | `acceleration/` (CUDA kernels) | Complete |
 | Configuration Bridge | `skeleton/snn_config.py` | Complete |
 | Entry Point | `src/learning/main.py` | Complete |
 
-**Total:** ~45 Python files, ~13 CUDA/C++ files
+**Total:** ~28 Python files, ~11 CUDA/C++ files (recounted after removing the unused `src/compiler/` and `acceleration/` subsystems)
 
 ---
 
@@ -195,14 +189,7 @@ User Requirements        ◄─────────────────�
 
 **Definition:** Tests that verify each module in isolation against its detailed design.
 
-**Existing unit tests — only in `src/compiler/tests/`:**
-
-| Test File | What It Tests | Coverage |
-|-----------|--------------|---------|
-| [`src/compiler/tests/test_ir.py`](../src/compiler/tests/test_ir.py) | ComputeGraph construction, topological ordering, IRNode representation, fusion group metadata | Compiler IR |
-| [`src/compiler/tests/test_scheduler.py`](../src/compiler/tests/test_scheduler.py) | Scheduler pass orchestration (op_rewrite → device_annotation → fusion sequence) | Compiler scheduler |
-| [`src/compiler/tests/test_runtime.py`](../src/compiler/tests/test_runtime.py) | ExecutionPlan execution, AtomicStep / FusedStep dispatch | Compiler runtime |
-| [`src/compiler/tests/test_cuda_execution.py`](../src/compiler/tests/test_cuda_execution.py) | CUDA kernel dispatch path and fallback logic | Compiler CUDA path |
+**Existing unit tests: none.** The only unit tests the project had lived in `src/compiler/tests/`, testing the compiler IR/scheduler/runtime subsystem. That subsystem was removed (unused — nothing in the four-framework, three-domain comparison depended on it; see `docs/implementation_plan.md` item 1), and its tests were removed with it. No replacement test suite exists yet for anything currently in the codebase.
 
 **Missing unit tests (not present):**
 
@@ -217,13 +204,13 @@ User Requirements        ◄─────────────────�
 | `skeleton/snn_config.py` | Medium | YAML parsing, architecture generation correctness |
 | `src/learning/adversarial_robustness.py` | Medium | FGSM perturbation bounds, PGD convergence |
 
-**Coverage summary:** 4 unit test files covering ~1 of 8 subsystems (~12% subsystem coverage).
+**Coverage summary:** 0 unit test files — 0% subsystem coverage.
 
 ---
 
 ### Level 3 — Integration Tests
 
-**Definition:** Tests that verify subsystem interactions — does the data pipeline correctly feed the learning module, does the compiler correctly dispatch to CUDA, do framework swaps preserve behavior?
+**Definition:** Tests that verify subsystem interactions — does the data pipeline correctly feed the learning module, does the `src/crsc` kernel path fall back to PyTorch correctly when unavailable, do framework swaps preserve behavior?
 
 **Existing integration tests:** **None**
 
@@ -233,12 +220,10 @@ User Requirements        ◄─────────────────�
 |---------|-------|---------------|
 | IT-01 | Data pipeline → Learning module | Event tensor shape and dtype produced by `NeuromorphicEncoder` matches what `SNNTrainer` expects (T × B × C convention) |
 | IT-02 | Framework swap | Training run with Norse vs SNNTorch vs SpikingJelly produces equivalent output shapes and loss trajectories |
-| IT-03 | Compiler → Runtime → CUDA | FusedStep path produces numerically equivalent outputs to AtomicStep (PyTorch fallback) path |
-| IT-04 | Skeleton config → All modules | `Settings` loaded from `SNN_module.yaml` correctly propagates to trainer, tester, encoder, and compiler |
+| IT-04 | Skeleton config → All modules | `Settings` loaded from `SNN_module.yaml` correctly propagates to trainer, tester, and encoder |
 | IT-05 | Cache engine → GPU pressure | Under simulated GPU pressure, `AdaptiveCacheController` correctly demotes from GPU VRAM to disk |
 | IT-06 | Adversarial evaluator → Framework | `AdversarialEvaluator` produces valid perturbations for each of the three SNN backends |
 | IT-07 | End-to-end pipeline | Full run of `main.py` from data load to evaluation completes without error on CPU (CI-friendly smoke test) |
-| IT-08 | Compiler passes chain | Applying op_rewrite → device_annotation → fusion in sequence on a real model produces a valid execution plan |
 
 ---
 
@@ -258,7 +243,6 @@ User Requirements        ◄─────────────────�
 |-------------|---------------------------|--------|
 | TR-03: GPU budget stays within phase caps | Automated test that drives GPU near limit and checks cap enforcement | Missing |
 | TR-05: S3-FIFO eviction correctness | Hit-rate benchmark against LRU baseline | Missing |
-| TR-06: Compiler pass pipeline correctness | Full graph transformation correctness test on standard model | Partial (unit tests exist) |
 | TR-07: Per-class metrics accuracy | Cross-validate against sklearn metrics on known dataset | Missing |
 | TR-11: Real power readings via nvidia-ml-py | Hardware-in-loop test with known power profile | Missing |
 | TR-04: CUDA LIF kernel correctness | Numerical equivalence test vs. reference Python LIF | Missing |
@@ -302,14 +286,14 @@ User Requirements        ◄─────────────────�
 | Architecture Design | Multiple READMEs + roadmap | Good — ~80% covered |
 | Detailed Design | Module READMEs + ABC interface | Moderate — ~60% covered |
 | **Implementation** | **Full codebase** | **~95% — primary artifact** |
-| Unit Tests | Compiler tests only | ~12% subsystem coverage |
+| Unit Tests | None | 0% subsystem coverage |
 | Integration Tests | None | 0% |
 | System Verification | Informal metrics logging | ~20% |
 | Validation | Partial (metrics, adversarial eval) | ~30% |
 
 ### Critical Gaps (Prioritized)
 
-1. **Integration Tests (IT-01 to IT-08)** — Zero coverage. The data pipeline → learning module boundary and the compiler → CUDA dispatch path are the highest risk points and are completely untested at the system boundary level.
+1. **Integration Tests (IT-01, IT-02, IT-04 to IT-07)** — Zero coverage. The data pipeline → learning module boundary is the highest-risk point and is completely untested at the system boundary level.
 
 2. **Unit Tests for event_data_workflow and learning** — The cache engine (S3-FIFO), activity regularization, and STDP loss have no automated tests. These are complex, stateful components where a regression would be silent.
 
@@ -328,8 +312,7 @@ User Requirements        ◄─────────────────�
 | 1 | Write `tests/integration/test_pipeline_e2e.py` (IT-07 smoke test, CPU-only) | Integration Tests |
 | 2 | Write `tests/unit/test_cache_engine.py` (S3-FIFO, GPU budget) | Unit Tests |
 | 3 | Write `tests/unit/test_activity_reg.py` (dead neuron penalty, STDP gradient) | Unit Tests |
-| 4 | Write `tests/integration/test_compiler_cuda_parity.py` (IT-03 numerical equivalence) | Integration Tests |
-| 5 | Create `docs/requirements/system_requirements.md` with TR IDs and pass criteria | Technical Requirements |
-| 6 | Create `docs/requirements/user_requirements.md` with UR IDs and rationale | User Requirements |
-| 7 | Run on DAVIS dataset and record validation results in `docs/validation/` | Validation |
-| 8 | Add `tests/system/test_gpu_budget_enforcement.py` (TR-03 verification) | System Verification |
+| 4 | Create `docs/requirements/system_requirements.md` with TR IDs and pass criteria | Technical Requirements |
+| 5 | Create `docs/requirements/user_requirements.md` with UR IDs and rationale | User Requirements |
+| 6 | Run on DAVIS dataset and record validation results in `docs/validation/` | Validation |
+| 7 | Add `tests/system/test_gpu_budget_enforcement.py` (TR-03 verification) | System Verification |

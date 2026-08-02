@@ -10,8 +10,6 @@ architecture:
   simulator: ON
 
 training:
-  kernel: OFF                   # ON → use the compiled CRSC CUDA kernel for LIF forward pass.
-                                # Requires: python src/learning/setup.py build_ext --inplace
   framework: norse           # YAML selector: norse | torch | sj | sinabs | bindsnet | spyx
   epochs: 2
   iterations_per_epoch: 100
@@ -50,10 +48,6 @@ training:
   stdp_a_plus: 0.01             # LTP strength — how strongly to reinforce causal (pre→post) spike order.
   stdp_a_minus: 0.01            # LTD strength — how strongly to penalise anticausal (post→pre) spike order.
   
-compiler:
-  torch_compile: false      # true → wrap model with torch.compile() (TorchInductor kernel fusion).
-                            # First run is slower (compilation overhead); subsequent runs are faster.
-
 dataset:
   dataset_name: MNIST
   data_path:

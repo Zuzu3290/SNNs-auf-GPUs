@@ -25,7 +25,6 @@ class Settings:
         dataset      = self.config.get("dataset", {})
         input_cfg    = self.config.get("input", {})
         output       = self.config.get("output", {})
-        compiler     = self.config.get("compiler", {})
         frameworks   = self.config.get("frameworks", {})
 
         # Load conv-SNN architecture from network_architecture.yaml
@@ -79,7 +78,6 @@ class Settings:
         self.WEIGHT_DECAY             = float(training.get("weight_decay", 0.0001))
         self.NUM_CLASSES              = int(training.get("num_classes", self.OUTPUT_SIZE))
         self.DEVICE                   = training.get("device", "cuda")
-        self.KERNEL                   = training.get("kernel", "OFF")
         self.DDP                      = training.get("DDP", "OFF")
         self.NUM_WORKERS              = int(training.get("num_workers", 4))
         self.USE_AMP                  = bool(training.get("use_amp", True))
@@ -158,9 +156,6 @@ class Settings:
         self.BETA        = self.FRAMEWORK_CFG["snntorch"]["beta"]
         self.TAU_MEM_INV = self.FRAMEWORK_CFG["norse"]["tau_mem_inv"]
         self.TAU         = self.FRAMEWORK_CFG["spikingjelly"]["tau"]
-
-        # Compiler
-        self.TORCH_COMPILE = bool(compiler.get("torch_compile", False))
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
@@ -307,10 +302,6 @@ class Settings:
         row("Output dir", self.OUTPUT_DIR)
         row("Plot dir",   self.PLOT_DIR)
         row("Data dir",   self.DATA_DIR)
-
-        section("COMPILER")
-        row("CUDA kernel",   self.KERNEL)
-        row("torch.compile", "ENABLED" if self.TORCH_COMPILE else "DISABLED")
 
         print()
         print("=" * W)

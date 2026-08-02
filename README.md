@@ -18,10 +18,12 @@ The codebase is structured in two planes that will converge over time:
 | Plane | Location | Role |
 |-------|----------|------|
 | Python | `src/learning/`, `event_data_workflow/`, `skeleton/` | Configuration, framework wrappers, fallback path |
-| CUDA | `src/crsc/`, `acceleration/` | Kernel execution — LIF dynamics, spike ops, memory |
+| CUDA | `src/crsc/` | Kernel execution — LIF dynamics, GPU energy/memory/throughput utilities |
 
-The compiler layer (`src/compiler/`) bridges them, dispatching operations to
-the kernel when available and falling back to Python otherwise.
+`SNNTrainer`/`SNNTester` always run the plain per-framework PyTorch path.
+`src/crsc` is a standalone, separately buildable CUDA extension — it is not
+auto-dispatched from the training loop (an earlier auto-dispatch toggle
+bypassed the model entirely and was removed; see `CLAUDE.md`).
 
 ---
 
@@ -30,11 +32,9 @@ the kernel when available and falling back to Python otherwise.
 ```
 src/
   learning/         SNN framework wrappers — SNNTorch, Norse, SpikingJelly
-  compiler/         JIT compiler, kernel loader, dispatch bridge
-  crsc/             CUDA kernels — membrane, spike, threshold, reset, decode
+  crsc/             CUDA kernels — LIF forward pass, GPU energy/memory/throughput utilities
 skeleton/           Configuration and settings (SNN_module.yaml)
 event_data_workflow/ Neuromorphic data pipeline — caching, slicing, DataLoader
-acceleration/       GPU hardware attributes, PTX loader, SNN hardware mapping
 docs/               Architecture references and hardware notes
 ```
 
@@ -54,7 +54,7 @@ Reads `SNN_module.yaml`, loads the neuromorphic dataset via
 ## Configuration
 
 All runtime parameters live in `SNN_module.yaml` at the project root:
-architecture, training schedule, dataset path, device, compiler flags, and
+architecture, training schedule, dataset path, device, CUDA kernel toggle, and
 data pipeline settings. No hardcoded values in source files.
 
 ---
@@ -86,8 +86,6 @@ and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
   strategy automatically based on available system resources
 - Activity regularization and STDP as differentiable loss terms alongside BPTT
 - Fused LIF CUDA kernel with surrogate gradient for BPTT
-- JIT compiler pipeline that lowers SNN models to an IR and schedules
-  device-aware execution
 - Adversarial robustness evaluation via TRADES
 
 ---
@@ -109,13 +107,3 @@ See [`docs/results/README.md`](docs/results/README.md) for the full results
 table, all plots, caveats on what this run does and doesn't measure, and the
 real bugs this benchmarking work has already found and fixed.
 
----
-
-## Roadmap
-
-The kernel dispatch layer (`src/compiler/runtime.py`) is the next build target.
-When complete, GPU detection at startup routes all operations — event decoding,
-tensor caching, neuron dynamics, weight updates — through `src/crsc/` kernels.
-Python implementations remain as the CPU fallback and correctness reference.
-
-See `docs/kernel_dispatch_architecture.md` for the full plan.
