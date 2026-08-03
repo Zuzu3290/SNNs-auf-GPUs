@@ -2,8 +2,10 @@
 Generates comparison plots from the JSON summaries produced by run_benchmark.py.
 
 Usage:
-    python docs/results/make_plots.py
+    python docs/results/make_plots.py                    # N-MNIST (default)
+    python docs/results/make_plots.py --dataset "ASL-DVS" # matches run_benchmark.py's --dataset
 """
+import argparse
 import csv
 import json
 from pathlib import Path
@@ -14,9 +16,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 HERE = Path(__file__).parent
-DATA = HERE / "data"
-PLOTS = HERE / "plots"
-PLOTS.mkdir(parents=True, exist_ok=True)
+
+
+def dataset_slug(name: str) -> str:
+    """Same convention as run_benchmark.py's dataset_slug — must match to find its output."""
+    return name.lower().replace(" ", "_").replace("-", "_")
+
 
 ORDER = ["norse", "torch", "sj", "sinabs", "bindsnet", "spyx"]
 COLORS = dict(zip(ORDER, plt.cm.tab10.colors))
@@ -106,26 +111,45 @@ def plot_confusion_matrices(results, fname):
 
 
 def main():
+    global DATA, PLOTS
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="N-MNIST",
+                         help="Must match the --dataset a prior run_benchmark.py run used")
+    args = parser.parse_args()
+    slug = dataset_slug(args.dataset)
+
+    DATA = HERE / "data" / slug
+    PLOTS = HERE / "plots" / slug
+    PLOTS.mkdir(parents=True, exist_ok=True)
+
     results = load_results()
     if not results:
-        print("No result JSON files found in docs/results/data/ — run run_benchmark.py first.")
+        print(f"No result JSON files found in {DATA} — run `run_benchmark.py --dataset \"{args.dataset}\"` first.")
         return
-    print(f"Loaded results for: {list(results.keys())}")
+    print(f"[{args.dataset}] Loaded results for: {list(results.keys())}")
     attach_real_training_energy(results)
 
-    plot_curve(results, "loss_history", "Training Loss", "Loss", "loss_curves.png")
-    plot_curve(results, "accuracy_history", "Training Accuracy", "Accuracy", "accuracy_curves.png")
-    plot_curve(results, "spike_rate_history", "Training Spike Rate", "Mean spike rate", "spike_rate_curves.png")
+    # Classification-only metrics (accuracy, confusion matrix) — only plotted if present,
+    # so this doesn't crash on a regression dataset's summaries once those exist.
+    has_classification_metrics = all("test_overall_accuracy" in r for r in results.values())
 
-    plot_bar(results, "test_overall_accuracy", "Test Accuracy", "Accuracy", "test_accuracy.png", scale=100)
-    plot_bar(results, "test_energy_per_sample_pj", "Energy per Sample (neuromorphic model)", "pJ / sample", "test_energy.png")
-    plot_bar(results, "test_avg_latency_per_sample_ms", "Inference Latency per Sample", "ms / sample", "test_latency.png")
-    plot_bar(results, "test_avg_firing_rate_hz", "Average Firing Rate", "Hz", "test_firing_rate.png")
-    plot_bar(results, "train_time_s", "Training Wall-Clock Time", "seconds", "train_time.png")
-    plot_bar(results, "train_energy_j", "Actual GPU Energy Used During Training (NVML-measured)", "Joules", "train_energy.png")
-    plot_bar(results, "train_avg_power_w", "Average GPU Power Draw During Training (NVML-measured)", "Watts", "train_power.png")
+    plot_curve(results, "loss_history", f"{args.dataset} — Training Loss", "Loss", "loss_curves.png")
+    plot_curve(results, "spike_rate_history", f"{args.dataset} — Training Spike Rate", "Mean spike rate", "spike_rate_curves.png")
+    plot_bar(results, "train_time_s", f"{args.dataset} — Training Wall-Clock Time", "seconds", "train_time.png")
+    plot_bar(results, "train_energy_j", f"{args.dataset} — Actual GPU Energy Used During Training (NVML-measured)", "Joules", "train_energy.png")
+    plot_bar(results, "train_avg_power_w", f"{args.dataset} — Average GPU Power Draw During Training (NVML-measured)", "Watts", "train_power.png")
 
-    plot_confusion_matrices(results, "confusion_matrices.png")
+    if has_classification_metrics:
+        plot_curve(results, "accuracy_history", f"{args.dataset} — Training Accuracy", "Accuracy", "accuracy_curves.png")
+        plot_bar(results, "test_overall_accuracy", f"{args.dataset} — Test Accuracy", "Accuracy", "test_accuracy.png", scale=100)
+        plot_bar(results, "test_energy_per_sample_pj", f"{args.dataset} — Energy per Sample (neuromorphic model)", "pJ / sample", "test_energy.png")
+        plot_bar(results, "test_avg_latency_per_sample_ms", f"{args.dataset} — Inference Latency per Sample", "ms / sample", "test_latency.png")
+        plot_bar(results, "test_avg_firing_rate_hz", f"{args.dataset} — Average Firing Rate", "Hz", "test_firing_rate.png")
+        plot_confusion_matrices(results, "confusion_matrices.png")
+    else:
+        print("  (skipping accuracy/confusion-matrix plots — not present, likely a regression dataset)")
+
     print("\nAll plots written to", PLOTS)
 
 

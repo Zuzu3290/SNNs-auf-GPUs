@@ -23,14 +23,6 @@ pip install cupy-cuda11x   # CUDA 11.x
 # Install PyTorch separately via https://pytorch.org/get-started/locally/
 ```
 
-### Build the optional CRSC CUDA extension
-```bash
-# Only needed when training.kernel: ON in SNN_module.yaml
-export PYTHONPATH="$PWD:$PWD/src"
-python src/learning/setup.py build_ext --inplace
-```
-This compiles `snn_cuda.snn_forward` from `src/crsc/kernels/snn_forward.cu` plus the `acceleration/GPU_attributes/` kernels.
-
 ### Run tests
 ```bash
 # Individual compiler test files (all are runnable directly):
@@ -75,14 +67,9 @@ cd viewer && npm run dev
 
 ## Architecture
 
-The project operates on **two converging planes**:
-
-| Plane | Location | Purpose |
-|-------|----------|---------|
-| Python | `src/learning/`, `event_data_workflow/`, `skeleton/` | Training loop, framework wrappers, data pipeline, config |
-| CUDA | `src/crsc/`, `acceleration/` | Kernel execution — LIF dynamics, spike ops, GPU memory |
-
-The **compiler layer** (`src/compiler/`) bridges them: it lowers the model to an IR, schedules device-aware execution, and dispatches to `src/crsc/` kernels when available, otherwise falling back to the Python path.
+| Location | Purpose |
+|----------|---------|
+| `src/learning/`, `event_data_workflow/`, `skeleton/` | Training loop, framework wrappers, data pipeline, config |
 
 ### Configuration flow
 
@@ -135,8 +122,6 @@ All three optional terms are gated by their `_enabled` flag in `SNN_module.yaml`
 model → ir.py (ComputeGraph/IRNode) → passes/ (fusion, device annotation, op rewrite)
      → planner.py (FusedStep plan) → runtime.py (execute, lif_step)
 ```
-
-`torch.compile()` is an optional additional wrapper (set `compiler.torch_compile: true`). The CRSC kernel path (`src/crsc/`) requires building the C++ extension first.
 
 ### Switching frameworks
 

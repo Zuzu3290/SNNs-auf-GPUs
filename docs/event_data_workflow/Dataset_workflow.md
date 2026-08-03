@@ -47,7 +47,7 @@ The class is abstract — subclasses must implement `prepare_item()`, which defi
 
 **BoundedRecordingCache** — stores recordings in CPU RAM as-is. `prepare_item()` is a no-op (returns the raw recording unchanged). Used in hybrid mode as the hot layer on top of DiskCachedDataset.
 
-**GPURecordingCache** — stores recordings in CUDA VRAM. `prepare_item()` moves tensors to the GPU device. Used as a last resort when there is no disk and insufficient RAM, with a strictly computed VRAM budget so the cache never competes with model parameters or gradients.
+**GPURecordingCache** — stores *encoded* recordings in CUDA VRAM. `prepare_item()` runs the supplied transform (Denoise → ToFrame, CPU/tonic, unavoidable — raw structured events have no CUDA tensor equivalent) and only then moves the resulting frame tensor to the GPU device; a cache hit returns it without re-encoding. Requires a transform (raises otherwise) and does not support temporal slicing, since slicing needs raw event timestamps that no longer exist post-encoding. Used as a last resort when there is no disk and insufficient RAM, with a strictly computed VRAM budget so the cache never competes with model parameters or gradients.
 
 ### Bigger picture
 

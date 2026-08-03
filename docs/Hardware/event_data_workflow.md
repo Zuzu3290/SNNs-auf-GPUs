@@ -12,10 +12,9 @@ the standard **CPU + GPU** training path and the embedded **GPU-only** path.
 |------|---------------|
 | `system_monitor.py` | RAM / VRAM / disk probing (`SystemResourceMonitor`, `CacheMetrics`) |
 | `cache_engine.py` | Strategy selection, `BoundedRecordingCache`, `GPURecordingCache`, `AdaptiveCacheController` |
-| `pipeline_coordinator.py` | RAM budget splits, DataLoader config, GPU pressure guard (`PipelineMemoryCoordinator`) |
-| `data_pipeline.py` | End-to-end assembly: raw → cache → slice → DataLoader (`NeuromorphicEncoder`) |
-| `temporal_slicer.py` | Stateless temporal windowing (`create_sliced_dataset`) |
-| `activity_reg.py` | Per-layer spike recording and regularization losses (`DenseTimestepBuffer`) |
+| `data_pipeline.py` | End-to-end assembly: raw → cache → slice → DataLoader (`NeuromorphicEncoder`), DataLoader worker sizing (`dataloader_config()`), and stateless temporal windowing (`create_sliced_dataset()`) — `pipeline_coordinator.py`/`temporal_slicer.py` were folded in during a later refactor, see `docs/event_data_workflow/caching_pipeline_refactor.md` |
+| `prefetch.py` | Background-thread batch prefetching (`AsyncGPUPrefetcher`) |
+| `src/learning/frameworks/activity_reg.py` | Per-layer spike recording and regularization losses (`DenseTimestepBuffer`) |
 
 ---
 
@@ -94,7 +93,7 @@ the standard **CPU + GPU** training path and the embedded **GPU-only** path.
 │           use_temporal_slicing?                                      │
 │               │                                                      │
 │    YES ────────▼───────────────────────────────────────────          │
-│  │  temporal_slicer.py — create_sliced_dataset()            │        │
+│  │  data_pipeline.py — create_sliced_dataset()               │        │
 │  │  Denoise → ToFrame → slice into T-ms windows             │        │
 │  └──────────────────────────────────────────────────────────┘        │
 │    NO  ────► transforms baked directly into cache wrapper            │
@@ -170,7 +169,12 @@ Activated when `determine_strategy()` detects: no disk, insufficient RAM, VRAM �
 │                                                                      │
 │  GPURecordingCache                                                   │
 │  ┌─────────────────────────────────────────────────────────────┐    │
-│  │  prepare_item()  — moves tensor to CUDA on first access     │    │
+│  │  prepare_item()  — encodes raw events via the supplied      │    │
+│  │    transform (Denoise → ToFrame, CPU/tonic), THEN moves the │    │
+│  │    resulting frame tensor to CUDA. Never caches raw events  │    │
+│  │    directly — they're a structured/mixed-dtype numpy array  │    │
+│  │    with no CUDA tensor equivalent. A cache hit returns the  │    │
+│  │    already-encoded tensor with no re-transform.              │    │
 │  │  set_phase(p)    — recalculates max_bytes + evicts to cap   │    │
 │  │  evict_under_pressure()  — called every 50 accesses:        │    │
 │  │    probe mem_get_info → if free < emergency_margin → evict  │    │
@@ -179,9 +183,10 @@ Activated when `determine_strategy()` detects: no disk, insufficient RAM, VRAM �
                │ VRAM-resident tensors
                ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  pipeline_coordinator.py — PipelineMemoryCoordinator                 │
+│  data_pipeline.py — dataloader_config() / requires_single_process_   │
+│  loading duck-typed flag                                             │
 │                                                                      │
-│  worker_budget_gb < 0.5 GB  → GPU-only mode:                        │
+│  GPURecordingCache holds live CUDA tensors → forced single-process:  │
 │    num_workers        = 0                                            │
 │    pin_memory         = False  (no CPU→GPU boundary)                │
 │    persistent_workers = False                                        │
@@ -192,25 +197,31 @@ Activated when `determine_strategy()` detects: no disk, insufficient RAM, VRAM �
 │  data_pipeline.py — NeuromorphicEncoder                              │
 │                                                                      │
 │  Single-process DataLoader (no forking; tensors already on CUDA)     │
-│  Temporal slicing recommended: slice before GPU caching              │
-│  to keep individual cache entries small                              │
+│  Temporal slicing NOT supported in gpu_memory mode: tonic's event    │
+│  slicers need raw event timestamps, which no longer exist once the   │
+│  recording has been encoded to a frame tensor for caching. Use       │
+│  memory/disk/hybrid cache tiers when temporal_slicing is enabled.    │
 └──────────────┬───────────────────────────────────────────────────────┘
                │ CUDA tensors  (no H2D transfer)
                ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │  GPU — SNN Training Loop                                             │
 │                                                                      │
-│  Training loop integration with phase-aware cache:                   │
+│  set_phase(p) exists on GPURecordingCache but is NOT currently       │
+│  called anywhere in training.py/inference.py — the phase caps table  │
+│  above is real and enforced at cache construction time (phase=       │
+│  "train" default), but the mid-run phase transitions shown below     │
+│  are a described-but-unwired capability, not active behavior:        │
 │                                                                      │
-│  cache.set_phase("train")                                            │
+│  cache.set_phase("train")         (dormant — not called)             │
 │  for batch in dataloader:                                            │
 │      output = model(batch)                                           │
-│      cache.set_phase("backward")  ← shrink budget before backward   │
+│      cache.set_phase("backward")  (dormant — not called)             │
 │      loss.backward()                                                 │
 │      optimizer.step()                                                │
-│      cache.set_phase("train")     ← restore budget                  │
+│      cache.set_phase("train")     (dormant — not called)             │
 │                                                                      │
-│  cache.set_phase("eval")          ← larger budget during evaluation  │
+│  cache.set_phase("eval")          (dormant — not called)             │
 │  for batch in test_loader:                                           │
 │      with torch.no_grad():                                           │
 │          output = model(batch)                                       │
@@ -226,9 +237,9 @@ Activated when `determine_strategy()` detects: no disk, insufficient RAM, VRAM �
 
 | Rule | Where Enforced |
 |------|---------------|
-| Cache wraps **raw** recordings, never sliced datasets | `wrap_dataset()` raises `ValueError` if `slice_map` attribute detected |
-| Cache budget ÷ `num_workers` in hybrid mode | `wrap_dataset(num_workers=N)` in `data_pipeline.py` |
+| Cache wraps **raw** recordings, never sliced datasets | `determine_dataset_strategy()` raises `ValueError` if `slice_map` attribute detected |
+| Cache budget ÷ `num_workers` in hybrid mode | `determine_dataset_strategy(num_workers=N)` in `cache_engine.py` |
 | GPU VRAM: emergency 15 % always reserved | `compute_gpu_cache_budget()` |
-| CUDA required — CPU-only is not a valid deployment | `PipelineMemoryCoordinator.__init__` raises `RuntimeError` if no CUDA |
-| GPU pressure > 75 % → recording cache halved | `PipelineMemoryCoordinator.effective_cache_gb()` |
-| GPU pressure > 75 % + disk exists → switch to disk cache | `AdaptiveCacheController.determine_strategy()` |
+| CPU-only **is** a valid, verified deployment | `training.device: cpu` (or the `auto` picker's CPU-only option) — end-to-end CPU-only run verified this session; `SystemResourceMonitor(cuda_enabled=...)` gates all GPU probing off CUDA is never touched |
+| GPU pressure > 75 % → recording cache halved | historically `PipelineMemoryCoordinator.effective_cache_gb()` — that class is gone; equivalent RAM-budget logic now lives in `data_pipeline.dataloader_config()` (worker sizing only, not cache sizing) |
+| GPU pressure > 75 % + disk exists → switch to disk cache | `AdaptiveCacheController.determine_dataset_strategy()` |

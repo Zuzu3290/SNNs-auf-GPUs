@@ -6,11 +6,12 @@ architecture:
   leak: 1.0
   override: false
   network_struct: S
-  device: cuda
   simulator: ON
 
 training:
   framework: norse           # YAML selector: norse | torch | sj | sinabs | bindsnet | spyx
+  device: auto                # cpu | cuda | auto (prompts for CPU-only / hybrid / GPU-only at
+                               # an interactive terminal; autodetects in non-interactive runs)
   epochs: 2
   iterations_per_epoch: 100
   timesteps: 25
@@ -19,6 +20,9 @@ training:
   learning_rate: 0.001
   weight_decay: 0.0001
   num_classes: 10
+  regression_output_dim: 6      # Regression head size for Phase B datasets (MVSEC/TUM-VIE).
+                                 # Provisional (6 = 6-DoF pose) — target field isn't finalized,
+                                 # see docs/Haseeb-open-items.md. Unused by classification datasets.
   # TRADES robustness training — penalises the network for changing its prediction under input corruption.
   # Loss = CrossEntropy(clean) + lambda * KL(clean || adversarial).
   trades_enabled: true          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.

@@ -23,4 +23,10 @@ class WorkflowSettings:
         self.MEMORY_SAFETY_MARGIN_GB   = float(cache.get("memory_safety_margin_gb", 2.0))
         self.MEMORY_CACHE_THRESHOLD_GB = float(cache.get("memory_cache_threshold_gb", 6.0))
         self.MAX_CACHED_RECORDINGS     = int(cache.get("max_cached_recordings", 500))
+        # Adaptive on/off switch: None → probe live resources and pick a
+        # strategy; a value here forces that strategy instead.
         self.CACHE_FORCE_MODE          = cache.get("force_mode", None)
+
+        realtime = config.get("realtime", {})
+        # {dataset_name: deadline_ms} — see docs/frameworks/realtime_nir_evaluation.md
+        self.REALTIME_DEADLINE_MS = {k: float(v) for k, v in realtime.get("deadline_ms", {}).items()}

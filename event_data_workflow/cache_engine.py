@@ -1,10 +1,7 @@
 """
-Adaptive Cache Controller for Neuromorphic Data Pipelines
-Dynamically balances between MemoryCachedDataset and DiskCachedDataset based on:
-- Available RAM
-- Disk availability
-- Dataset size
-- Access patterns
+Picks a caching strategy (RAM, disk, hybrid, or GPU VRAM) for neuromorphic
+recordings based on live system resources, and provides the cache classes
+that back each strategy.
 """
 from __future__ import annotations
 import sys
@@ -24,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def measure_event_bytes(events) -> int:
-    """Return the memory footprint of a single event sample in bytes."""
+    """Byte size of one sample, for cache byte-budget accounting."""
     if hasattr(events, "nbytes"):
         return events.nbytes
     if hasattr(events, "element_size"):
@@ -32,32 +29,47 @@ def measure_event_bytes(events) -> int:
     return sys.getsizeof(events)
 
 
-# VRAM budget fractions per training phase — controls how aggressively the
-# GPURecordingCache is allowed to grow relative to free VRAM.
-# Lower fractions during computationally heavy phases (backward pass, warmup)
-# prevent the cache from competing with activations, gradients, and optimizer state.
+class _ComposedTransform:
+    """Picklable stand-in for a closure — Windows' spawn-based multiprocessing
+    can't pickle nested functions (only importable module-level classes/functions),
+    which broke DataLoader workers (num_workers > 0) the moment a DiskCachedDataset
+    holding a closure-based transform got sent to a worker process."""
+    def __init__(self, fns):
+        self.fns = fns
+
+    def __call__(self, x):
+        for f in self.fns:
+            x = f(x)
+        return x
+
+
+def compose_transforms(*fns):
+    """Chain callables left to right, skipping any that are None."""
+    fns = [f for f in fns if f is not None]
+    if not fns:
+        return None
+    if len(fns) == 1:
+        return fns[0]
+    return _ComposedTransform(fns)
+
+
+# How large a slice of free VRAM the GPU cache may use, per training phase.
+# Smaller during backward/warmup (competing hard for VRAM), larger during
+# eval/inference (no gradients or optimizer state active).
 GPU_PHASE_CAPS: dict[str, float] = {
-    "warmup":    0.05,  # activations and params not yet stable — keep cache tiny
-    "train":     0.10,  # conservative: backward pass competes hard for VRAM
-    "backward":  0.05,  # most dangerous moment — minimize cache footprint
-    "eval":      0.25,  # no optimizer state or gradients active — more headroom
-    "inference": 0.30,  # largest budget; no backward pass at all
-}   # controls how aggressive or conservative the cache is in each phase.
-GPU_EMERGENCY_MARGIN = 0.15  # fraction of total VRAM kept unconditionally free
-GPU_MAX_CACHE_GB     = 2.0   # absolute ceiling regardless of free VRAM
+    "warmup":    0.05,
+    "train":     0.10,
+    "backward":  0.05,
+    "eval":      0.25,
+    "inference": 0.30,
+}
+GPU_EMERGENCY_MARGIN = 0.15  # fraction of total VRAM always kept free
+GPU_MAX_CACHE_GB     = 2.0   # hard ceiling regardless of free VRAM
+
 
 def compute_gpu_cache_budget(free_vram_gb: float, total_vram_gb: float, phase: str = "train") -> float:
-    """
-    Strict VRAM budget for GPURecordingCache.
-
-    VRAM owners in priority order (model/runtime take precedence):
-        1. model parameters          5. temporary CUDA workspace
-        2. forward activations       6. prefetch queue
-        3. backward gradients        7. recording cache  ← lowest priority
-        4. optimizer state
-
-    Budget = min(free × phase_cap, free − emergency_margin, GPU_MAX_CACHE_GB)
-    """
+    """VRAM budget for the GPU cache: the smallest of the phase cap, the
+    emergency margin, and the hard ceiling."""
     emergency_gb    = total_vram_gb * GPU_EMERGENCY_MARGIN
     safe_cache_vram = free_vram_gb  - emergency_gb
     phase_cap       = GPU_PHASE_CAPS.get(phase, 0.10)
@@ -65,66 +77,40 @@ def compute_gpu_cache_budget(free_vram_gb: float, total_vram_gb: float, phase: s
     return max(0.0, budget)
 
 
-class BaseS3FIFOCache(Dataset):
+class BaseRecordingCache(Dataset):
     """
-    S3-FIFO cache base for raw neuromorphic recordings.
-
-    Architecture — SOSP'23 (Yang et al., "FIFO Queues are All You Need"):
-      Small queue  (10% target): new items enter here. Items accessed more than
-                   once before eviction are promoted to Main; single-access items
-                   are retired to the ghost set (indices only, no data).
-      Main queue   (90% target): stable working set with CLOCK-style second chance.
-                   Items with freq > 0 are reinserted at the tail with freq - 1;
-                   items with freq == 0 are evicted.
-      Ghost set    : recently evicted indices. A miss that hits the ghost is
-                   admitted directly into Main, bypassing Small — this gives
-                   returning items an immediate fast path.
-
-    Subclasses override prepare_item() — CPU subclass is a no-op, GPU subclass
-    moves tensors to CUDA.
-
-    Both max_recordings (count cap) and max_bytes (byte cap) apply simultaneously.
-    Multi-worker / multiprocessing safe: lock is rebuilt on unpickle.
+    Bounded FIFO cache for raw recordings: caches up to max_recordings /
+    max_bytes, evicting the oldest entry once full. Subclasses implement
+    prepare_item() to decide what actually gets stored (CPU passthrough vs.
+    GPU-resident tensor).
     """
 
-    SMALL_FRAC     = 0.10   # target fraction of cached items kept in Small queue
-    GHOST_CAPACITY = 4096   # max ghost entries (indices only — negligible memory)
-    FREQ_MAX       = 3      # 2-bit counter ceiling (per paper)
+    # True on subclasses holding device-resident state (live CUDA tensors)
+    # that can't be shared with a separate DataLoader worker process.
+    requires_single_process_loading = False
 
-    def __init__(self, dataset: Dataset, max_recordings: Optional[int] = None, max_bytes: Optional[int] = None, transform = None):
+    def __init__(self, dataset: Dataset, max_recordings: Optional[int] = None, max_bytes: Optional[int] = None, transform=None):
         self.dataset        = dataset
         self.max_recordings = max_recordings
         self.max_bytes      = max_bytes
-        self.transform      = transform
+        self.transform      = transform  # applied fresh on every access, cache hit or miss
 
         self.cache: dict[int, tuple] = {}
-        self.freq:  dict[int, int]   = {}
-        self.cache_bytes: int        = 0
-
-        self.small_q:  deque[int] = deque()   # admission queue  (10%)
-        self.main_q:   deque[int] = deque()   # working set      (90%)
-        self.ghost_q:  deque[int] = deque()   # eviction history (indices only)
-        self.ghost_set: set[int]  = set()
-
-        self.in_small: set[int] = set()
-        self.in_main:  set[int] = set()
+        self.order: deque[int] = deque()  # insertion order, oldest at the left
+        self.cache_bytes: int  = 0
 
         self.lock = threading.Lock()
 
     @abstractmethod
     def prepare_item(self, raw):
-        """Transform raw (events, target) before caching. Override in subclasses."""
+        """Transform a raw (events, target) pair before it's cached."""
 
     def __len__(self) -> int:
         return len(self.dataset)
 
     def __getitem__(self, idx: int):
         with self.lock:
-            if idx in self.cache:
-                self.freq[idx] = min(self.FREQ_MAX, self.freq[idx] + 1)
-                raw = self.cache[idx]
-            else:
-                raw = None
+            raw = self.cache.get(idx)
 
         if raw is None:
             raw = self.prepare_item(self.dataset[idx])
@@ -134,9 +120,7 @@ class BaseS3FIFOCache(Dataset):
                 if idx not in self.cache:
                     self.insert_item(idx, raw, nb)
                 else:
-                    # Another worker inserted concurrently — just boost frequency
-                    self.freq[idx] = min(self.FREQ_MAX, self.freq.get(idx, 0) + 1)
-                    raw = self.cache[idx]
+                    raw = self.cache[idx]  # another worker inserted it first
 
         if self.transform is not None:
             events, target = raw
@@ -144,22 +128,12 @@ class BaseS3FIFOCache(Dataset):
         return raw
 
     def insert_item(self, idx: int, raw: tuple, nb: int) -> None:
-        while self.over_capacity(nb):
-            if not self.evict_one():
-                break
+        while self.over_capacity(nb) and self.order:
+            self.evict_one()
 
         self.cache[idx]   = raw
-        self.freq[idx]    = 1
         self.cache_bytes += nb
-
-        if idx in self.ghost_set:
-            # Ghost hit → skip Small, go straight to Main
-            self.ghost_set.discard(idx)
-            self.main_q.append(idx)
-            self.in_main.add(idx)
-        else:
-            self.small_q.append(idx)
-            self.in_small.add(idx)
+        self.order.append(idx)
 
     def over_capacity(self, incoming_bytes: int) -> bool:
         if self.max_recordings is not None and len(self.cache) >= self.max_recordings:
@@ -169,62 +143,13 @@ class BaseS3FIFOCache(Dataset):
         return False
 
     def evict_one(self) -> bool:
-        # Maintain the 10/90 split: evict from Small if it is above its target share
-        small_target = max(1, int(len(self.cache) * self.SMALL_FRAC))
-        if self.small_q and len(self.small_q) >= small_target:
-            return self.evict_from_small()
-        if self.main_q:
-            return self.evict_from_main()
-        if self.small_q:
-            return self.evict_from_small()
-        return False
-
-    def evict_from_small(self) -> bool:
-        if not self.small_q:
+        if not self.order:
             return False
-        idx = self.small_q.popleft()
-        self.in_small.discard(idx)
-
-        if self.freq.get(idx, 0) > 1:
-            # Accessed more than once → graduate to Main
-            self.freq[idx] = 1
-            self.main_q.append(idx)
-            self.in_main.add(idx)
-            return True  # item kept, space not freed; caller loops again if needed
-        else:
-            # Single-access → evict and add fingerprint to ghost
-            nb = measure_event_bytes(self.cache[idx][0])
-            del self.cache[idx]
-            del self.freq[idx]
-            self.cache_bytes -= nb
-            self.ghost_q.append(idx)
-            self.ghost_set.add(idx)
-            while len(self.ghost_q) > self.GHOST_CAPACITY:
-                self.ghost_set.discard(self.ghost_q.popleft())
-            return True
-
-    def evict_from_main(self) -> bool:
-        if not self.main_q:
-            return False
-        # CLOCK loop: bounded by queue length × (FREQ_MAX + 1) — always terminates
-        limit = len(self.main_q) * (self.FREQ_MAX + 1) + 1
-        for _ in range(limit):
-            if not self.main_q:
-                return False
-            idx = self.main_q.popleft()
-            self.in_main.discard(idx)
-            if self.freq.get(idx, 0) > 0:
-                # Second chance: reinsert with decremented frequency
-                self.freq[idx] -= 1
-                self.main_q.append(idx)
-                self.in_main.add(idx)
-            else:
-                nb = measure_event_bytes(self.cache[idx][0])
-                del self.cache[idx]
-                del self.freq[idx]
-                self.cache_bytes -= nb
-                return True
-        return False
+        idx = self.order.popleft()
+        nb = measure_event_bytes(self.cache[idx][0])
+        del self.cache[idx]
+        self.cache_bytes -= nb
+        return True
 
     @property
     def cache_size(self) -> int:
@@ -234,18 +159,12 @@ class BaseS3FIFOCache(Dataset):
     def clear(self):
         with self.lock:
             self.cache.clear()
-            self.freq.clear()
             self.cache_bytes = 0
-            self.small_q.clear()
-            self.main_q.clear()
-            self.ghost_q.clear()
-            self.ghost_set.clear()
-            self.in_small.clear()
-            self.in_main.clear()
+            self.order.clear()
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        state["lock"] = None
+        state["lock"] = None  # locks aren't picklable — rebuilt on unpickle
         return state
 
     def __setstate__(self, state):
@@ -253,69 +172,47 @@ class BaseS3FIFOCache(Dataset):
         self.lock = threading.Lock()
 
 
-# Selected under hybrid condition only (large RAM + disk available).
-class BoundedRecordingCache(BaseS3FIFOCache):
-    """
-    CPU RAM S3-FIFO cache for raw recordings.
-
-        cached_raw = BoundedRecordingCache(raw_dataset, max_recordings=500)
-        sliced     = TemporalSlicedDataset(cached_raw, config)
-
-    Why cache recordings, not slices:
-    - N slices per recording → N cache hits from 1 stored entry (high reuse)
-    - Memory is proportional to recordings, not recordings × slices
-    - Avoids storing duplicate/overlapping event windows
-    """
+class BoundedRecordingCache(BaseRecordingCache):
+    """CPU RAM cache tier (hybrid mode): sits in front of a DiskCachedDataset
+    as a bounded hot layer. Stores whatever it's given, unchanged."""
 
     def __init__(self, dataset: Dataset, max_recordings: int = 500, max_bytes: Optional[int] = None, transform=None):
         super().__init__(dataset, max_recordings=max_recordings, max_bytes=max_bytes, transform=transform)
 
     def prepare_item(self, raw):
-        return raw  # CPU path — no transformation needed
+        return raw
 
 
-class GPURecordingCache(BaseS3FIFOCache):
+class GPURecordingCache(BaseRecordingCache):
     """
-    GPU VRAM LRU cache for GPU-only deployments (no disk, limited RAM).
-
-    Budget policy — cache is the lowest-priority VRAM user:
-        compute_gpu_cache_budget() enforces a phase cap and an emergency margin.
-        set_phase() recalculates the budget immediately when the training phase
-        changes (e.g. "train" → "eval") and evicts down to the new limit.
-        evict_under_pressure() probes live VRAM every PRESSURE_CHECK_INTERVAL
-        accesses and evicts LRU entries if free VRAM falls below the emergency
-        margin (GPU_EMERGENCY_MARGIN × total VRAM).
-
-    Design note for neuromorphic workloads:
-        Full raw recordings may be too large for VRAM. Prefer applying this cache
-        after temporal slicing (smaller chunks) or store encoded spike tensors
-        rather than raw event arrays. See docs/Hardware/event_data_workflow.md.
+    GPU VRAM cache tier: stores the encoded frame tensor directly on the
+    device. encode_transform (deterministic, e.g. Denoise+ToFrame) runs once
+    per recording and is baked into the cached value. live_transform
+    (stochastic, e.g. random rotation) runs fresh on every access instead,
+    so it doesn't get frozen into the cache after a recording's first touch.
     """
 
-    PRESSURE_CHECK_INTERVAL = 50  # VRAM probe cadence (item accesses)
+    requires_single_process_loading = True  # holds live CUDA tensors
 
-    def __init__(self, dataset: Dataset, device: torch.device, max_bytes: int, transform=None):
-        super().__init__(dataset, max_recordings=None, max_bytes=max_bytes, transform=transform)
+    PRESSURE_CHECK_INTERVAL = 50  # VRAM probe cadence, in accesses
+
+    def __init__(self, dataset: Dataset, device: torch.device, max_bytes: int, encode_transform=None, live_transform=None):
+        super().__init__(dataset, max_recordings=None, max_bytes=max_bytes, transform=live_transform)
         self.device = device
         self.phase = "train"
         self.access_count = 0
+        self._encode = encode_transform
 
     def prepare_item(self, raw):
         events, target = raw
+        if self._encode is not None:
+            events = self._encode(events)
         if isinstance(events, torch.Tensor):
             return events.to(self.device, non_blocking=True), target
         return torch.as_tensor(events, device=self.device), target
 
     def set_phase(self, phase: str) -> None:
-        """
-        Switch training phase and immediately enforce the new VRAM budget.
-
-        Tighter phases (e.g. "backward") shrink max_bytes and evict LRU entries
-        to free VRAM before the backward pass competes for it.
-        Looser phases (e.g. "eval") expand max_bytes up to the new cap.
-
-        Valid: warmup | train | backward | eval | inference
-        """
+        """Switch training phase and immediately shrink/grow the VRAM budget to match."""
         if phase not in GPU_PHASE_CAPS:
             raise ValueError(f"Unknown phase '{phase}'. Valid: {list(GPU_PHASE_CAPS)}")
         self.phase = phase
@@ -327,7 +224,7 @@ class GPURecordingCache(BaseS3FIFOCache):
         new_max_bytes = int(new_budget * (1024 ** 3))
         with self.lock:
             self.max_bytes = new_max_bytes
-            while self.cache_bytes > self.max_bytes and (self.small_q or self.main_q):
+            while self.cache_bytes > self.max_bytes and self.order:
                 self.evict_one()
 
     def __getitem__(self, idx: int):
@@ -335,7 +232,7 @@ class GPURecordingCache(BaseS3FIFOCache):
         return super().__getitem__(idx)
 
     def evict_under_pressure(self) -> None:
-        """Evict S3-FIFO entries if VRAM free space falls below the emergency margin."""
+        """Evict down to the emergency margin if free VRAM has dropped below it."""
         self.access_count += 1
         if self.access_count % self.PRESSURE_CHECK_INTERVAL != 0:
             return
@@ -344,7 +241,7 @@ class GPURecordingCache(BaseS3FIFOCache):
         free_gb      = free_driver / (1024 ** 3)
         emergency_gb = (total / (1024 ** 3)) * GPU_EMERGENCY_MARGIN
         if free_gb >= emergency_gb:
-            return  # fast path — no pressure
+            return
         with self.lock:
             while self.cache and free_gb < emergency_gb:
                 self.evict_one()
@@ -353,20 +250,8 @@ class GPURecordingCache(BaseS3FIFOCache):
 
 
 class AdaptiveCacheController:
-    """
-    Intelligent caching controller that monitors system resources and selects
-    optimal caching strategy for neuromorphic datasets.
-
-    Cache is applied to RAW recordings (before temporal slicing) so that
-    all slices derived from one recording share a single cache entry.
-
-    Strategy Selection Logic:
-    1. If RAM > threshold and dataset fits → MemoryCachedDataset (full dataset in RAM)
-    2. If RAM > 32GB and disk available → Hybrid (DiskCachedDataset primary + BoundedRecordingCache hot layer)
-    3. If RAM < threshold and disk available → DiskCachedDataset (memory-safe, neuromorphic default)
-    4. If no disk and insufficient RAM but VRAM >= 500MB → GPURecordingCache (compute_gpu_cache_budget, train-phase cap)
-    5. If no resources available → System halt (RuntimeError)
-    """
+    """Probes live RAM/disk/VRAM and picks memory, disk, hybrid, or GPU
+    caching for a dataset — whichever tier actually fits."""
 
     def __init__(self, cache_path: str = "./cache", memory_safety_margin_gb: float = 2.0, memory_cache_threshold_gb: float = 6.0, max_cached_recordings: int = 500, device=None):
         self.cache_path = Path(cache_path)
@@ -374,19 +259,15 @@ class AdaptiveCacheController:
         self.memory_threshold = memory_cache_threshold_gb
         self.max_cached_recordings = max_cached_recordings
         self.device = device
-        self.device_idx = (
-            (device.index or 0)
-            if device is not None and getattr(device, "type", "") == "cuda"
-            else 0
-        )
+        self.cuda_enabled = device is not None and getattr(device, "type", "") == "cuda"
+        self.device_idx = (device.index or 0) if device is not None and self.cuda_enabled else 0
         self.cache_path.mkdir(parents=True, exist_ok=True)
-        self.monitor = SystemResourceMonitor(cache_path=str(self.cache_path), device_idx=self.device_idx)
-
-    def get_system_metrics(self) -> CacheMetrics:
-        return self.monitor.snapshot() #  takes a live reading of system resources
+        self.monitor = SystemResourceMonitor(
+            cache_path=str(self.cache_path), device_idx=self.device_idx, cuda_enabled=self.cuda_enabled
+        )
 
     def estimate_dataset_memory_footprint(self, dataset: Dataset, num_samples_to_probe: int = 10) -> float:
-        """Estimate total dataset memory requirement by sampling. Returns estimated size in GB."""
+        """Estimate total dataset size in GB by sampling a few items."""
         sample_indices = torch.randperm(len(dataset))[:min(num_samples_to_probe, len(dataset))]
         total_bytes = 0
         successful_probes = 0
@@ -406,16 +287,25 @@ class AdaptiveCacheController:
 
         return (total_bytes / successful_probes * len(dataset)) / (1024 ** 3)
 
-    def determine_dataset_strategy(self, dataset: Dataset, transform=None, split: str = "train", num_workers: int = 1,
+    def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train", num_workers: int = 1,
         force_mode: Optional[Literal["memory", "disk", "hybrid", "gpu_memory", "no_cache"]] = None,
     ) -> Dataset:
         """
-        Resolve caching strategy from live system metrics and apply it immediately.
-        Cache must be applied to raw recordings BEFORE temporal slicing.
+        Pick a cache tier from live resources and wrap dataset in it.
 
-        num_workers: number of DataLoader workers that will share this cache.
-        With persistent_workers=True each worker holds its own copy of the cache dict,
-        so the byte budget is divided by num_workers to prevent RAM overcommit.
+        transform: deterministic preprocessing (same output every time) —
+            safe to bake into whichever cache is chosen.
+        live_transform: stochastic augmentation that must vary every access.
+            For memory/disk it's composed after transform, since those
+            caches already re-run their transform on every read. For
+            hybrid/GPU it's kept out of the cached value and applied via
+            the cache's own per-access hook instead.
+        num_workers: workers that will share this cache — the hybrid byte
+            budget is divided across them to avoid RAM overcommit.
+        force_mode: the adaptive on/off switch. None probes live resources
+            and picks a strategy; any other value forces that strategy
+            instead (still reads live resources once, only to size the
+            cache budget within it, not to choose it).
         """
         if hasattr(dataset, "slice_map"):
             raise ValueError(
@@ -433,7 +323,6 @@ class AdaptiveCacheController:
         cache_dir = self.cache_path / split
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── Resolve mode ──────────────────────────────────────────────────
         if force_mode:
             mode = force_mode
             threshold_gb = {
@@ -462,11 +351,16 @@ class AdaptiveCacheController:
 
         logger.info(f"[CACHE CONTROLLER] {split.upper()} → {mode.upper()} ({available_for_cache:.1f}GB RAM free, dataset ~{dataset_size_gb:.1f}GB)")
 
+        # Only insert the numpy→tensor bridge ahead of live_transform when
+        # there actually is one, to match the exact pipeline used when
+        # augmentation is present.
+        numpy_bridge = torch.from_numpy if live_transform is not None else None
+
         if mode == "memory":
-            return MemoryCachedDataset(dataset, transform=transform)
+            return MemoryCachedDataset(dataset, transform=compose_transforms(transform, numpy_bridge, live_transform))
 
         if mode == "disk":
-            return DiskCachedDataset(dataset, transform=transform, cache_path=str(cache_dir))
+            return DiskCachedDataset(dataset, transform=compose_transforms(transform, numpy_bridge, live_transform), cache_path=str(cache_dir))
 
         if mode == "hybrid":
             effective_workers = max(1, num_workers)
@@ -475,17 +369,35 @@ class AdaptiveCacheController:
                 f"[CACHE CONTROLLER] Hybrid hot layer: {threshold_gb:.1f}GB ÷ {effective_workers} workers "
                 f"= {max_bytes / (1024**3):.2f}GB per worker"
             )
+            # Cache only the deterministic transform; live_transform runs via
+            # BoundedRecordingCache's own per-access hook, not baked in.
             disk_cached = DiskCachedDataset(dataset, transform=transform, cache_path=str(cache_dir))
-            return BoundedRecordingCache(disk_cached, max_recordings=self.max_cached_recordings, max_bytes=max_bytes)
+            return BoundedRecordingCache(
+                disk_cached, max_recordings=self.max_cached_recordings, max_bytes=max_bytes,
+                transform=compose_transforms(numpy_bridge, live_transform),
+            )
 
         if mode == "gpu_memory":
             if self.device is None or getattr(self.device, "type", "") != "cuda":
                 logger.warning("[CACHE CONTROLLER] gpu_memory selected but no CUDA device — no_cache fallback")
                 return dataset
+            if transform is None:
+                raise ValueError(
+                    "[CACHE CONTROLLER] gpu_memory cache mode requires a transform (Denoise+ToFrame) "
+                    "to encode raw events into a cacheable tensor before caching — it cannot cache raw "
+                    "structured event arrays directly. This is why gpu_memory does not support temporal "
+                    "slicing: the sliced pipeline path caches raw recordings with no transform (slicing "
+                    "needs raw event timestamps), and defers encoding to per-slice processing. Use a "
+                    "different cache tier (memory/disk/hybrid) when temporal_slicing is enabled."
+                )
             logger.info(f"[CACHE CONTROLLER] GPURecordingCache: {threshold_gb:.2f}GB VRAM budget on {self.device}")
-            return GPURecordingCache(dataset, device=self.device, max_bytes=int(threshold_gb * (1024 ** 3)), transform=transform)
+            # live_transform runs against a tensor already on `device` here —
+            # no numpy bridge needed, unlike the hybrid/memory/disk tiers.
+            return GPURecordingCache(
+                dataset, device=self.device, max_bytes=int(threshold_gb * (1024 ** 3)),
+                encode_transform=transform, live_transform=live_transform,
+            )
 
-        # no_cache (force_mode only)
         logger.info(f"[CACHE CONTROLLER] {split.upper()} → NO_CACHE (on-the-fly processing)")
         return dataset
 
@@ -510,7 +422,7 @@ class AdaptiveCacheController:
         logger.info(sep)
 
     def clear_cache(self, split: Optional[str] = None):
-        """Clear disk cache. Directory is recreated automatically on the next pipeline run."""
+        """Delete the disk cache for one split, or all splits if none is given."""
         if split:
             cache_dir = self.cache_path / split
             if cache_dir.exists():
@@ -520,5 +432,3 @@ class AdaptiveCacheController:
             if self.cache_path.exists():
                 shutil.rmtree(self.cache_path)
                 logger.info("[CACHE CONTROLLER] Cleared all cache directories")
-
-

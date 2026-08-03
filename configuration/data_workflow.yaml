@@ -10,7 +10,6 @@ temporal_slicing:
   overlap_ms: 0.0        # keep at 0 to avoid duplicate training samples
   min_events_per_slice: 10
   discard_incomplete: false
-  auto_tune: false
   events_per_slice: null # set an int to switch to event-driven mode (ignores slice_duration_ms)
 
 cache:
@@ -18,6 +17,26 @@ cache:
   memory_safety_margin_gb: 2.0
   memory_cache_threshold_gb: 6.0
   max_cached_recordings: 500
-  force_mode: null       # null | memory | disk | hybrid | no_cache
+  # This is the adaptive on/off switch: null probes live RAM/disk/VRAM and
+  # picks a strategy automatically. Set to one of the values below to force
+  # that strategy instead (still reads live resources once, only to size
+  # the cache budget within it, not to choose it):
+  #   memory | disk | hybrid | gpu_memory | no_cache
+  force_mode: null
 
 # batch_size and num_workers live in SNN_module.yaml (training section)
+
+# Real-time suitability deadlines, per dataset — see
+# docs/frameworks/realtime_nir_evaluation.md. Deferred, not evaluated against
+# yet: p99 latency (not median) under the eval/inference cache phase should be
+# compared against these, not against training-time throughput numbers.
+realtime:
+  deadline_ms:
+    # IBM's original DVS128 Gesture paper (Amir et al., CVPR 2017) reports
+    # 105ms gesture-onset detection latency on TrueNorth as the real-time
+    # target this dataset was built around — used here as the literature
+    # anchor rather than an arbitrary number.
+    # Key must match DATASET_REGISTRY's "name" in data_pipeline.py exactly
+    # (cfg.DATASET_NAME is matched against that string, spaces included).
+    "DVS128 Gesture": 105.0
+

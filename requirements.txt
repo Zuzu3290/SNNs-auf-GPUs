@@ -55,5 +55,9 @@ tonic>=0.3.0           # for event data handling and visualization
 # Utilities
 tqdm>=4.65
 
+# Phase B regression datasets (event_data_workflow/regression_datasets.py)
+importRosbag>=1.0.3    # MVSEC — reads its .bag recordings
+hdf5plugin>=4.0        # TUM-VIE — reads its .h5 event files
+
 #gpu rrequirements
 nvidia-ml-py==0.1.0

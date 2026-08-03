@@ -62,9 +62,7 @@ class Settings:
         self.POOL_KERNEL  = int(conv.get("pool_kernel",  2))
 
         # Auto-compute flattened size after both conv+pool stages
-        h = (self.SENSOR_H - self.CONV1_KERNEL + 1) // self.POOL_KERNEL
-        h = (h - self.CONV2_KERNEL + 1) // self.POOL_KERNEL
-        self.FC_IN = self.CONV2_OUT * h * h
+        self.FC_IN = self.compute_fc_in(self.SENSOR_H, self.SENSOR_W)
 
         self.NEURON_TYPES = network_arch.get("neuron_types", {})
 
@@ -77,6 +75,10 @@ class Settings:
         self.LEARNING_RATE            = float(training.get("learning_rate", 0.001))
         self.WEIGHT_DECAY             = float(training.get("weight_decay", 0.0001))
         self.NUM_CLASSES              = int(training.get("num_classes", self.OUTPUT_SIZE))
+        # Regression head output size (Phase B: MVSEC/TUM-VIE). Provisional default (6 = a
+        # 6-DoF pose vector) — the actual target field/shape isn't finalized yet, see
+        # docs/Haseeb-open-items.md. Change via training.regression_output_dim in YAML.
+        self.REGRESSION_OUTPUT_DIM    = int(training.get("regression_output_dim", 6))
         self.DEVICE                   = training.get("device", "cuda")
         self.DDP                      = training.get("DDP", "OFF")
         self.NUM_WORKERS              = int(training.get("num_workers", 4))
@@ -174,6 +176,29 @@ class Settings:
     def active_fw_cfg(self) -> dict:
         """Config dict for whichever framework is currently selected."""
         return self.FRAMEWORK_CFG[FW_TO_CFG_KEY[self.FRAMEWORK]]
+
+    def compute_fc_in(self, sensor_h: int, sensor_w: int) -> int:
+        """Flattened size after both conv+pool stages — independent H/W so non-square sensors work."""
+        h = (sensor_h - self.CONV1_KERNEL + 1) // self.POOL_KERNEL
+        h = (h - self.CONV2_KERNEL + 1) // self.POOL_KERNEL
+        w = (sensor_w - self.CONV1_KERNEL + 1) // self.POOL_KERNEL
+        w = (w - self.CONV2_KERNEL + 1) // self.POOL_KERNEL
+        return self.CONV2_OUT * h * w
+
+    def apply_dataset_shape(self, sensor_h: int, sensor_w: int, in_channels: int, num_classes: int | None = None):
+        """Override conv-input shape and output classes with the selected dataset's actual
+        sensor size / class count, and recompute the dependent flattened FC input size.
+        Must run before the model is constructed.
+
+        num_classes is None for regression datasets (Phase B: MVSEC, TUM-VIE) — they have no
+        class count, and their output-head/loss wiring is a documented follow-up, not built yet.
+        NUM_CLASSES is left untouched in that case rather than overwritten with a meaningless value."""
+        self.SENSOR_H    = int(sensor_h)
+        self.SENSOR_W    = int(sensor_w)
+        self.IN_CHANNELS = int(in_channels)
+        if num_classes is not None:
+            self.NUM_CLASSES = int(num_classes)
+        self.FC_IN       = self.compute_fc_in(self.SENSOR_H, self.SENSOR_W)
 
     def load_yaml(self, yaml_path):
         with open(yaml_path, "r") as file:

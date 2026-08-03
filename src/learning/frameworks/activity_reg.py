@@ -34,12 +34,75 @@ Norse neurons return (spk, state) tuples — handled automatically.
 SpikingJelly returns pre-summed [B, C] output — STDP skips the output pair automatically.
 """
 
+import threading
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
-from event_data_workflow.pipeline_coordinator import DenseTimestepBuffer
+
+class DenseTimestepBuffer:
+    """Per-timestep spike buffer for SNN forward passes: push() once per
+    timestep, stack() to reconstruct [T, B, ...] for loss/metrics."""
+
+    def __init__(self) -> None:
+        self.events: List[torch.Tensor] = []
+        self.step_shape: Optional[tuple] = None
+        self.lock = threading.Lock()
+
+    def push(self, spk: torch.Tensor) -> None:
+        tensor = spk.detach()
+        with self.lock:
+            if self.step_shape is None:
+                self.step_shape = tuple(spk.shape)
+            self.events.append(tensor)
+
+    def stack(self) -> Optional[torch.Tensor]:
+        with self.lock:
+            if not self.events:
+                return None
+            return torch.stack(self.events)
+
+    def clear(self) -> None:
+        with self.lock:
+            self.events.clear()
+            self.step_shape = None
+
+    @property
+    def num_spikes(self) -> int:
+        with self.lock:
+            return int(sum(e.sum().item() for e in self.events))
+
+    @property
+    def num_timesteps(self) -> int:
+        with self.lock:
+            return len(self.events)
+
+    @property
+    def memory_bytes(self) -> int:
+        with self.lock:
+            return sum(e.element_size() * e.numel() for e in self.events)
+
+    @property
+    def firing_rate(self) -> float:
+        with self.lock:
+            if not self.events or self.step_shape is None:
+                return 0.0
+            total_per_step = 1
+            for d in self.step_shape:
+                total_per_step *= d
+            total = total_per_step * len(self.events)
+            fired = int(sum(e.sum().item() for e in self.events))
+            return fired / total if total > 0 else 0.0
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["lock"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.lock = threading.Lock()
 
 
 def register_activity_hooks(model: nn.Module, layer_map: Dict[str, nn.Module]) -> None:

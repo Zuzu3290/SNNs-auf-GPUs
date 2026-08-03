@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
 from event_data_workflow.gpu_stats import GPUStats
+from event_data_workflow.prefetch import AsyncGPUPrefetcher
 from learning.frameworks.activity_reg import get_hidden_spike_recordings, activity_regularization, stdp_regularization, pause_hooks, resume_hooks
 
 logger = logging.getLogger(__name__)
@@ -140,7 +141,7 @@ class SNNTrainer:
 
             self.model.zero_grad()
 
-            for i, (data, targets) in enumerate(self.train_loader):
+            for i, (data, targets) in enumerate(AsyncGPUPrefetcher(self.train_loader)):
                 data    = data.to(self.device, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True).long()
 
@@ -253,8 +254,9 @@ class SNNTrainer:
             timesteps       = getattr(self.cfg, 'TIMESTEPS', 25)
             firing_rate_hz  = train_spike * timesteps / window_s
 
-            energy_j     = self.gpu_stats.gpu_energy_j(epoch_duration)
-            avg_power_w  = energy_j / epoch_duration
+            energy_j     = self.gpu_stats.gpu_energy_j(epoch_duration)  # None on CPU-only or without NVML
+            avg_power_w  = energy_j / epoch_duration if energy_j is not None else 0.0
+            energy_j     = energy_j or 0.0
             gpu_active_s = epoch_duration * gpu.get("gpu_util_avg_pct", 0.0) / 100.0
 
             self.epoch_log.append({

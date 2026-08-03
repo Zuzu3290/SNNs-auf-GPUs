@@ -52,4 +52,7 @@ outputs/
 # Data
 tmp/
 cache/
-notes.txt 
+notes.txt
+
+# Personal/local-only work — not shared with collaborators
+src/learning/frameworks/personal/

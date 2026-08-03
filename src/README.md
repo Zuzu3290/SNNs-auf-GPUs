@@ -11,7 +11,6 @@ Each module is designed to work independently, while also supporting the overall
 | Folder | Purpose |
 |---|---|
 | [`learning/`](./learning/) | Handles model learning, training setup, dataset configuration, and training parameter flow. |
-| [`crsc/`](./crsc/) | Custom CUDA kernels — LIF forward pass plus GPU energy/memory/throughput utilities. |
 | [`skeleton/`](./skeleton/) | Acts as the configuration and runtime diagnostics bridge between learning, GPU setup, and performance evaluation. |
 
 ---
