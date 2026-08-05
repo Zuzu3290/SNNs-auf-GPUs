@@ -5,8 +5,7 @@ import torch
 import torch.nn as nn
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
-from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
-from learning.utilities import build_optimizer, build_loss
+from learning.utilities import build_optimizer, build_loss, ActivityMonitor
 
 
 def build_lif_layer(layer_name: str, cfg: Settings, spike_grad, **kwargs) -> nn.Module:
@@ -61,11 +60,11 @@ class SNN_TORCH(ModelInterface, nn.Module):
         self.loss_fn   = build_loss(fw_cfg, framework="torch")
 
         # net[1] = lif1 (after conv1), net[4] = lif2 (after conv2)
-        register_activity_hooks(self, {'lif1': self.net[1], 'lif2': self.net[4]})
+        self.activity = ActivityMonitor({'lif1': self.net[1], 'lif2': self.net[4]})
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """Iterate over timesteps and collect output spikes."""
-        clear_hidden_spikes(self)
+        self.activity.clear()
         spk_rec = []
         utils.reset(self.net)  # reset LIF hidden states between batches
 

@@ -14,7 +14,7 @@ the standard **CPU + GPU** training path and the embedded **GPU-only** path.
 | `cache_engine.py` | Strategy selection, `BoundedRecordingCache`, `GPURecordingCache`, `AdaptiveCacheController` |
 | `data_pipeline.py` | End-to-end assembly: raw → cache → slice → DataLoader (`NeuromorphicEncoder`), DataLoader worker sizing (`dataloader_config()`), and stateless temporal windowing (`create_sliced_dataset()`) — `pipeline_coordinator.py`/`temporal_slicer.py` were folded in during a later refactor, see `docs/event_data_workflow/caching_pipeline_refactor.md` |
 | `prefetch.py` | Background-thread batch prefetching (`AsyncGPUPrefetcher`) |
-| `src/learning/frameworks/activity_reg.py` | Per-layer spike recording and regularization losses (`DenseTimestepBuffer`) |
+| `learning/utilities.py` | Per-layer spike recording and activity regularization (`ActivityMonitor`, `DenseTimestepBuffer`) — STDP removed, `activity_reg.py` no longer exists |
 
 ---
 
@@ -109,15 +109,17 @@ the standard **CPU + GPU** training path and the embedded **GPU-only** path.
 │  for t in range(T):                                                  │
 │    spk = model(frame[t])           ← forward pass                   │
 │                                                                      │
-│  activity_reg.py — DenseTimestepBuffer  (one per hidden layer)       │
+│  utilities.py — ActivityMonitor (one per model, owns its buffers)    │
 │  ┌───────────────────────────────────────────────────────────┐      │
 │  │  push(spk)  ← forward hook per timestep                  │      │
 │  │  stack()    ── [T, B, N] dense tensor for loss            │      │
 │  └───────────────────────────────────────────────────────────┘      │
 │                                                                      │
 │  loss = task_loss                                                    │
-│       + activity_regularization(hidden)   ← dead/saturated neurons  │
-│       + stdp_regularization(hidden, out)  ← causal spike ordering   │
+│       + model.activity.regularization_loss()  ← dead/saturated      │
+│                                                    neurons only      │
+│         (STDP removed — no unsupervised-learning application        │
+│         needs it, and cross-neuron-model comparison is out of scope)│
 │                                                                      │
 │  loss.backward()   optimizer.step()                                  │
 └──────────────────────────────────────────────────────────────────────┘
@@ -226,8 +228,8 @@ Activated when `determine_strategy()` detects: no disk, insufficient RAM, VRAM �
 │      with torch.no_grad():                                           │
 │          output = model(batch)                                       │
 │                                                                      │
-│  activity_reg.py — same as CPU+GPU path                              │
-│  (DenseTimestepBuffer, activity_regularization, stdp_regularization) │
+│  utilities.py — same as CPU+GPU path                                 │
+│  (ActivityMonitor / DenseTimestepBuffer, regularization_loss())      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 

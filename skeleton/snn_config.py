@@ -97,11 +97,6 @@ class Settings:
         self.ACTIVITY_REG_LAMBDA_LOW  = float(training.get("activity_reg_lambda_low", 0.1))
         self.ACTIVITY_REG_LAMBDA_HIGH = float(training.get("activity_reg_lambda_high", 0.1))
 
-        self.STDP_ENABLED             = bool(training.get("stdp_enabled", False))
-        self.STDP_TAU                 = float(training.get("stdp_tau", 20.0))
-        self.STDP_A_PLUS              = float(training.get("stdp_a_plus", 0.01))
-        self.STDP_A_MINUS             = float(training.get("stdp_a_minus", 0.01))
-
         # Framework selector
         self.FRAMEWORK = training.get("framework", "norse")
 
@@ -162,6 +157,7 @@ class Settings:
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
         self.DATA_PATH    = dataset.get("data_path", "./data")
+        self.TASK_TYPE    = "classification"  # overwritten by NeuromorphicEncoder.load_raw() once a dataset is picked
 
         # Output control
         self.OUTPUT_DIR = output.get("output_dir", "./outputs")
@@ -314,10 +310,6 @@ class Settings:
             row("Activity reg", f"ENABLED   min={self.ACTIVITY_REG_MIN_RATE * 100:.0f}%   max={self.ACTIVITY_REG_MAX_RATE * 100:.0f}%")
         else:
             row("Activity reg", "DISABLED")
-        if self.STDP_ENABLED:
-            row("STDP",         f"ENABLED   tau={self.STDP_TAU}   A+={self.STDP_A_PLUS}   A-={self.STDP_A_MINUS}")
-        else:
-            row("STDP",         "DISABLED")
 
         section("DATASET")
         row("Dataset",   self.DATASET_NAME)

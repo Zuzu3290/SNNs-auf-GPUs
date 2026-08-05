@@ -11,7 +11,6 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
 from event_data_workflow.gpu_stats import GPUStats
 from event_data_workflow.prefetch import AsyncGPUPrefetcher
-from learning.frameworks.activity_reg import get_hidden_spike_recordings, activity_regularization, stdp_regularization, pause_hooks, resume_hooks
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ def generate_trades_adversarial(model: torch.nn.Module, data: torch.Tensor, clea
         data + epsilon,
     ).detach()
 
-    pause_hooks(model)
+    model.activity.pause()
     try:
         for a in range(steps):
             adv = adv.requires_grad_(True)
@@ -40,7 +39,7 @@ def generate_trades_adversarial(model: torch.nn.Module, data: torch.Tensor, clea
             grad = torch.autograd.grad(kl, adv)[0]
             adv  = torch.clamp((adv + alpha * grad.sign()).detach(), data - epsilon, data + epsilon)
     finally:
-        resume_hooks(model)
+        model.activity.resume()
 
     return adv
 
@@ -141,11 +140,25 @@ class SNNTrainer:
 
             self.model.zero_grad()
 
+            is_regression = getattr(self.cfg, "TASK_TYPE", "classification") == "regression"
+
             for i, (data, targets) in enumerate(AsyncGPUPrefetcher(self.train_loader)):
                 data    = data.to(self.device, non_blocking=True)
-                targets = targets.to(self.device, non_blocking=True).long()
+                # Classification targets are class indices (long); regression targets
+                # (e.g. DSEC's dense flow maps) are continuous (float) — casting to
+                # .long() would truncate/corrupt them.
+                targets = targets.to(self.device, non_blocking=True)
+                targets = targets.long() if not is_regression else targets.float()
 
-                if self.cfg.TRADES_ENABLED:
+                # TRADES (generate_trades_adversarial, cross_entropy, softmax/KL below)
+                # is a classification-specific adversarial-robustness formulation — it
+                # doesn't apply to a dense regression target. Skipped for regression
+                # rather than silently producing nonsense or crashing on cross_entropy.
+                if self.cfg.TRADES_ENABLED and is_regression and i == 0 and epoch == 0:
+                    logger.warning("[TRAIN] TRADES_ENABLED is set but task_type='regression' — "
+                                    "TRADES doesn't apply to a dense regression target, skipping it for this run.")
+
+                if self.cfg.TRADES_ENABLED and not is_regression:
                     reset = getattr(self.model, "reset_state", None)
                     with torch.no_grad():
                         if reset is not None:
@@ -170,42 +183,25 @@ class SNNTrainer:
                             F.softmax(clean_logits.detach(),    dim=1),
                             reduction="batchmean",
                         )
-                        hidden      = get_hidden_spike_recordings(self.model)
                         act_penalty = torch.zeros(1, device=self.device)
-                        stdp_penalty = torch.zeros(1, device=self.device)
                         if self.cfg.ACTIVITY_REG_ENABLED:
-                            act_penalty = activity_regularization(hidden,
+                            act_penalty = self.model.activity.regularization_loss(
                                 min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
                                 max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
                                 lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
                                 lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
                             )
-                        if self.cfg.STDP_ENABLED:
-                            stdp_penalty = stdp_regularization(hidden,
-                                output_spikes = spk_rec,
-                                tau    = self.cfg.STDP_TAU,
-                                A_plus = self.cfg.STDP_A_PLUS,
-                                A_minus= self.cfg.STDP_A_MINUS,
-                            )
-                        loss_val = (ce_loss + self.cfg.TRADES_LAMBDA * kl_loss + act_penalty + stdp_penalty) / accum
+                        loss_val = (ce_loss + self.cfg.TRADES_LAMBDA * kl_loss + act_penalty) / accum
                 else:
                     with autocast_ctx:
                         spk_rec   = self.forward_pass(data)
                         task_loss = self.model.loss_fn(spk_rec, targets)
-                        hidden    = get_hidden_spike_recordings(self.model)
                         if self.cfg.ACTIVITY_REG_ENABLED:
-                            task_loss = task_loss + activity_regularization(hidden,
+                            task_loss = task_loss + self.model.activity.regularization_loss(
                                 min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
                                 max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
                                 lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
                                 lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
-                            )
-                        if self.cfg.STDP_ENABLED:
-                            task_loss = task_loss + stdp_regularization(hidden,
-                                output_spikes = spk_rec,
-                                tau    = self.cfg.STDP_TAU,
-                                A_plus = self.cfg.STDP_A_PLUS,
-                                A_minus= self.cfg.STDP_A_MINUS,
                             )
                         loss_val = task_loss / accum
 
@@ -216,8 +212,16 @@ class SNNTrainer:
                 step_count += 1
 
                 raw_loss   = loss_val.item() * accum
-                logits     = clean_logits.detach() if self.cfg.TRADES_ENABLED else aggregate_spike_output(spk_rec.detach().float())
-                acc        = (logits.argmax(dim=1) == targets).float().mean().item()
+                if is_regression:
+                    # argmax-based accuracy is a classification concept — meaningless
+                    # (and shape-incompatible) against a dense regression target. No
+                    # regression-appropriate metric (e.g. flow endpoint-error) is wired
+                    # yet, so this is reported as 0.0 rather than silently wrong — the
+                    # loss curve (raw_loss above) is the real signal for now.
+                    acc = 0.0
+                else:
+                    logits = clean_logits.detach() if (self.cfg.TRADES_ENABLED and not is_regression) else aggregate_spike_output(spk_rec.detach().float())
+                    acc    = (logits.argmax(dim=1) == targets).float().mean().item()
                 spike_rate = spk_rec.detach().float().mean().item()
 
                 self.loss_hist.append(raw_loss)
@@ -274,7 +278,7 @@ class SNNTrainer:
             })
 
             # Sparse buffer diagnostics — shows AER memory savings vs dense equivalent
-            spk_buf = getattr(self.model, "hidden_spk_buf", {})
+            spk_buf = self.model.activity.buffers
             if spk_buf:
                 sparse_kb  = sum(b.memory_bytes for b in spk_buf.values()) / 1024
                 avg_rate   = sum(b.firing_rate   for b in spk_buf.values()) / len(spk_buf)

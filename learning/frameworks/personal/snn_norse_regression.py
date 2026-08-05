@@ -1,12 +1,9 @@
 """
-Norse regression variant — shared by every Phase B dataset whose task_type is
-"regression" (currently MVSEC and TUM-VIE). Same conv+LIF backbone as snn_norse.py;
-the output stage is a plain linear readout (cfg.REGRESSION_OUTPUT_DIM) instead of a
-spiking classification head, averaged over time by loss_fn's "mse_regression"
-reduction.
-
-Not wired to real training yet — see the same note in snn_torch_regression.py and
-docs/Haseeb-open-items.md (target-extraction adapter still needed in SNNTrainer).
+Norse dense-regression variant — DSEC optical flow (the only regression dataset
+left). Same conv+LIF backbone as snn_norse.py; the output stage is a dense decoder
+(learning/frameworks/personal/dense_head.py) predicting a per-pixel (flow_x, flow_y)
+map, trained with flow_masked_mse against DSEC's own (H, W, 3) flow+valid-mask
+target layout.
 """
 import torch
 import torch.nn as nn
@@ -14,8 +11,8 @@ import norse.torch as norse
 
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
-from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
-from learning.utilities import build_optimizer, build_loss
+from learning.frameworks.personal.dense_head import DenseDecoder
+from learning.utilities import build_optimizer, build_loss, ActivityMonitor
 
 
 def build_norse_layer(layer_name: str, cfg: Settings) -> nn.Module:
@@ -47,7 +44,7 @@ class SNN_NORSE_REGRESSION(ModelInterface, nn.Module):
             **cfg.FRAMEWORK_CFG["norse"],
             "learning_rate": cfg.LEARNING_RATE,
             "weight_decay":  cfg.WEIGHT_DECAY,
-            "loss_fn":       "mse_regression",
+            "loss_fn":       "flow_masked_mse",
         }
 
         self.conv1   = nn.Conv2d(cfg.IN_CHANNELS, cfg.CONV1_OUT, cfg.CONV1_KERNEL)
@@ -58,20 +55,19 @@ class SNN_NORSE_REGRESSION(ModelInterface, nn.Module):
         self.lif2    = build_norse_layer("lif2", cfg)
         self.pool2   = nn.MaxPool2d(cfg.POOL_KERNEL)
 
-        self.flatten = nn.Flatten()
-        # Plain linear readout — continuous output, no spiking output layer.
-        self.readout = nn.Linear(cfg.FC_IN, cfg.REGRESSION_OUTPUT_DIM)
+        # No flatten — the decoder needs the spatial feature map, not a flat vector.
+        self.decoder = DenseDecoder(cfg, out_channels=2)
 
         self.to(self.device)
 
         self.optimizer = build_optimizer(self.parameters(), fw_cfg)
         self.loss_fn   = build_loss(fw_cfg, framework="norse")
 
-        register_activity_hooks(self, {'lif1': self.lif1, 'lif2': self.lif2})
+        self.activity = ActivityMonitor({'lif1': self.lif1, 'lif2': self.lif2})
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
-        """data: [T, B, C, H, W] -> returns [T, B, REGRESSION_OUTPUT_DIM]."""
-        clear_hidden_spikes(self)
+        """data: [T, B, C, H, W] -> returns [T, B, 2, SENSOR_H, SENSOR_W]."""
+        self.activity.clear()
         s1 = s2 = None
         readout_rec = []
 
@@ -86,8 +82,7 @@ class SNN_NORSE_REGRESSION(ModelInterface, nn.Module):
             x, s2 = self.lif2(x, s2)
             x = self.pool2(x)
 
-            x = self.flatten(x)
-            readout_rec.append(self.readout(x))
+            readout_rec.append(self.decoder(x))
 
         return torch.stack(readout_rec)
 

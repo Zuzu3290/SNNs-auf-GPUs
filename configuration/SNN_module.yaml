@@ -47,11 +47,6 @@ training:
                                 # Recommended: 4–8 on a workstation. Capped by CPU count automatically.
                                 # Set to 0 to disable multiprocessing (needed for non-picklable transforms).
 
-  stdp_enabled: true           # STDP causal correlation loss alongside BPTT.
-  stdp_tau: 20.0                # Trace decay time constant in timesteps. Higher = longer memory of past spikes.
-  stdp_a_plus: 0.01             # LTP strength — how strongly to reinforce causal (pre→post) spike order.
-  stdp_a_minus: 0.01            # LTD strength — how strongly to penalise anticausal (post→pre) spike order.
-  
 dataset:
   dataset_name: MNIST
   data_path:

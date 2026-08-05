@@ -4,8 +4,7 @@ import sinabs.layers as sl
 
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
-from learning.frameworks.activity_reg import clear_hidden_spikes
-from learning.utilities import build_optimizer, build_loss
+from learning.utilities import build_optimizer, build_loss, ActivityMonitor
 
 
 def build_sinabs_layer(layer_name: str, cfg: Settings, **kwargs) -> nn.Module:
@@ -63,13 +62,15 @@ class SNN_SINABS(ModelInterface, nn.Module):
         self.optimizer = build_optimizer(self.parameters(), fw_cfg)
         self.loss_fn   = build_loss(fw_cfg, framework="sinabs")
 
-        # No register_activity_hooks() here: activity_reg.py's hooks assume the
-        # hooked layer is called once PER TIMESTEP (true for Norse/SNNTorch/
+        # No hooked layers here: ActivityMonitor's hooks assume the hooked
+        # layer is called once PER TIMESTEP (true for Norse/SNNTorch/
         # SpikingJelly's per-timestep loop). Sinabs' LIF layers are called once
         # per forward() with the whole (B,T,...) tensor — hooking them would
-        # record a single T=1 "timestep" containing all T internally, which
-        # silently breaks stdp_regularization's per-timestep trace math
-        # (confirmed: `ema_kernel (1x1) @ post_t` size mismatch).
+        # record a single "timestep" containing all T internally, which
+        # breaks the per-neuron rate math in regularization_loss() (it assumes
+        # dim 0 is T). ActivityMonitor() with no layer_map is a safe no-op —
+        # recordings() returns {}, regularization_loss() returns 0.
+        self.activity = ActivityMonitor()
 
     def tensor_format(self) -> str:
         """Sinabs LIF/IAF layers expect (Batch, Time, ...) — the trainer transposes for us."""
@@ -86,7 +87,7 @@ class SNN_SINABS(ModelInterface, nn.Module):
         dims are flattened before each conv stage and unflattened before each
         LIF stage, which is the layout Sinabs' stateful layers require.
         """
-        clear_hidden_spikes(self)
+        self.activity.clear()
         for layer in (self.lif1, self.lif2, self.lif_out):
             layer.reset_states()
 

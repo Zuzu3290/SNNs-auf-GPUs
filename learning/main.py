@@ -4,8 +4,7 @@ from pathlib import Path
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))  # project root → skeleton, event_data_workflow
-sys.path.insert(0, str(Path(__file__).parent.parent))          # src/ → learning, compiler
+sys.path.insert(0, str(Path(__file__).parent.parent))  # project root → skeleton, event_data_workflow, learning
 
 import torch
 
@@ -158,14 +157,14 @@ if __name__ == "__main__":
     print(f"\n  Model backend  : {cfg.FRAMEWORK.upper()}  (task_type={task_type})")
 
     if task_type == "regression":
-        # SNNTrainer/SNNTester/AdversarialEvaluator below still assume classification —
-        # targets.to(device).long(), accuracy_history, overall_accuracy, confusion-matrix-
-        # shaped results. The model itself is ready (verified: builds, forwards, computes
-        # mse_regression loss, backprops); wiring the trainer to a regression target/metric
-        # path is the next concrete step, not done here. See docs/Haseeb-open-items.md.
-        print("  [MAIN] Regression model built and verified in isolation, but the training/testing/"
-              "adversarial-eval loop below still assumes classification targets and metrics — "
-              "expect it to fail past this point until that's wired. See docs/Haseeb-open-items.md.")
+        # SNNTrainer is regression-aware now (target dtype, TRADES skip, dense flow loss —
+        # verified end-to-end against real DSEC data, see docs/Haseeb-open-items.md).
+        # SNNTester/AdversarialEvaluator below still assume classification-shaped results
+        # (confusion matrix, argmax predictions) — not touched yet, expect training to
+        # succeed and testing to fail. See docs/Haseeb-open-items.md.
+        print("  [MAIN] Regression model + training loop verified against real data. "
+              "SNNTester/AdversarialEvaluator below are still classification-only — "
+              "expect training to complete and testing to fail. See docs/Haseeb-open-items.md.")
 
     cfg.display()
 

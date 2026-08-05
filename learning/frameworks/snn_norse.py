@@ -4,8 +4,7 @@ import norse.torch as norse
 
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
-from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
-from learning.utilities import build_optimizer, build_loss
+from learning.utilities import build_optimizer, build_loss, ActivityMonitor
 
 
 def build_norse_layer(layer_name: str, cfg: Settings) -> nn.Module:
@@ -66,7 +65,7 @@ class SNN_NORSE(ModelInterface, nn.Module):
         self.optimizer = build_optimizer(self.parameters(), fw_cfg)
         self.loss_fn   = build_loss(fw_cfg, framework="norse")
 
-        register_activity_hooks(self, {'lif1': self.lif1, 'lif2': self.lif2})
+        self.activity = ActivityMonitor({'lif1': self.lif1, 'lif2': self.lif2})
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """
@@ -77,7 +76,7 @@ class SNN_NORSE(ModelInterface, nn.Module):
         (spikes, new_state) and expects the previous state as input. States are
         initialised to None on the first timestep; Norse auto-creates zero tensors.
         """
-        clear_hidden_spikes(self)
+        self.activity.clear()
         s1 = s2 = s_out = None
         spk_rec = []
 

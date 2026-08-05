@@ -1,24 +1,18 @@
 """
-SNNTorch regression variant — shared by every Phase B dataset whose task_type is
-"regression" (currently MVSEC and TUM-VIE; see event_data_workflow/data_pipeline.py's
-DATASET_REGISTRY). Same conv+LIF backbone as snn_torch.py; the difference is only the
-output stage: a plain linear readout (cfg.REGRESSION_OUTPUT_DIM), no spiking output
-layer, averaged over time by loss_fn's "mse_regression" reduction instead of a
-classification head decoded via spike count.
-
-Not wired to real training yet — SNNTrainer.train() still assumes `targets` arriving
-from the DataLoader is a plain tensor. MVSEC/TUM-VIE's collated targets are a list of
-raw dicts/tuples (event_data_workflow/data_pipeline.py's pad_events_passthrough_target),
-so a target-extraction adapter is still needed before this runs end-to-end. See
-docs/Haseeb-open-items.md.
+SNNTorch dense-regression variant — DSEC optical flow (the only regression dataset
+left; see event_data_workflow/data_pipeline.py's DATASET_REGISTRY). Same conv+LIF
+backbone as snn_torch.py; the difference is the output stage — a dense decoder
+(learning/frameworks/personal/dense_head.py) predicting a per-pixel (flow_x, flow_y)
+map instead of a flat classification/pose vector, trained with flow_masked_mse
+(build_loss) against DSEC's own (H, W, 3) flow+valid-mask target layout.
 """
 import snntorch as snn
 import torch
 import torch.nn as nn
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
-from learning.frameworks.activity_reg import register_activity_hooks, clear_hidden_spikes
-from learning.utilities import build_optimizer, build_loss
+from learning.frameworks.personal.dense_head import DenseDecoder
+from learning.utilities import build_optimizer, build_loss, ActivityMonitor
 
 
 def build_lif_layer(layer_name: str, cfg: Settings, spike_grad, **kwargs) -> nn.Module:
@@ -52,9 +46,10 @@ class SNN_TORCH_REGRESSION(ModelInterface, nn.Module):
             **cfg.FRAMEWORK_CFG["snntorch"],
             "learning_rate": cfg.LEARNING_RATE,
             "weight_decay":  cfg.WEIGHT_DECAY,
-            "loss_fn":       "mse_regression",
+            "loss_fn":       "flow_masked_mse",
         }
 
+        # No nn.Flatten() — the decoder needs the spatial feature map, not a flat vector.
         self.backbone = nn.Sequential(
             nn.Conv2d(cfg.IN_CHANNELS, cfg.CONV1_OUT, cfg.CONV1_KERNEL),
             build_lif_layer("lif1", cfg, spike_grad, init_hidden=True),
@@ -62,27 +57,25 @@ class SNN_TORCH_REGRESSION(ModelInterface, nn.Module):
             nn.Conv2d(cfg.CONV1_OUT, cfg.CONV2_OUT, cfg.CONV2_KERNEL),
             build_lif_layer("lif2", cfg, spike_grad, init_hidden=True),
             nn.MaxPool2d(cfg.POOL_KERNEL),
-            nn.Flatten(),
         ).to(self.device)
-        # Plain linear readout — continuous output, no spiking nonlinearity at the head.
-        self.readout = nn.Linear(cfg.FC_IN, cfg.REGRESSION_OUTPUT_DIM).to(self.device)
+        self.decoder = DenseDecoder(cfg, out_channels=2).to(self.device)
 
-        self.optimizer = build_optimizer(list(self.backbone.parameters()) + list(self.readout.parameters()), fw_cfg)
+        self.optimizer = build_optimizer(list(self.backbone.parameters()) + list(self.decoder.parameters()), fw_cfg)
         self.loss_fn   = build_loss(fw_cfg, framework="torch")
 
-        register_activity_hooks(self, {'lif1': self.backbone[1], 'lif2': self.backbone[4]})
+        self.activity = ActivityMonitor({'lif1': self.backbone[1], 'lif2': self.backbone[4]})
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
-        """data: [T, B, C, H, W] -> returns [T, B, REGRESSION_OUTPUT_DIM] (raw per-timestep
-        analog readout; loss_fn averages over T, there's no spike count to sum)."""
-        clear_hidden_spikes(self)
+        """data: [T, B, C, H, W] -> returns [T, B, 2, SENSOR_H, SENSOR_W] (raw per-timestep
+        flow prediction; loss_fn averages over T, there's no spike count to sum)."""
+        self.activity.clear()
         from snntorch import utils
         utils.reset(self.backbone)
 
         readout_rec = []
         for step in range(data.size(0)):
             features = self.backbone(data[step])
-            readout_rec.append(self.readout(features))
+            readout_rec.append(self.decoder(features))
 
         return torch.stack(readout_rec)
 
@@ -102,11 +95,11 @@ class SNN_TORCH_REGRESSION(ModelInterface, nn.Module):
 
     def train_mode(self) -> None:
         self.backbone.train()
-        self.readout.train()
+        self.decoder.train()
 
     def eval_mode(self) -> None:
         self.backbone.eval()
-        self.readout.eval()
+        self.decoder.eval()
 
     def get_lr(self) -> float:
         return self.optimizer.param_groups[0]["lr"]
@@ -114,6 +107,6 @@ class SNN_TORCH_REGRESSION(ModelInterface, nn.Module):
     def get_state(self) -> dict:
         return {
             "backbone_state_dict":  self.backbone.state_dict(),
-            "readout_state_dict":   self.readout.state_dict(),
+            "decoder_state_dict":   self.decoder.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
         }

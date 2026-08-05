@@ -1,12 +1,9 @@
 """
-Sinabs regression variant — shared by every Phase B dataset whose task_type is
-"regression" (currently MVSEC and TUM-VIE). Same conv+LIF backbone as
-snn_sinabs.py; the output stage is a plain linear readout
-(cfg.REGRESSION_OUTPUT_DIM) instead of a spiking classification head, averaged
-over time by loss_fn's "mse_regression" reduction.
-
-Not wired to real training yet — see the same note in snn_torch_regression.py and
-docs/Haseeb-open-items.md (target-extraction adapter still needed in SNNTrainer).
+Sinabs dense-regression variant — DSEC optical flow (the only regression dataset
+left). Same conv+LIF backbone as snn_sinabs.py; the output stage is a dense
+decoder (learning/frameworks/personal/dense_head.py) predicting a per-pixel
+(flow_x, flow_y) map, trained with flow_masked_mse against DSEC's own
+(H, W, 3) flow+valid-mask target layout.
 """
 import torch
 import torch.nn as nn
@@ -14,8 +11,8 @@ import sinabs.layers as sl
 
 from skeleton.snn_config import Settings
 from learning.frameworks.model_interface import ModelInterface
-from learning.frameworks.activity_reg import clear_hidden_spikes
-from learning.utilities import build_optimizer, build_loss
+from learning.frameworks.personal.dense_head import DenseDecoder
+from learning.utilities import build_optimizer, build_loss, ActivityMonitor
 
 
 def build_sinabs_layer(layer_name: str, cfg: Settings, **kwargs) -> nn.Module:
@@ -42,7 +39,7 @@ class SNN_SINABS_REGRESSION(ModelInterface, nn.Module):
             **cfg.FRAMEWORK_CFG["sinabs"],
             "learning_rate": cfg.LEARNING_RATE,
             "weight_decay":  cfg.WEIGHT_DECAY,
-            "loss_fn":       "mse_regression",
+            "loss_fn":       "flow_masked_mse",
         }
 
         self.flatten_t = sl.FlattenTime()
@@ -50,9 +47,8 @@ class SNN_SINABS_REGRESSION(ModelInterface, nn.Module):
         self.pool1     = nn.MaxPool2d(cfg.POOL_KERNEL)
         self.conv2     = nn.Conv2d(cfg.CONV1_OUT, cfg.CONV2_OUT, cfg.CONV2_KERNEL)
         self.pool2     = nn.MaxPool2d(cfg.POOL_KERNEL)
-        self.flat      = nn.Flatten()
-        # Plain linear readout — continuous output, no spiking output layer.
-        self.readout   = nn.Linear(cfg.FC_IN, cfg.REGRESSION_OUTPUT_DIM)
+        # No nn.Flatten() to a vector — the decoder needs the spatial feature map.
+        self.decoder   = DenseDecoder(cfg, out_channels=2)
 
         self.lif1 = build_sinabs_layer("lif1", cfg)
         self.lif2 = build_sinabs_layer("lif2", cfg)
@@ -62,13 +58,18 @@ class SNN_SINABS_REGRESSION(ModelInterface, nn.Module):
         self.optimizer = build_optimizer(self.parameters(), fw_cfg)
         self.loss_fn   = build_loss(fw_cfg, framework="sinabs")
 
+        # No hooked layers — see snn_sinabs.py's __init__ for why (Sinabs calls
+        # each LIF layer once per forward with the whole (B,T,...) tensor, not
+        # once per timestep). ActivityMonitor() with no layer_map is a safe no-op.
+        self.activity = ActivityMonitor()
+
     def tensor_format(self) -> str:
         return "BT"
 
     def forward(self, data: torch.Tensor) -> torch.Tensor:
-        """data: [B, T, C, H, W] -> returns [T, B, REGRESSION_OUTPUT_DIM] (transposed back
+        """data: [B, T, C, H, W] -> returns [T, B, 2, SENSOR_H, SENSOR_W] (transposed back
         to time-first, matching snn_sinabs.py's convention; loss_fn averages over T)."""
-        clear_hidden_spikes(self)
+        self.activity.clear()
         for layer in (self.lif1, self.lif2):
             layer.reset_states()
 
@@ -87,9 +88,8 @@ class SNN_SINABS_REGRESSION(ModelInterface, nn.Module):
         x = x.flatten(0, 1)
         x = self.pool2(x)
 
-        x = self.flat(x)
-        x = self.readout(x)
-        x = x.unflatten(0, (B, T))
+        x = self.decoder(x)             # [B*T, 2, SENSOR_H, SENSOR_W]
+        x = x.unflatten(0, (B, T))      # [B, T, 2, SENSOR_H, SENSOR_W]
 
         return x.transpose(0, 1)
 

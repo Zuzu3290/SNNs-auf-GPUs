@@ -24,15 +24,17 @@ from skeleton import Settings
 from .cache_engine import AdaptiveCacheController, measure_event_bytes
 from .system_monitor import SystemResourceMonitor
 from .workflow_config import WorkflowSettings
-from .regression_datasets import TUMVIERaw, MVSECRaw
+from .regression_datasets import DSECRaw
 
 
 def pad_events_passthrough_target(batch):
-    """Same event-frame padding/stacking as tonic.collation.PadTensors(batch_first=False),
-    but keeps the target side as a plain list instead of torch.tensor(target) — which
-    crashes for MVSEC (target is a (depth, depth, pose) tuple of arrays) and TUM-VIE
-    (target is a {"images_left", "images_right", "mocap"} dict). Used for regression
-    dataset entries; classification entries keep using tonic's own PadTensors."""
+    """Same event-frame padding/stacking as tonic.collation.PadTensors(batch_first=False).
+    The target side stacks into a real tensor when every sample's target has the same
+    shape (true for DSEC's per-window flow frames — (H, W, 3), fixed for a given
+    dataset) — the trainer needs a real tensor, not a list, to move to device. Falls
+    back to a plain list when shapes differ, since torch.tensor(target) would crash
+    on a genuinely irregular/heterogeneous target (unused today, kept for safety —
+    e.g. a future regression dataset that mixes recording-level target types)."""
     samples = [sample for sample, _ in batch]
     targets = [target for _, target in batch]
 
@@ -48,7 +50,14 @@ def pad_events_passthrough_target(batch):
         padded.append(sample)
 
     samples_output = torch.stack(padded, 1)  # batch_first=False, matches PadTensors elsewhere in this pipeline
-    return samples_output, targets
+
+    target_shapes = {getattr(t, "shape", None) for t in targets}
+    if len(target_shapes) == 1 and None not in target_shapes:
+        targets_output = torch.stack([torch.as_tensor(t) for t in targets])
+    else:
+        targets_output = targets
+
+    return samples_output, targets_output
 
 
 def dataloader_config(settings: Settings, device: torch.device, safety_margin_gb: float = 2.0, worker_fraction: float = 0.3, batch_bytes: int = 0) -> dict:
@@ -142,27 +151,19 @@ DATASET_REGISTRY = {
         "sensor_size": tonic.datasets.DVSGesture.sensor_size,
         "num_classes": 11,
     },
-    # Phase B — regression datasets. "loader" replaces "cls": tonic's MVSEC/TUMVIE
-    # classes take dataset-specific required kwargs (scene=/recording=) instead of
-    # save_to+train=, and their raw structure is multi-sensor, not (events, class_index)
+    # Phase B — regression dataset. "loader" replaces "cls": DSEC's raw structure
+    # is multi-sensor (events + images + flow/disparity), not (events, class_index)
     # — see regression_datasets.py. num_classes is None: output-head/loss wiring for
-    # a regression target isn't built yet (see docs/Haseeb-open-items.md).
+    # a regression target isn't built yet (see docs/Haseeb-open-items.md). Unlike
+    # MVSEC/TUM-VIE (removed — no real flow ground truth / boundary-only mocap /
+    # external hosting problems), DSEC has real optical-flow ground truth and a
+    # real train/test split built into tonic's own wrapper.
     "5": {
-        "name": "MVSEC",
-        "category": "motion (target not finalized — depth/pose available, not flow)",
+        "name": "DSEC",
+        "category": "optical flow / disparity (target not finalized)",
         "kind": "regression",
-        "loader": lambda save_to: MVSECRaw(save_to=save_to, scene="indoor_flying"),
-        "has_train_split": False,
-        "sensor_size": MVSECRaw.sensor_size,
-        "num_classes": None,
-    },
-    "6": {
-        "name": "TUM-VIE",
-        "category": "ego-motion / SLAM (target not finalized)",
-        "kind": "regression",
-        "loader": lambda save_to: TUMVIERaw(save_to=save_to, recording="mocap-1d-trans"),
-        "has_train_split": False,
-        "sensor_size": TUMVIERaw.sensor_size,
+        "loader": lambda save_to, split: DSECRaw(save_to=save_to, split=split),
+        "sensor_size": DSECRaw.sensor_size,
         "num_classes": None,
     },
 }
@@ -241,17 +242,13 @@ class NeuromorphicEncoder:
             entry = self.select_dataset()
             sensor_size = entry["sensor_size"]
             if entry.get("kind") == "regression":
-                full_raw = entry["loader"](str(DATA_DIR))
-                if len(full_raw) < 2:
-                    # A single continuous recording (e.g. TUM-VIE's one named
-                    # recording) can't be split into train/test by recording —
-                    # needs the bounded-window reframing documented as a
-                    # follow-up in docs/Haseeb-open-items.md, not built yet.
-                    raise RuntimeError(
-                        f"[PIPELINE] '{entry['name']}' has only {len(full_raw)} recording(s) — "
-                        "can't 80/20 split by recording. Needs per-recording windowing "
-                        "(see docs/Haseeb-open-items.md) before this dataset is trainable."
-                    )
+                # DSEC's own "test" split has no local ground truth at all (it's held
+                # out for their own leaderboard — tonic's DSEC class raises if you ask
+                # for target_selection there). So: load DSEC's "train" split (the
+                # recordings that actually have optical-flow/disparity ground truth),
+                # then split across recordings ourselves, same as the other manually-
+                # split datasets.
+                full_raw = entry["loader"](str(DATA_DIR), split="train")
                 n_train = int(0.8 * len(full_raw))
                 raw_train, raw_test = torch.utils.data.random_split(
                     full_raw, [n_train, len(full_raw) - n_train]
@@ -267,6 +264,7 @@ class NeuromorphicEncoder:
                 )
             self.dataset_label = entry["name"]
             self.task_type = entry.get("kind", "classification")
+            self.cfg.TASK_TYPE = self.task_type  # so SNNTrainer/SNNTester can branch without a separate cfg wiring step
             self.cfg.apply_dataset_shape(
                 sensor_h=sensor_size[1], sensor_w=sensor_size[0],
                 in_channels=sensor_size[2], num_classes=entry["num_classes"],
