@@ -5,9 +5,8 @@ on real event-camera data.
 Two run modes:
   Diagnostic (default) — EPOCHS/ITERA deliberately small, finishes in one sitting,
     good for confirming everything runs and comparing the *shape* of behavior.
-  Full (--full) — EPOCHS=5, iterates the entire train/test set, matching the
-    methodology used to cross-check this project's parameter fairness against
-    an external reference implementation (see docs/Haseeb-open-items.md).
+  Full (--full) — EPOCHS=10, iterates the entire train/test set, plus a full
+    adversarial-robustness pass (FGSM + PGD-20) per framework, same as main.py.
 
 Usage:
     python docs/results/run_benchmark.py                          # diagnostic, N-MNIST
@@ -45,6 +44,7 @@ from event_data_workflow import NeuromorphicEncoder, DATASET_REGISTRY
 from event_data_workflow.gpu_stats import GPUStats
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
+from learning.adversarial_robustness import AdversarialEvaluator
 from learning.frameworks.snn_torch import SNN_TORCH
 from learning.frameworks.snn_norse import SNN_NORSE
 from learning.frameworks.snn_spikingjelly import SNN_SJ
@@ -56,8 +56,8 @@ DIAGNOSTIC_CONFIG = dict(
     TEST_BATCHES=10,
 )
 FULL_CONFIG = dict(
-    EPOCHS=5,          # matches the reference run this project's parameter-fairness
-    ITERA=None,        # fixes were cross-checked against — see Haseeb-open-items.md.
+    EPOCHS=10,         # full dataset, full test set, 10 epochs per framework.
+    ITERA=None,
     TEST_BATCHES=None, # None = iterate every batch in the loader, not a capped subset.
 )
 
@@ -155,7 +155,7 @@ def energy_warnings(total_j, dynamic_j, idle_w, load_w) -> list[str]:
     return problems
 
 
-def run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, test_batches):
+def run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, test_batches, task_type="classification"):
     print(f"\n{'='*60}\n  {name.upper()}\n{'='*60}")
     cfg.FRAMEWORK = name
 
@@ -184,6 +184,14 @@ def run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, 
     t0 = time.perf_counter()
     test_results = tester.run(csv_path=str(data_dir / f"{name}_test.csv"))
     test_time_s = time.perf_counter() - t0
+
+    # Same AdversarialEvaluator main.py runs at the end of a single-framework
+    # session — run here per framework too, against the same (unlimited) test_loader
+    # main.py would use, not the LimitedLoader test-batch cap used for the timed test above.
+    adv_results = None
+    if task_type == "classification":
+        evaluator = AdversarialEvaluator(model, test_loader, cfg, device)
+        adv_results = evaluator.evaluate(csv_path=str(data_dir / f"{name}_adversarial.csv"))
 
     train_energy_j = None  # pulled from the per-epoch CSV below, matching make_plots.py's approach
     train_avg_power_w = None
@@ -236,6 +244,7 @@ def run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, 
         "test_confusion_matrix": test_results["confusion_matrix"],
         "test_gt_distribution": test_results["gt_distribution"],
         "test_pred_distribution": test_results["pred_distribution"],
+        "adversarial_robustness": adv_results,
     }
 
     out_path = data_dir / f"{name}_summary.json"
@@ -378,7 +387,7 @@ def run_dataset(dataset_name: str, config: dict = DIAGNOSTIC_CONFIG, trades_enab
     model_names = list(MODELS.items())
     for i, (name, ModelClass) in enumerate(model_names):
         try:
-            results[name] = run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, test_batches)
+            results[name] = run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, test_batches, task_type)
             r = results[name]
             csv_rows.append({
                 "run_id": run_id, "dataset": entry["name"], "framework": name,
