@@ -24,8 +24,11 @@ def build_sj_layer(layer_name: str, cfg: Settings, spike_grad, **kwargs) -> nn.M
             tau=tau, v_threshold=threshold,
             surrogate_function=spike_grad, **kwargs,
         )
+    # SpikingJelly defaults decay_input=True, which divides the input by tau —
+    # e.g. tau=10 silently cuts input gain to 0.1, unlike Norse/snnTorch. False
+    # keeps input gain at 1.0, matching the other two frameworks.
     return neuron.LIFNode(
-        tau=tau, v_threshold=threshold,
+        tau=tau, v_threshold=threshold, decay_input=False,
         surrogate_function=spike_grad, **kwargs,
     )
 

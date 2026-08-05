@@ -6,19 +6,11 @@ import torch
 class ModelInterface(ABC):
     """
     Contract every model must satisfy to work with SNNTrainer, SNNTester,
-    and AdversarialEvaluator.
-
-    Boundary rule: forward() always receives and returns a PyTorch tensor.
-    What runs inside — PyTorch, JAX, TensorFlow, or custom — is irrelevant.
-
-    Backward pass:
-      PyTorch models  — backward_pass() calls loss.backward() + optimizer.step()
-      JAX / TF models — backward_pass() is a no-op; gradients are computed
-                        inside forward() via jax.value_and_grad / GradientTape
-
-    Adversarial robustness:
-      JAX / TF models return False from is_differentiable() so the evaluator
-      skips attack generation and runs clean evaluation only.
+    and AdversarialEvaluator. PyTorch only — every model here is an
+    nn.Module trained via standard PyTorch autograd (loss.backward() +
+    optimizer.step()). No non-PyTorch backend (JAX, TensorFlow) is
+    supported or accommodated; that flexibility was speculative and never
+    used, so it's been removed rather than kept as unused surface area.
     """
 
     @abstractmethod
@@ -28,19 +20,18 @@ class ModelInterface(ABC):
     @abstractmethod
     def backward_pass(self, loss: torch.Tensor, scaler=None, do_step: bool = True) -> None:
         """
-        Compute gradients and update weights.
+        Compute gradients and update weights via standard PyTorch autograd.
 
         scaler  — torch.amp.GradScaler for AMP; pass None to skip scaling
         do_step — set False to accumulate gradients without stepping
                   (used for gradient accumulation over N batches)
 
-        PyTorch: scaler.scale(loss).backward(); if do_step: scaler.step(opt)
-        JAX/TF:  pass — weights already updated inside forward()
+        scaler.scale(loss).backward(); if do_step: scaler.step(optimizer)
         """
 
     @abstractmethod
     def zero_grad(self) -> None:
-        """Clear gradients. PyTorch: optimizer.zero_grad(). JAX/TF: pass."""
+        """Clear gradients: optimizer.zero_grad()."""
 
     @abstractmethod
     def train_mode(self) -> None:
@@ -63,7 +54,7 @@ class ModelInterface(ABC):
         Tensor layout this model's forward() expects from the DataLoader.
 
         "TB" — [T, B, C, H, W]  time-first  (default — SNNTorch, Norse, SpikingJelly)
-        "BT" — [B, T, C, H, W]  batch-first
+        "BT" — [B, T, C, H, W]  batch-first (Sinabs)
 
         The trainer transposes automatically before calling forward().
         Only override this if your framework needs batch-first input.
@@ -72,13 +63,6 @@ class ModelInterface(ABC):
 
     def reset_state(self) -> None:
         """Reset hidden neuron state between sequences. Override if needed."""
-
-    def is_differentiable(self) -> bool:
-        """
-        True if PyTorch autograd can trace back through this model to the input.
-        JAX and TF backends return False — adversarial eval skips attacks.
-        """
-        return True
 
     def get_trainer(self, train_loader):
         from learning.training import SNNTrainer

@@ -116,4 +116,27 @@ For this project specifically, Option 1 is actually the right choice. You're com
 
 
 
+# Deferred — Haseeb parameter alignment (not applied, needs a decision)
+
+- **Norse `threshold: 1.0` + `input_scale: 10.0`** — Haseeb's config runs Norse's
+  threshold at 1.0, but compensates with an explicit `input_scale: 10.0` gain factor
+  before the input hits the neuron, plus a `circ` surrogate (alpha=0.5) instead of
+  `atan`. This project's own prior finding (EXP-004) is that `threshold=1.0` alone
+  kills Norse — dead neurons, no spikes — because Norse's `tau_mem_inv`/`dt` locked
+  gain silently attenuates input relative to snnTorch/SpikingJelly. Haseeb's
+  `input_scale` is exactly the compensating knob for that attenuation.
+  **Not applied**: `build_norse_layer()` (learning/frameworks/snn_norse.py) has no
+  `input_scale`, `reset_method`, `v_leak`, or explicit `dt` parameter today. Copying
+  just the threshold value without adding the compensating gain would reintroduce the
+  known dead-neuron bug. Adding `input_scale` support is new code, not a config copy,
+  and wasn't done in this pass — flagging so it isn't silently lost.
+
+- **`n_time_bins: 20` vs our default `16`** — Haseeb bins N-MNIST into 20 timesteps;
+  this project defaults to 16. Lower-risk than the Norse item above (just a config
+  value, not a semantics change), but not applied — would shift every framework's
+  timestep count simultaneously, which changes wall-clock/energy comparisons, so it's
+  left as an explicit choice for later rather than snuck into this pass.
+
+---
+
 # Found Issue --- Status

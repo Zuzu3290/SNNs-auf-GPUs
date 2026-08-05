@@ -146,6 +146,10 @@ def main():
         plot_bar(results, "test_energy_per_sample_pj", f"{args.dataset} — Energy per Sample (neuromorphic model)", "pJ / sample", "test_energy.png")
         plot_bar(results, "test_avg_latency_per_sample_ms", f"{args.dataset} — Inference Latency per Sample", "ms / sample", "test_latency.png")
         plot_bar(results, "test_avg_firing_rate_hz", f"{args.dataset} — Average Firing Rate", "Hz", "test_firing_rate.png")
+        if all(r.get("test_framework_ratio") is not None for r in results.values()):
+            plot_bar(results, "test_framework_ratio",
+                     f"{args.dataset} — Framework Ratio (input activity / output spikes)",
+                     "ratio", "framework_ratio.png")
         plot_confusion_matrices(results, "confusion_matrices.png")
     else:
         print("  (skipping accuracy/confusion-matrix plots — not present, likely a regression dataset)")

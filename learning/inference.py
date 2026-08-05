@@ -117,10 +117,11 @@ class SNNTester:
             set_phase("eval")
 
         all_preds, all_targets = [], []
-        total_spikes     = 0
-        total_latency_ms = 0.0
-        total_samples    = 0
-        total_energy_pj  = 0.0
+        total_spikes       = 0
+        total_input_spikes = 0  # "framework ratio" — see run() docstring note below
+        total_latency_ms   = 0.0
+        total_samples      = 0
+        total_energy_pj    = 0.0
         per_sample_latencies_ms: list[float] = []
         cm = np.zeros((self.num_classes, self.num_classes), dtype=int)
 
@@ -142,6 +143,11 @@ class SNNTester:
                 latency_ms = (time.perf_counter() - t0) * 1000
  
                 batch_spikes    = int(spk_rec.sum().item())
+                # "framework ratio": how much event activity a framework's encoding/
+                # neuron dynamics compress the raw input down to at the output. data
+                # is event-count frames (not binary spikes) — this is total input
+                # activity, the same-shaped quantity output-side batch_spikes measures.
+                batch_input_spikes = float(data.sum().item())
                 possible_spikes = T * B * self.num_classes
                 spike_rate      = batch_spikes / possible_spikes
                 energy_pj       = batch_spikes * ENERGY_PER_SPIKE_PJ
@@ -161,10 +167,11 @@ class SNNTester:
                 if self.visualize:
                     self._show_frame(data, preds, tgts, batch_idx)
 
-                total_spikes     += batch_spikes
-                total_latency_ms += latency_ms
-                total_samples    += B
-                total_energy_pj  += energy_pj
+                total_spikes       += batch_spikes
+                total_input_spikes += batch_input_spikes
+                total_latency_ms   += latency_ms
+                total_samples      += B
+                total_energy_pj    += energy_pj
                 # Per-sample latency isn't individually timed — only per-batch is —
                 # so this repeats the batch's per-sample average once per sample.
                 # Percentiles below are an approximation at batch-timing granularity,
@@ -177,6 +184,8 @@ class SNNTester:
                     "timesteps":             T,
                     "accuracy":              round(acc, 4),
                     "spikes_activated":      batch_spikes,
+                    "input_spikes":          round(batch_input_spikes, 1),
+                    "framework_ratio":       round(batch_input_spikes / batch_spikes, 4) if batch_spikes > 0 else None,
                     "possible_spikes":       possible_spikes,
                     "spike_rate":            round(spike_rate, 4),
                     "firing_rate_hz":        round(firing_rate_hz, 2),
@@ -211,6 +220,11 @@ class SNNTester:
         p99_latency_per_sample_ms    = float(np.percentile(per_sample_latencies_ms, 99)) if per_sample_latencies_ms else 0.0
         throughput_samples_per_s     = total_samples / t_run_elapsed if t_run_elapsed > 0 else 0.0
         avg_spikes_per_sample  = total_spikes / total_samples
+        avg_input_spikes_per_sample = total_input_spikes / total_samples
+        # "framework ratio": input activity per output spike. Higher = the framework's
+        # encoding/neuron dynamics compress more raw input activity into each output
+        # spike; lower = the network stays closer to 1:1 with what it was shown.
+        framework_ratio        = total_input_spikes / total_spikes if total_spikes > 0 else None
         avg_spike_rate         = total_spikes / (len(self.batch_log) * self.cfg.TIMESTEPS * self.num_classes) if self.batch_log else 0.0
         window_s               = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
         avg_firing_rate_hz     = avg_spike_rate * self.cfg.TIMESTEPS / window_s
@@ -224,6 +238,9 @@ class SNNTester:
         print(f"  • Total Samples           : {total_samples}")
         print(f"  • Total Spikes Activated  : {total_spikes:,}")
         print(f"  • Avg Spikes / Sample     : {avg_spikes_per_sample:.2f}")
+        print(f"  • Total Input Activity    : {total_input_spikes:,.0f}")
+        print(f"  • Avg Input / Sample      : {avg_input_spikes_per_sample:.2f}")
+        print(f"  • Framework Ratio (in/out): {framework_ratio:.3f}" if framework_ratio is not None else "  • Framework Ratio (in/out): N/A (zero output spikes)")
         print(f"  • Avg Firing Rate         : {avg_firing_rate_hz:.2f} Hz")
         print(f"  • Avg Batch Latency       : {avg_latency_ms:.2f} ms")
         print(f"  • Avg Latency / Sample    : {avg_latency_per_sample:.3f} ms")
@@ -271,6 +288,9 @@ class SNNTester:
             "framework":                 self.cfg.FRAMEWORK,
             "overall_accuracy":          overall_acc,
             "total_spikes":              total_spikes,
+            "total_input_spikes":        total_input_spikes,
+            "avg_input_spikes_per_sample": avg_input_spikes_per_sample,
+            "framework_ratio":           framework_ratio,
             "avg_spikes_per_sample":     avg_spikes_per_sample,
             "avg_firing_rate_hz":        avg_firing_rate_hz,
             "avg_latency_ms":            avg_latency_ms,

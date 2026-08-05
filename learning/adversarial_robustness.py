@@ -90,10 +90,11 @@ class AdversarialEvaluator:
             if self.model.tensor_format() == "BT":
                 data = data.permute(1, 0, 2, 3, 4).contiguous()
 
-            differentiable = getattr(self.model, "is_differentiable", lambda: True)()
-            if attack == "fgsm" and differentiable:
+            # Every model here trains via standard PyTorch autograd (ModelInterface
+            # is PyTorch-only) so attack generation always applies.
+            if attack == "fgsm":
                 data = generate_fgsm_input(self.model, data, targets, epsilon)
-            elif attack == "pgd" and differentiable:
+            elif attack == "pgd":
                 data = generate_pgd_input(self.model, data, targets, epsilon, pgd_steps)
 
             with torch.no_grad():

@@ -21,13 +21,24 @@ def build_lif_layer(layer_name: str, cfg: Settings, spike_grad, **kwargs) -> nn.
     beta        = fw_cfg["beta"]
     threshold   = fw_cfg["threshold"]
 
+    # snnTorch defaults to reset_mechanism="subtract" (soft reset) and
+    # reset_delay=True (applies a spike's reset on the FOLLOWING timestep) —
+    # neither matches Norse/SpikingJelly, which both reset immediately to a
+    # hard 0. Left at the default, snnTorch's membrane reads a different value
+    # than the other two frameworks after every spike, which silently biases
+    # any cross-framework comparison. zero/False matches the other two.
     if neuron_type == "alpha":
         return snn.Alpha(
             alpha=beta, beta=max(0.5, beta - 0.1),
             threshold=threshold, spike_grad=spike_grad,
+            reset_mechanism="zero", reset_delay=False,
             **kwargs,
         )
-    return snn.Leaky(beta=beta, threshold=threshold, spike_grad=spike_grad, **kwargs)
+    return snn.Leaky(
+        beta=beta, threshold=threshold, spike_grad=spike_grad,
+        reset_mechanism="zero", reset_delay=False,
+        **kwargs,
+    )
 
 
 class SNN_TORCH(ModelInterface, nn.Module):
