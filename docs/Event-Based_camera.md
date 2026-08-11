@@ -19,6 +19,45 @@ slices instead of recordings, applying transforms before caching):
     Layer 4 — DataLoader construction (coordinator-driven worker/prefetch config)
 
 
+SUPPORTED DATASETS & DOWNLOAD SIZES
+------------------------------------
+Registered in DATASET_REGISTRY (event_data_workflow/data_pipeline.py). Sizes
+below are the COMPRESSED download size (what tonic pulls over the network on
+first run into tmp/data/), not the size after caching/framing.
+
+    #  Dataset          Classes  Samples                  Download size                                   Status (this machine)
+    1  N-MNIST          10       70,000 (60k train/10k test) 1.18 GB  (train.zip 965 MB + test.zip 162 MB)  Downloaded — pipeline verified (diagnostics/verify_cache_fix.py)
+    2  N-Caltech101     101      8,709                     3.72 GB  (single zip, Mendeley-hosted)           Not yet downloaded
+    3  ASL-DVS          26       100,800 (4,200/letter)     not published (see note below)                  Not yet downloaded
+    4  DVS128 Gesture   11       1,464 (1,176 train/288 test) ~3 GB tar / ~5 GB extracted, train+test combined  Not yet downloaded
+    5  DSEC             —        —                          (out of scope — already known)                  —
+
+Notes on how these numbers were obtained:
+    N-Caltech101 — measured directly: the Mendeley download link 302-redirects
+        to an S3 object with an exact Content-Length of 3,989,375,649 bytes.
+        One monolithic zip (all 101 classes); tonic has no partial-download path.
+
+    ASL-DVS — no official size is published anywhere (dataset repo, paper, or
+        tonic's source). The download is a single Dropbox shared-folder zip
+        containing all 26 letters as one archive (100,800 .mat files total,
+        ~3,900 samples/letter); Dropbox doesn't expose a Content-Length for
+        folder-zip links, and there's no per-class/per-file download offered,
+        so the only way to get a real number is to let the download run.
+        Given N-Caltech101's ~460 KB/sample average and ASL-DVS having ~12x
+        as many samples, expect this to be the largest of the three by a wide
+        margin — plan for it separately, not as a quick smoke test.
+
+    DVS128 Gesture — the ~3 GB tar / ~5 GB extracted figure is the published
+        aggregate (train+test combined) from a community-maintained mirror
+        README, not measured directly here: figshare's ndownloader links sit
+        behind an AWS WAF bot challenge that blocks HEAD/range probing.
+        train_url and test_url are separate archives (ibmGestureTrain.tar.gz,
+        ibmGestureTest.tar.gz); test has 288/1,464 samples (~20%), so the
+        test-only download is an ESTIMATE of roughly 0.6 GB tar — useful as
+        the smaller of the two splits for a partial smoke test, not a
+        confirmed figure.
+
+
 DATA FORMAT
 -----------
 Raw events from tonic datasets are structured NumPy arrays with dtype fields:

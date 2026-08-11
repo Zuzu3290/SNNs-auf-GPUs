@@ -24,7 +24,43 @@ from skeleton import Settings
 from .cache_engine import AdaptiveCacheController, measure_event_bytes
 from .system_monitor import SystemResourceMonitor
 from .workflow_config import WorkflowSettings
-from .regression_datasets import DSECRaw
+from .dataset_registry import resolve_dataset_entry
+
+
+class LabelToIndex:
+    """Picklable string-label -> int-index mapper (see cache_engine.ComposedTransform
+    for why a closure/lambda can't be used here — Windows' spawn-based multiprocessing
+    can't pickle nested functions, only importable module-level classes/functions).
+
+    Some tonic dataset classes (e.g. NCALTECH101) hand back the raw class-folder name
+    as the target instead of an integer index — unlike ASLDVS/DVSGesture/NMNIST, which
+    already map to ints internally. Nothing downstream (PadTensors' collate_fn calls
+    torch.tensor(target)) can handle a string/bytes target, so it must be mapped to an
+    int before caching/batching. Built from sorted(set(labels)) for a deterministic
+    mapping regardless of directory-walk order."""
+
+    def __init__(self, labels):
+        classes = sorted(set(labels))
+        self.mapping = {label: idx for idx, label in enumerate(classes)}
+
+    def __call__(self, label):
+        return self.mapping[label]
+
+
+def apply_label_to_index(*datasets: Dataset) -> None:
+    """If any given dataset's raw .targets are non-int labels (e.g. NCALTECH101's
+    class-folder-name strings), build ONE LabelToIndex mapping from the union of
+    every dataset's targets and set it as each dataset's target_transform. A single
+    shared mapping (rather than one per dataset) keeps train/test class indices
+    consistent even if one split happens to be missing a class the other has —
+    matters for datasets passed here as two separately-constructed objects
+    (has_train_split=True), not just one dataset split via random_split()."""
+    all_targets = [target for dataset in datasets for target in getattr(dataset, "targets", [])]
+    if not all_targets or isinstance(all_targets[0], (int, bool)):
+        return
+    mapper = LabelToIndex(all_targets)
+    for dataset in datasets:
+        dataset.target_transform = mapper
 
 
 def pad_events_passthrough_target(batch):
@@ -117,86 +153,6 @@ def create_sliced_dataset(
 
     return tonic.SlicedDataset(dataset, slicer=slicer, transform=transform, metadata_path=metadata_path)  # type: ignore[arg-type]
 
-# Built-in dataset choices.
-DATASET_REGISTRY = {
-    "1": {
-        "name": "N-MNIST",
-        "category": "classification",
-        "cls": tonic.datasets.NMNIST,
-        "has_train_split": True,
-        "sensor_size": tonic.datasets.NMNIST.sensor_size,
-        "num_classes": 10,
-    },
-    "2": {
-        "name": "N-Caltech101",
-        "category": "classification",
-        "cls": tonic.datasets.NCALTECH101,
-        "has_train_split": False,
-        "sensor_size": (240, 180, 2),
-        "num_classes": 101,
-    },
-    "3": {
-        "name": "ASL-DVS",
-        "category": "classification",
-        "cls": tonic.datasets.ASLDVS,
-        "has_train_split": False,
-        "sensor_size": tonic.datasets.ASLDVS.sensor_size,
-        "num_classes": 26,
-    },
-    "4": {
-        "name": "DVS128 Gesture",
-        "category": "classification",
-        "cls": tonic.datasets.DVSGesture,
-        "has_train_split": True,
-        "sensor_size": tonic.datasets.DVSGesture.sensor_size,
-        "num_classes": 11,
-    },
-    # Phase B — regression dataset. "loader" replaces "cls": DSEC's raw structure
-    # is multi-sensor (events + images + flow/disparity), not (events, class_index)
-    # — see regression_datasets.py. num_classes is None: output-head/loss wiring for
-    # a regression target isn't built yet (see docs/Haseeb-open-items.md). Unlike
-    # MVSEC/TUM-VIE (removed — no real flow ground truth / boundary-only mocap /
-    # external hosting problems), DSEC has real optical-flow ground truth and a
-    # real train/test split built into tonic's own wrapper.
-    "5": {
-        "name": "DSEC",
-        "category": "optical flow / disparity (target not finalized)",
-        "kind": "regression",
-        "loader": lambda save_to, split: DSECRaw(save_to=save_to, split=split),
-        "sensor_size": DSECRaw.sensor_size,
-        "num_classes": None,
-    },
-}
-
-def resolve_dataset_entry(cfg: Settings) -> dict:
-    """Match cfg.DATASET_NAME against DATASET_REGISTRY, else prompt interactively, else
-    default to N-MNIST. Standalone (not a NeuromorphicEncoder method) so callers — e.g.
-    main.py checking dataset/model compatibility — can resolve the choice and lock it into
-    cfg.DATASET_NAME *before* constructing the encoder, without downloading anything and
-    without prompting the user twice for the same choice."""
-    wanted = (cfg.DATASET_NAME or "").strip().upper()
-    for entry in DATASET_REGISTRY.values():
-        if entry["name"].upper() == wanted:
-            return entry
-
-    if sys.stdin.isatty():
-        print("\n[PIPELINE] Select a dataset:")
-        for key, entry in DATASET_REGISTRY.items():
-            output = f"{entry['num_classes']} classes" if entry["num_classes"] is not None else "target TBD"
-            print(f"  {key}) {entry['name']}  [{entry['category']}, {output}]")
-        try:
-            choice = input("Enter number: ").strip()
-        except EOFError:
-            # isatty() can report True with no real input behind it (some
-            # CI runners, notebook cells) — fall back instead of crashing.
-            choice = ""
-        if choice in DATASET_REGISTRY:
-            return DATASET_REGISTRY[choice]
-        logger.warning(f"[PIPELINE] Invalid selection '{choice}' — defaulting to N-MNIST")
-
-    return DATASET_REGISTRY["1"]
-
-
 # Show progress bars for large downloads in bytes instead of raw item counts.
 orig_tqdm_init = t.tqdm.__init__
 def mb_init(self, *a, **kw):
@@ -253,8 +209,10 @@ class NeuromorphicEncoder:
         elif entry["has_train_split"]:
             raw_train = entry["cls"](save_to=str(DATA_DIR), train=True)
             raw_test  = entry["cls"](save_to=str(DATA_DIR), train=False)
+            apply_label_to_index(raw_train, raw_test)
         else:
             full_raw = entry["cls"](save_to=str(DATA_DIR))
+            apply_label_to_index(full_raw)
             n_train = int(0.8 * len(full_raw))
             raw_train, raw_test = torch.utils.data.random_split(
                 full_raw, [n_train, len(full_raw) - n_train]
@@ -309,17 +267,13 @@ class NeuromorphicEncoder:
             cached_test  = controller.determine_dataset_strategy(raw_test,  split="test",  num_workers=num_workers, force_mode=self.wf.CACHE_FORCE_MODE)
 
             metadata_dir = str(PROJECT_ROOT / "metadata")
-            train_data = create_sliced_dataset(
-                cached_train,
+            train_data = create_sliced_dataset(cached_train,
                 slice_duration_ms=self.slice_duration_ms,
-                events_per_slice=self.events_per_slice,
-                transform=train_tf,
+                events_per_slice=self.events_per_slice, transform=train_tf,
                 metadata_path=f"{metadata_dir}/train",
             )
-            test_data = create_sliced_dataset(
-                cached_test,
-                slice_duration_ms=self.slice_duration_ms,
-                transform=test_tf,
+            test_data = create_sliced_dataset(cached_test,
+                slice_duration_ms=self.slice_duration_ms, transform=test_tf,
                 metadata_path=f"{metadata_dir}/test",
             )
             logger.info(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
@@ -359,18 +313,10 @@ class NeuromorphicEncoder:
         else:
             pad = tonic.collation.PadTensors(batch_first=False)
 
-        self.train_loader = DataLoader(
-            train_data,
-            batch_size=batch_size,
-            collate_fn=pad,
-            shuffle=True,
-            drop_last=True,
+        self.train_loader = DataLoader(train_data, batch_size=batch_size, collate_fn=pad, shuffle=True, drop_last=True,
             **self.loader_kwargs(train_data, base_cfg),
         )
-        self.test_loader = DataLoader(
-            test_data,
-            batch_size=batch_size,
-            collate_fn=pad,
+        self.test_loader = DataLoader(test_data, batch_size=batch_size, collate_fn=pad,
             **self.loader_kwargs(test_data, base_cfg),
         )
 
