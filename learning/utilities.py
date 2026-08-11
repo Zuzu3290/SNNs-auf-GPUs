@@ -6,10 +6,13 @@ Import pattern in each framework file:
     from learning.utilities import build_optimizer, build_loss, ActivityMonitor
 """
 import threading
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.flop_counter import FlopCounterMode
 from typing import Dict, List, Optional
+import pynvml
 
 
 def build_optimizer(params, fw_cfg: dict) -> torch.optim.Optimizer:
@@ -39,17 +42,6 @@ def build_loss(fw_cfg: dict, framework: str = "norse"):
           Norse/SNNTorch: spk_rec is [T, B, C]; sums over T before loss.
           SpikingJelly:   forward already sums T, returns [B, C]; uses nn.CrossEntropyLoss.
       mse_count       — SNNTorch mse_count_loss (requires snntorch installed).
-      mse_regression  — flat-vector regression (unused today — the datasets that needed
-          it, MVSEC/TUM-VIE, were removed; kept in case a future pose-like target returns).
-          Norse/SNNTorch/Sinabs: readout is [T, B, output_dim]; averages over T before loss.
-          SpikingJelly: forward already averages T, returns [B, output_dim]; uses nn.MSELoss.
-      flow_masked_mse — DSEC dense optical-flow regression (personal/snn_*_regression.py).
-          readout: [T, B, 2, H, W] (or [B, 2, H, W] if the framework already reduces T,
-          e.g. SpikingJelly) predicting (flow_x, flow_y). targets: [B, H, W, 3] — DSEC's
-          own layout, channels (flow_x, flow_y, valid_mask); the third channel is ground
-          truth's validity flag, not something the model predicts. Only ~19% of pixels
-          are valid in a typical DSEC frame (LiDAR-derived, sparse by nature) — loss is
-          masked to those pixels only, not averaged over the whole frame.
 
     Args:
         fw_cfg    : dict from cfg.FRAMEWORK_CFG[<framework>] merged with lr/wd
@@ -66,31 +58,10 @@ def build_loss(fw_cfg: dict, framework: str = "norse"):
         from snntorch import functional as SF
         return SF.mse_count_loss(correct_rate=0.8, incorrect_rate=0.2)
 
-    if loss_name == "mse_regression":
-        if framework == "spikingjelly":
-            return nn.MSELoss()
-        return lambda readout, targets: F.mse_loss(readout.float().mean(0), targets.float())
-
-    if loss_name == "flow_masked_mse":
-        return flow_masked_mse
-
     raise NotImplementedError(
         f"loss_fn='{loss_name}' not supported for framework='{framework}'. "
-        "Supported: cross_entropy, mse_count, mse_regression, flow_masked_mse."
+        "Supported: cross_entropy, mse_count."
     )
-
-
-def flow_masked_mse(readout: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    """readout: [T, B, 2, H, W] or [B, 2, H, W] (predicted flow_x, flow_y).
-    targets: [B, H, W, 3] (DSEC layout: flow_x, flow_y, valid_mask).
-    MSE over valid pixels only — see build_loss's flow_masked_mse docstring for why."""
-    pred = readout.float().mean(0) if readout.dim() == 5 else readout.float()  # -> [B, 2, H, W]
-    target_flow = targets[..., :2].float().permute(0, 3, 1, 2)                 # [B, H, W, 2] -> [B, 2, H, W]
-    valid = targets[..., 2].float().unsqueeze(1)                               # [B, 1, H, W]
-
-    sq_err = (pred - target_flow) ** 2 * valid
-    n_valid_elements = (valid.sum() * pred.shape[1]).clamp_min(1.0)
-    return sq_err.sum() / n_valid_elements
 
 
 class DenseTimestepBuffer:
@@ -147,6 +118,18 @@ class DenseTimestepBuffer:
             fired = int(sum(e.sum().item() for e in self.events))
             return fired / total if total > 0 else 0.0
 
+    def firing_rate_tensor(self) -> Optional[torch.Tensor]:
+        """GPU-resident equivalent of `firing_rate` — same fraction-of-
+        neuron-timesteps-active ratio, but returned as a 0-dim tensor on the
+        buffer's own device instead of a Python float. No `.item()`/`.cpu()`
+        call happens here, so this is safe to call every batch without
+        forcing a CUDA sync; the caller decides when (if ever) to read it
+        back to host memory."""
+        with self.lock:
+            if not self.events:
+                return None
+            return torch.stack(self.events).float().mean()
+
     def __getstate__(self):
         state = self.__dict__.copy()
         state["lock"] = None
@@ -184,9 +167,9 @@ class ActivityMonitor:
         self.buffers: Dict[str, DenseTimestepBuffer] = {name: DenseTimestepBuffer() for name in layer_map}
         self.paused = False
         for name, layer in layer_map.items():
-            layer.register_forward_hook(self._make_hook(name))
+            layer.register_forward_hook(self.make_hook(name))
 
-    def _make_hook(self, name: str):
+    def make_hook(self, name: str):
         def hook(module, inp, output):
             if self.paused:
                 return
@@ -242,4 +225,146 @@ class ActivityMonitor:
         if total is None or n_layers == 0:
             return torch.tensor(0.0)
         return total / n_layers
+
+
+def cv_isi_single_neuron(spike_times: np.ndarray) -> Optional[float]:
+    """CV_ISI for one neuron's spike-time index array — SNN_GPU_Evaluation_Metrics.md
+    §4.6 reference implementation. None (not 0.0) when fewer than 2 spikes
+    exist, since an ISI is undefined for a single spike — this is filtered
+    out by the caller rather than silently averaged in as a 0."""
+    if len(spike_times) < 2:
+        return None
+    isi = np.diff(spike_times)
+    mean = isi.mean()
+    return float(isi.std() / mean) if mean > 0 else None
+
+
+def compute_cv_isi(activity_snapshot: Dict[str, Optional[torch.Tensor]], sample_idx: int = 0) -> Dict[str, float]:
+    """Per-layer + network-wide Coefficient of Variation of Inter-Spike-Interval
+    (SNN_GPU_Evaluation_Metrics.md §2.2/§4.6): a per-neuron firing-regularity
+    diagnostic, independent of firing rate. Low CV_ISI = clock-like, regular
+    firing; near/above 1 = bursty/irregular.
+
+    activity_snapshot: output of ActivityMonitor.recordings(), i.e.
+    {layer_name: [T, B, ...] spike tensor}. Only sample `sample_idx` of the
+    batch is used (same "sample 0" convention as SNNTrainer.plot_raster) —
+    this is a diagnostic snapshot, not a training-time metric, so a single
+    representative sample per layer is the intentional scope, not a
+    shortcut. Does the CPU/numpy conversion internally; call this only from
+    an already-deferred (end-of-epoch/end-of-run) reporting pass, never from
+    inside the hot batch loop.
+
+    Returns {layer_name: mean_cv_isi} plus a "network_wide" key averaging
+    across all layers that had at least one multi-spike neuron. Layers with
+    no qualifying neuron (all silent or all firing exactly once) are
+    omitted rather than reported as a misleading 0.0.
+    """
+    per_layer: Dict[str, float] = {}
+    for name, spk in activity_snapshot.items():
+        if spk is None:
+            continue
+        # [T, B, ...] -> sample -> [T, N]
+        sample = spk[:, sample_idx] if spk.dim() > 1 else spk
+        flat = sample.detach().cpu().numpy().reshape(sample.shape[0], -1)
+        cvs = [
+            cv_isi_single_neuron(np.nonzero(flat[:, n])[0])
+            for n in range(flat.shape[1])
+        ]
+        cvs = [c for c in cvs if c is not None]
+        if cvs:
+            per_layer[name] = float(np.mean(cvs))
+
+    if per_layer:
+        per_layer["network_wide"] = float(np.mean(list(per_layer.values())))
+    return per_layer
+
+
+def measure_dense_macs(model, sample_batch: torch.Tensor) -> Dict[str, float]:
+    """The "measure FLOPs first" step SynOps energy is built on
+    (SNN_GPU_Evaluation_Metrics.md §2.4/§4.4): dense (non-sparsity-adjusted)
+    multiply-accumulate count for the module immediately downstream of each
+    spiking layer named in `model.synops_layer_map()`.
+
+    Runs ONE real forward pass with temporary hooks capturing the exact
+    input tensor each downstream module receives, then re-invokes each
+    captured (module, input) pair once inside torch.utils.flop_counter.
+    FlopCounterMode (ships with torch >=2.1 — no fvcore/ptflops dependency
+    needed) to get that single-timestep invocation's dense FLOPs, halved to
+    MACs. This is a one-time, static measurement — call it once per model
+    (e.g. at the top of SNNTrainer.train()/SNNTester.run()), never per-batch.
+
+    Returns {} if synops_layer_map() is empty (framework doesn't expose
+    per-timestep hooks, e.g. Sinabs — matches ActivityMonitor's existing
+    no-op convention for that case).
+    """
+    layer_map = model.synops_layer_map()
+    if not layer_map:
+        return {}
+
+    captured: Dict[str, torch.Tensor] = {}
+    handles = []
+
+    def make_hook(name):
+        def hook(module, inp, output):
+            if name not in captured:
+                captured[name] = inp[0].detach().clone()
+        return hook
+
+    for name, module in layer_map.items():
+        handles.append(module.register_forward_hook(make_hook(name)))
+
+    # eval_mode() here is just to make the probe pass deterministic (no
+    # dropout/BN-update side effects); it's not restored afterward since the
+    # caller (SNNTrainer.train() / SNNTester.run()) always sets its own
+    # correct mode immediately after this one-time measurement anyway.
+    model.eval_mode()
+    try:
+        with torch.no_grad():
+            model(sample_batch)
+    finally:
+        for h in handles:
+            h.remove()
+
+    dense_macs: Dict[str, float] = {}
+    for name, module in layer_map.items():
+        captured_input = captured.get(name)
+        if captured_input is None:
+            continue
+        with torch.no_grad(), FlopCounterMode(display=False) as fc:
+            module(captured_input)
+        dense_macs[name] = fc.get_total_flops() / 2.0
+
+    return dense_macs
+
+
+def read_gpu_runtime_diagnostics(gpu_stats, device_idx: int) -> Dict[str, object]:
+    """Point-in-time GPU runtime diagnostics beyond what GPUStats already
+    tracks (SNN_GPU_Evaluation_Metrics.md new "Runtime GPU diagnostics"
+    section): max memory *reserved* by PyTorch's caching allocator (distinct
+    from max allocated — the allocator's high-water mark, including memory
+    held but not currently in use), whether CUDNN autotune is active, and —
+    when NVML is available — GPU temperature and SM/memory clock speed.
+
+    These are NVML/driver queries, not CUDA-stream operations, so unlike
+    `.item()`/`.cpu()` they do NOT force a wait on kernel completion — safe
+    to call once per epoch/test-run without reintroducing the sync stalls
+    the deferred-logging design is eliminating elsewhere.
+    """
+    diag: Dict[str, object] = {
+        "cudnn_benchmark_enabled": torch.backends.cudnn.benchmark,
+        "max_memory_reserved_gb": (
+            torch.cuda.max_memory_reserved(device_idx) / (1024 ** 3) if torch.cuda.is_available() else 0.0
+        ),
+    }
+
+    nvml_handle = getattr(gpu_stats, "nvml_handle", None)
+    if nvml_handle is not None and pynvml is not None:
+        try:
+            diag["gpu_temp_c"]   = pynvml.nvmlDeviceGetTemperature(nvml_handle, pynvml.NVML_TEMPERATURE_GPU)
+            diag["sm_clock_mhz"] = pynvml.nvmlDeviceGetClockInfo(nvml_handle, pynvml.NVML_CLOCK_SM)
+            diag["mem_clock_mhz"] = pynvml.nvmlDeviceGetClockInfo(nvml_handle, pynvml.NVML_CLOCK_MEM)
+        except Exception:
+            pass  # driver/permission hiccup — diagnostics are best-effort, never worth failing a run over
+
+    return diag
 

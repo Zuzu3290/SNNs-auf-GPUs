@@ -4,6 +4,10 @@ A research platform for running Spiking Neural Networks on GPU hardware.
 Trains and compares SNN framework backends on real event-camera datasets,
 measuring runtime, scalability, and accuracy.
 
+The output layer for any application that includes supervised classification come swith a preset number regaridng the number of classes that model will classify which is the ideal number of output neurons the output layers requires.
+
+number of classes in a dataset = number of output neurons 
+
 ---
 
 ## What This Is
@@ -80,6 +84,45 @@ and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
 - Activity regularization and STDP as differentiable loss terms alongside BPTT
 - Adversarial robustness evaluation via TRADES
 
+---
+
+## Adding a New Dataset
+
+If your dataset is already available as events encoded in the standard
+`(x, y, t, p)` format, wiring it in only takes one edit — no other file
+needs to change.
+
+**What `(x, y, t, p)` means** — one row per event, four fields:
+
+| Field | Meaning |
+|-------|---------|
+| `x` | Horizontal pixel position (column) that triggered the event, `0` to `sensor_width - 1` |
+| `y` | Vertical pixel position (row) that triggered the event, `0` to `sensor_height - 1` |
+| `t` | Timestamp of the event (when it happened), typically in microseconds since the recording started |
+| `p` | Polarity — the direction of the brightness change that triggered the event: `1` (ON) if the pixel got brighter, `0` (OFF) if it got darker |
+
+**The template**: open `event_data_workflow/data_pipeline.py` and add an
+entry to `DATASET_REGISTRY` (a plain Python dict, currently entries `"1"`
+through `"5"`):
+
+```python
+"6": {
+    "name": "YourDatasetName",
+    "category": "classification",             # or "regression"
+    "cls": your_tonic_or_custom_dataset_class, # must yield (events, target) per sample
+    "has_train_split": True,                   # False if the dataset needs an 80/20 split done for you
+    "sensor_size": (width, height, 2),         # 2 = polarity channels (ON/OFF)
+    "num_classes": <int>,                      # how many classes this dataset labels
+},
+```
+
+That's the whole integration point: `num_classes` here is automatically wired to the model's output layer for every framework. the number of output neurons always matches the
+number of classes, with nothing else to configure by hand. If your dataset
+doesn't fit the plain `cls(save_to=..., train=...)` constructor pattern
+(e.g. it needs a custom loader function), see the `"5"` (DSEC) entry for
+the `"loader"` alternative.
+
+if you dont have a neuromorphic dataset than review the working mechnaism of the tonic library and its wrapper. A discussion with Claude will be more convienent. 
 ---
 
 ## Growing Analytics

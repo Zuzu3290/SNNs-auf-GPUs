@@ -67,7 +67,7 @@ class DSECRaw(Dataset):
     def __len__(self):
         return len(self._index)
 
-    def _load_recording(self, rec_idx: int):
+    def load_recording(self, rec_idx: int):
         if self._cached_rec_idx != rec_idx:
             data, target = self._dsec[rec_idx]
             self._cached_rec_idx = rec_idx
@@ -78,7 +78,7 @@ class DSECRaw(Dataset):
 
     def __getitem__(self, idx):
         rec_idx, frame_idx = self._index[idx]
-        events, flow_frames, timestamps = self._load_recording(rec_idx)
+        events, flow_frames, timestamps = self.load_recording(rec_idx)
 
         start_us, stop_us = timestamps[frame_idx]
         window = events[(events["t"] >= start_us) & (events["t"] < stop_us)]

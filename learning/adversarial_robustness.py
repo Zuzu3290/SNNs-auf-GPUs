@@ -147,4 +147,4 @@ def write_robustness_csv(results: list[dict], path: str):
         writer = csv.DictWriter(f, fieldnames=list(results[0].keys()))
         writer.writeheader()
         writer.writerows(results)
-    print(f"\n[INFO] Adversarial robustness results saved → {path}")
+    print(f"\n[INFO] Adversarial robustness results saved -> {path}")

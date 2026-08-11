@@ -18,7 +18,7 @@ from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder, resolve_dataset_entry
 from learning.adversarial_robustness import AdversarialEvaluator
 
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.benchmark = False
 
 _MODELS = {
     "norse":    SNN_NORSE,
@@ -27,64 +27,25 @@ _MODELS = {
     "sinabs":   SNN_SINABS,
 }
 
-# Regression model variants (Phase B: MVSEC/TUM-VIE) live under frameworks/personal/,
-# which is gitignored — a personal, local-only setup, not shared with collaborators.
-# A fresh checkout won't have it, so this import must degrade gracefully rather than
-# crash main.py for everyone else.
-try:
-    from learning.frameworks.personal import (
-        SNN_TORCH_REGRESSION, SNN_NORSE_REGRESSION, SNN_SJ_REGRESSION, SNN_SINABS_REGRESSION,
-    )
-    _REGRESSION_MODELS = {
-        "norse":    SNN_NORSE_REGRESSION,
-        "torch":    SNN_TORCH_REGRESSION,
-        "sj":       SNN_SJ_REGRESSION,
-        "sinabs":   SNN_SINABS_REGRESSION,
-    }
-except ImportError:
-    _REGRESSION_MODELS = {}
-
-# Task types each framework backend's output head/loss actually implements today.
-_SUPPORTED_TASK_TYPES = {
-    fw: {"classification"} | ({"regression"} if fw in _REGRESSION_MODELS else set())
-    for fw in _MODELS
-}
-
 
 def select_hardware_config(cfg: Settings) -> str | None:
     """Resolve cfg.DEVICE == "auto" into a concrete hardware configuration.
     Any other value (cpu/cuda) is left untouched — this only fires when the
-    config explicitly asks to be prompted. Interactive terminals get a
-    numbered picker (same convention as NeuromorphicEncoder.select_dataset);
-    non-interactive runs (Colab, CI, batch) autodetect instead, so this never
-    blocks a scripted run. Returns a cache force_mode override, or None to
-    leave cache-tier selection adaptive."""
+    config explicitly asks to be prompted.
+
+    GPU-centric project: CPU-only was never a practical configuration here
+    (SNN per-timestep compute is overwhelmingly GPU-favorable — see
+    diagnostics/gpu_idle_elimination_plan.md). On a machine with no CUDA
+    device, this now surfaces the existing "cfg.DEVICE is 'cuda' but no
+    CUDA-capable GPU was detected" error further down instead of silently
+    falling back to an unsupported CPU-only run.
+
+    Always resolves to hybrid (CPU caches recordings, GPU trains) with
+    cache-tier selection left adaptive — determine_dataset_strategy() picks
+    memory/disk/hybrid/gpu_memory per-dataset based on whether it actually
+    fits each tier's budget (see cache_engine.py)."""
     if cfg.DEVICE != "auto":
         return None
-
-    if sys.stdin.isatty():
-        print("\n[MAIN] Select a hardware configuration:")
-        print("  1) CPU only — data loading, caching, and training all run on CPU")
-        print("  2) Hybrid   — CPU caches recordings (RAM/disk), GPU trains")
-        print("  3) GPU only — recordings cached in GPU VRAM, GPU trains")
-        try:
-            choice = input("Enter number [2]: ").strip() or "2"
-        except EOFError:
-            # isatty() can report True with no real input behind it (some
-            # CI runners, notebook cells) — fall back instead of crashing.
-            choice = "2" if torch.cuda.is_available() else "1"
-        if choice not in ("1", "2", "3"):
-            print(f"[MAIN] Invalid selection '{choice}' — defaulting to hybrid")
-            choice = "2"
-    else:
-        choice = "2" if torch.cuda.is_available() else "1"
-
-    if choice == "1":
-        cfg.DEVICE = "cpu"
-        return None
-    if choice == "3":
-        cfg.DEVICE = "cuda"
-        return "gpu_memory"
     cfg.DEVICE = "cuda"
     return None
 
@@ -131,40 +92,70 @@ if __name__ == "__main__":
     cfg.DATASET_NAME = dataset_entry["name"]  # locks the choice; NeuromorphicEncoder matches it directly, no re-prompt
 
     task_type = dataset_entry.get("kind", "classification")
-    supported = _SUPPORTED_TASK_TYPES.get(cfg.FRAMEWORK, set())
-    if task_type not in supported:
-        reason = (
-            "no regression model variant exists for this framework"
-            if not _REGRESSION_MODELS
-            else f"framework '{cfg.FRAMEWORK}' only implements: {sorted(supported)}"
-        )
+    if task_type != "classification":
         raise RuntimeError(
-            f"[MAIN] '{dataset_entry['name']}' requires task_type='{task_type}', but {reason}. "
-            "Pick a classification dataset (N-MNIST, N-Caltech101, ASL-DVS, DVS128 Gesture) instead, "
-            "or a framework with a regression variant (see docs/Haseeb-open-items.md)."
+            f"[MAIN] '{dataset_entry['name']}' requires task_type='{task_type}', but this pipeline "
+            "is classification-only. Pick a classification dataset (N-MNIST, N-Caltech101, "
+            "ASL-DVS, DVS128 Gesture) instead."
         )
 
     encoder = NeuromorphicEncoder(cfg, cache_force_mode=cache_force_mode)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    model_registry = _REGRESSION_MODELS if task_type == "regression" else _MODELS
-    ModelClass = model_registry.get(cfg.FRAMEWORK)
+    ModelClass = _MODELS.get(cfg.FRAMEWORK)
     if ModelClass is None:
-        raise ValueError(
-            f"Unknown framework '{cfg.FRAMEWORK}' for task_type='{task_type}'. Valid: {list(model_registry)}"
-        )
+        raise ValueError(f"Unknown framework '{cfg.FRAMEWORK}'. Valid: {list(_MODELS)}")
     model = ModelClass(cfg)
-    print(f"\n  Model backend  : {cfg.FRAMEWORK.upper()}  (task_type={task_type})")
 
-    if task_type == "regression":
-        # SNNTrainer is regression-aware now (target dtype, TRADES skip, dense flow loss —
-        # verified end-to-end against real DSEC data, see docs/Haseeb-open-items.md).
-        # SNNTester/AdversarialEvaluator below still assume classification-shaped results
-        # (confusion matrix, argmax predictions) — not touched yet, expect training to
-        # succeed and testing to fail. See docs/Haseeb-open-items.md.
-        print("  [MAIN] Regression model + training loop verified against real data. "
-              "SNNTester/AdversarialEvaluator below are still classification-only — "
-              "expect training to complete and testing to fail. See docs/Haseeb-open-items.md.")
+    # torch.compile: builds an optimized execution graph instead of running
+    # eager per-op kernels, cutting Python/kernel-launch overhead — see
+    # SNN_GPU_Evaluation_Metrics.md's "Runtime GPU diagnostics" section.
+    # Default mode (NOT "reduce-overhead"/CUDA Graphs — tried and reverted,
+    # see diagnostics/gpu_performance_investigation_report.md): SNNTorch's
+    # Leaky/Alpha neuron internal state causes tensor-rank instability (4 vs
+    # 2) that repeatedly blows dynamo's recompile_limit under CUDA-graph
+    # capture, measured at ~5-6 SECONDS/batch forever (~40-50x slower than
+    # eager, never stabilizing) — CUDA Graphs assume a fixed, replay-safe
+    # kernel sequence, which this model's state handling doesn't provide.
+    # Plain default mode has no such requirement and measured 80-130ms/batch
+    # after warmup, actually faster than eager's ~130-170ms.
+    # suppress_errors is the safety net for platforms where the inductor/
+    # Triton backend is unreliable (e.g. Windows), or where a given subgraph
+    # can't be captured as a CUDA graph (e.g. a data-dependent branch): a
+    # compile failure at trace time degrades that graph to eager instead of
+    # crashing the run. Returns an OptimizedModule that proxies attribute
+    # access to the wrapped model, so model.activity/.optimizer/.loss_fn/
+    # .credit_assignment()/.synops_layer_map()/.get_state() etc. keep working
+    # unchanged below.
+    #
+    # torch.compile(model, ...) itself never raises — compilation is lazy,
+    # so the actual failure only surfaces on the FIRST real forward call,
+    # deep inside the training loop, which a try/except here can't catch.
+    # On CUDA, the inductor backend needs Triton for kernel codegen; without
+    # it, suppress_errors keeps the run alive but dynamo still re-attempts
+    # and re-logs a full traceback for every new graph it hits (one per
+    # distinct shape/call-site in the T-step loop) — noisy, not a crash, but
+    # not "graceful" either. Check once, upfront, and skip straight to eager
+    # instead of a wall of repeated failures when we already know it can't work.
+    use_compile = getattr(cfg, "USE_TORCH_COMPILE", True)
+    if use_compile and device.type == "cuda":
+        try:
+            import triton  # noqa: F401
+        except ImportError:
+            use_compile = False
+            print("[MAIN] torch.compile skipped: no Triton installation found "
+                  "(needed by the inductor backend for CUDA kernel codegen — "
+                  "common on Windows). Running in eager mode.")
+
+    if use_compile:
+        import torch._dynamo
+        torch._dynamo.config.suppress_errors = True
+        try:
+            model = torch.compile(model, mode=getattr(cfg, "TORCH_COMPILE_MODE", "default"))
+        except Exception as e:
+            print(f"[MAIN] torch.compile unavailable ({e}) — continuing in eager mode.")
+
+    print(f"\n  Model backend  : {cfg.FRAMEWORK.upper()}")
 
     cfg.display()
 
@@ -175,7 +166,7 @@ if __name__ == "__main__":
     print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}")
     print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
 
-    visualize = select_inference_mode() if task_type == "classification" else False
+    visualize = select_inference_mode()
     tester       = SNNTester(model, test_loader, cfg, device, visualize=visualize)
     test_results = tester.run()
     print("\n Testing complete!")

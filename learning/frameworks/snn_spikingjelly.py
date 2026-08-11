@@ -66,6 +66,10 @@ class SNN_SJ(ModelInterface, nn.Module):
         # net[1] = lif1 (after conv1), net[4] = lif2 (after conv2)
         self.activity = ActivityMonitor({'lif1': self.net[1], 'lif2': self.net[4]})
 
+    def synops_layer_map(self) -> dict:
+        # lif1's spikes feed net[3] (conv2); lif2's spikes feed net[7] (Linear).
+        return {'lif1': self.net[3], 'lif2': self.net[7]}
+
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """Iterate over timesteps and return the SUM of spikes [B, num_classes]."""
         self.activity.clear()

@@ -80,11 +80,11 @@ class RealTimeLatencyEvaluator:
             "per_seed":               per_seed,
         }
 
-        self._print_report(summary)
-        self._write_summary_csv(summary, f"{csv_dir}/summary.csv")
+        self.print_report(summary)
+        self.write_summary_csv(summary, f"{csv_dir}/summary.csv")
         return summary
 
-    def _print_report(self, summary: dict) -> None:
+    def print_report(self, summary: dict) -> None:
         print("\n[REAL-TIME SUITABILITY]")
         print(f"  Dataset          : {summary['dataset']}")
         print(f"  Deadline (p99)   : {summary['deadline_ms']:.1f} ms")
@@ -98,7 +98,7 @@ class RealTimeLatencyEvaluator:
         print(f"  Verdict          : {summary['verdict']} "
               f"({summary['seeds_meeting_deadline']}/{summary['seeds_total']} seeds meet the deadline)")
 
-    def _write_summary_csv(self, summary: dict, path: str) -> None:
+    def write_summary_csv(self, summary: dict, path: str) -> None:
         rows = summary["per_seed"]
         if not rows:
             return

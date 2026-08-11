@@ -29,7 +29,7 @@ def measure_event_bytes(events) -> int:
     return sys.getsizeof(events)
 
 
-class _ComposedTransform:
+class ComposedTransform:
     """Picklable stand-in for a closure — Windows' spawn-based multiprocessing
     can't pickle nested functions (only importable module-level classes/functions),
     which broke DataLoader workers (num_workers > 0) the moment a DiskCachedDataset
@@ -43,6 +43,29 @@ class _ComposedTransform:
         return x
 
 
+class PreTransformedDataset(Dataset):
+    """Applies a deterministic transform once, inside __getitem__, so that a
+    wrapping MemoryCachedDataset/DiskCachedDataset caches the POST-transform
+    result rather than the raw sample. Without this, tonic's cache classes
+    only skip re-fetching the raw item on a cache hit — they unconditionally
+    re-run their own `transform` argument on every single access (cache hit
+    or miss), which defeats caching entirely for an expensive deterministic
+    transform like Denoise+ToFrame. hybrid mode avoids this by wrapping a
+    DiskCachedDataset in BoundedRecordingCache, whose __getitem__ genuinely
+    memoizes the result; this gives memory/disk mode the same property."""
+
+    def __init__(self, dataset: Dataset, transform):
+        self.dataset = dataset
+        self.transform = transform
+
+    def __getitem__(self, idx):
+        data, target = self.dataset[idx]
+        return self.transform(data), target
+
+    def __len__(self):
+        return len(self.dataset)
+
+
 def compose_transforms(*fns):
     """Chain callables left to right, skipping any that are None."""
     fns = [f for f in fns if f is not None]
@@ -50,7 +73,7 @@ def compose_transforms(*fns):
         return None
     if len(fns) == 1:
         return fns[0]
-    return _ComposedTransform(fns)
+    return ComposedTransform(fns)
 
 
 # How large a slice of free VRAM the GPU cache may use, per training phase.
@@ -320,6 +343,14 @@ class AdaptiveCacheController:
         available_for_cache = metrics.available_ram_gb - self.memory_safety_margin
         self.log_diagnostics(metrics, dataset_size_gb)
 
+        # Computed once up front (pure function of live metrics, cheap) so
+        # both the preferred and last-resort gpu_memory branches below stay
+        # consistent with each other and with the fit-check that gates them.
+        gpu_cache_budget_gb = (
+            compute_gpu_cache_budget(metrics.gpu_available_gb, metrics.gpu_memory_gb, phase="train")
+            if self.cuda_enabled and metrics.gpu_memory_gb > 0 else 0.0
+        )
+
         cache_dir = self.cache_path / split
         cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -334,6 +365,33 @@ class AdaptiveCacheController:
             }[mode]
         elif is_gpu_under_pressure(metrics) and metrics.disk_exists:
             mode, threshold_gb = "disk", 0.0
+        elif (
+            self.cuda_enabled
+            and transform is not None  # gpu_memory needs one to bake in (see its ValueError below);
+                                        # temporal slicing's raw-recording caching never passes one,
+                                        # so it's excluded here automatically, not by a separate check
+            and metrics.gpu_memory_gb > 0
+            and metrics.gpu_available_gb >= 1.0  # meaningful headroom, not just scraps
+            and dataset_size_gb < gpu_cache_budget_gb * 0.7  # must actually FIT the budget — see below
+        ):
+            # Preferred over memory/disk/hybrid whenever it's viable: bounded
+            # and self-evicting (stays small, see BaseRecordingCache), zero
+            # disk footprint, and the sample is already where the GPU needs
+            # it — no per-access H2D copy at all once resident. Gated on
+            # dataset_size_gb actually fitting the budget: this tier is a
+            # FIFO cache that evicts its oldest entry once full, so pointing
+            # it at a dataset far larger than the budget (e.g. a 6.9GB
+            # dataset against a ~0.7GB budget) doesn't just "use less cache"
+            # — it evicts almost every entry before the next epoch reaches
+            # it again, forcing the expensive transform to re-run for nearly
+            # every sample, every epoch (measured: turned a ~6min run into
+            # 46+ minutes and counting). memory/disk/hybrid below are
+            # permanent, ever-growing caches — worse per-access latency
+            # (H2D copy still happens) but genuinely never re-pay the
+            # transform cost once an item is cached, which is the correct
+            # trade for a dataset that can't live in VRAM whole.
+            threshold_gb = gpu_cache_budget_gb
+            mode = "gpu_memory"
         elif available_for_cache >= self.memory_threshold and dataset_size_gb < available_for_cache * 0.7:
             mode, threshold_gb = "memory", available_for_cache
         elif metrics.total_ram_gb >= 32.0 and metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.5:
@@ -341,7 +399,12 @@ class AdaptiveCacheController:
         elif metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.2:
             mode, threshold_gb = "disk", 0.0
         elif metrics.gpu_available_gb >= 0.5:
-            threshold_gb = compute_gpu_cache_budget(metrics.gpu_available_gb, metrics.gpu_memory_gb, phase="train")
+            # Last-resort: nothing else fit (RAM/disk unavailable or too
+            # small too). Still bounded/evicting if dataset_size_gb exceeds
+            # this budget too — no better option exists on this machine at
+            # that point, so a slow-but-working run beats the RuntimeError
+            # below.
+            threshold_gb = gpu_cache_budget_gb
             mode = "gpu_memory"
         else:
             raise RuntimeError(
@@ -356,11 +419,21 @@ class AdaptiveCacheController:
         # augmentation is present.
         numpy_bridge = torch.from_numpy if live_transform is not None else None
 
+        # Bake the deterministic transform in BEFORE handing to tonic's cache
+        # classes: MemoryCachedDataset/DiskCachedDataset only skip re-fetching
+        # the raw sample on a cache hit, they unconditionally re-run whatever
+        # `transform` they're given on every access. Wrapping first means
+        # what gets cached is already the (expensive) post-transform result;
+        # only numpy_bridge/live_transform run fresh per access, matching how
+        # hybrid mode's BoundedRecordingCache already behaves (see its own
+        # __getitem__: raw is memoized, self.transform runs fresh on top).
+        pre_transformed = PreTransformedDataset(dataset, transform) if transform is not None else dataset
+
         if mode == "memory":
-            return MemoryCachedDataset(dataset, transform=compose_transforms(transform, numpy_bridge, live_transform))
+            return MemoryCachedDataset(pre_transformed, transform=compose_transforms(numpy_bridge, live_transform))
 
         if mode == "disk":
-            return DiskCachedDataset(dataset, transform=compose_transforms(transform, numpy_bridge, live_transform), cache_path=str(cache_dir))
+            return DiskCachedDataset(pre_transformed, transform=compose_transforms(numpy_bridge, live_transform), cache_path=str(cache_dir), compress=False)
 
         if mode == "hybrid":
             effective_workers = max(1, num_workers)
@@ -371,7 +444,7 @@ class AdaptiveCacheController:
             )
             # Cache only the deterministic transform; live_transform runs via
             # BoundedRecordingCache's own per-access hook, not baked in.
-            disk_cached = DiskCachedDataset(dataset, transform=transform, cache_path=str(cache_dir))
+            disk_cached = DiskCachedDataset(dataset, transform=transform, cache_path=str(cache_dir), compress=False)
             return BoundedRecordingCache(
                 disk_cached, max_recordings=self.max_cached_recordings, max_bytes=max_bytes,
                 transform=compose_transforms(numpy_bridge, live_transform),

@@ -67,6 +67,10 @@ class SNN_NORSE(ModelInterface, nn.Module):
 
         self.activity = ActivityMonitor({'lif1': self.lif1, 'lif2': self.lif2})
 
+    def synops_layer_map(self) -> dict:
+        # lif1's spikes feed conv2; lif2's spikes feed fc.
+        return {'lif1': self.conv2, 'lif2': self.fc}
+
     def forward(self, data: torch.Tensor) -> torch.Tensor:
         """
         data: [T, B, C, H, W]

@@ -10,8 +10,6 @@ FW_TO_CFG_KEY = {
     "norse":    "norse",
     "sj":       "spikingjelly",
     "sinabs":   "sinabs",
-    "bindsnet": "bindsnet",
-    "spyx":     "spyx",
 }
 
 
@@ -74,7 +72,10 @@ class Settings:
         self.NAP_TIMES                = int(training.get("nap_times", 1))
         self.LEARNING_RATE            = float(training.get("learning_rate", 0.001))
         self.WEIGHT_DECAY             = float(training.get("weight_decay", 0.0001))
-        self.NUM_CLASSES              = int(training.get("num_classes", self.OUTPUT_SIZE))
+        # Placeholder only — always overwritten by apply_dataset_shape() once
+        # a dataset is resolved, from DATASET_REGISTRY's num_classes
+        # (event_data_workflow/data_pipeline.py).
+        self.NUM_CLASSES              = 10
         # Regression head output size (Phase B: MVSEC/TUM-VIE). Provisional default (6 = a
         # 6-DoF pose vector) — the actual target field/shape isn't finalized yet, see
         # docs/Haseeb-open-items.md. Change via training.regression_output_dim in YAML.
@@ -85,6 +86,8 @@ class Settings:
         self.USE_AMP                  = bool(training.get("use_amp", True))
         self.GRAD_ACCUM_STEPS         = max(1, int(training.get("grad_accum_steps", 1)))
         self.LR_SCHEDULER             = training.get("lr_scheduler", "cosine")
+        self.USE_TORCH_COMPILE        = bool(training.get("use_torch_compile", True))
+        self.TORCH_COMPILE_MODE       = training.get("torch_compile_mode", "default")
 
         self.TRADES_ENABLED           = bool(training.get("trades_enabled", False))
         self.TRADES_EPSILON           = float(training.get("trades_epsilon", 0.05))
@@ -156,7 +159,6 @@ class Settings:
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
-        self.DATA_PATH    = dataset.get("data_path", "./data")
         self.TASK_TYPE    = "classification"  # overwritten by NeuromorphicEncoder.load_raw() once a dataset is picked
 
         # Output control
@@ -277,6 +279,7 @@ class Settings:
         row("Pool",            f"{self.POOL_KERNEL}×{self.POOL_KERNEL} MaxPool   (applied twice)")
         row("FC input (auto)", str(self.FC_IN))
         row("Output classes",  str(self.NUM_CLASSES))
+        row("Network structure", " → ".join(str(n) for n in self.network_structure))
 
         cfg_key      = FW_TO_CFG_KEY[self.FRAMEWORK]
         neuron_types = self.NEURON_TYPES.get(cfg_key, {})
@@ -313,7 +316,6 @@ class Settings:
 
         section("DATASET")
         row("Dataset",   self.DATASET_NAME)
-        row("Data path", self.DATA_PATH or "(default)")
 
         section("OUTPUT")
         row("Output dir", self.OUTPUT_DIR)

@@ -117,7 +117,7 @@ def create_sliced_dataset(
 
     return tonic.SlicedDataset(dataset, slicer=slicer, transform=transform, metadata_path=metadata_path)  # type: ignore[arg-type]
 
-# Built-in dataset choices, offered when cfg.DATA_PATH is empty.
+# Built-in dataset choices.
 DATASET_REGISTRY = {
     "1": {
         "name": "N-MNIST",
@@ -236,48 +236,36 @@ class NeuromorphicEncoder:
 
     def load_raw(self):
         """Load the raw dataset (no transform, no cache yet) and build the frame transform for it."""
-        data_path = self.cfg.DATA_PATH
-
-        if not data_path:
-            entry = self.select_dataset()
-            sensor_size = entry["sensor_size"]
-            if entry.get("kind") == "regression":
-                # DSEC's own "test" split has no local ground truth at all (it's held
-                # out for their own leaderboard — tonic's DSEC class raises if you ask
-                # for target_selection there). So: load DSEC's "train" split (the
-                # recordings that actually have optical-flow/disparity ground truth),
-                # then split across recordings ourselves, same as the other manually-
-                # split datasets.
-                full_raw = entry["loader"](str(DATA_DIR), split="train")
-                n_train = int(0.8 * len(full_raw))
-                raw_train, raw_test = torch.utils.data.random_split(
-                    full_raw, [n_train, len(full_raw) - n_train]
-                )
-            elif entry["has_train_split"]:
-                raw_train = entry["cls"](save_to=str(DATA_DIR), train=True)
-                raw_test  = entry["cls"](save_to=str(DATA_DIR), train=False)
-            else:
-                full_raw = entry["cls"](save_to=str(DATA_DIR))
-                n_train = int(0.8 * len(full_raw))
-                raw_train, raw_test = torch.utils.data.random_split(
-                    full_raw, [n_train, len(full_raw) - n_train]
-                )
-            self.dataset_label = entry["name"]
-            self.task_type = entry.get("kind", "classification")
-            self.cfg.TASK_TYPE = self.task_type  # so SNNTrainer/SNNTester can branch without a separate cfg wiring step
-            self.cfg.apply_dataset_shape(
-                sensor_h=sensor_size[1], sensor_w=sensor_size[0],
-                in_channels=sensor_size[2], num_classes=entry["num_classes"],
-            )
-        else:
-            full_raw = tonic.datasets.FileDataset(save_to=data_path)
-            sensor_size = full_raw.sensor_size
+        entry = self.select_dataset()
+        sensor_size = entry["sensor_size"]
+        if entry.get("kind") == "regression":
+            # DSEC's own "test" split has no local ground truth at all (it's held
+            # out for their own leaderboard — tonic's DSEC class raises if you ask
+            # for target_selection there). So: load DSEC's "train" split (the
+            # recordings that actually have optical-flow/disparity ground truth),
+            # then split across recordings ourselves, same as the other manually-
+            # split datasets.
+            full_raw = entry["loader"](str(DATA_DIR), split="train")
             n_train = int(0.8 * len(full_raw))
             raw_train, raw_test = torch.utils.data.random_split(
                 full_raw, [n_train, len(full_raw) - n_train]
             )
-            self.task_type = "classification"
-            self.dataset_label = getattr(self.cfg, "DATASET_NAME", "Custom Dataset")
+        elif entry["has_train_split"]:
+            raw_train = entry["cls"](save_to=str(DATA_DIR), train=True)
+            raw_test  = entry["cls"](save_to=str(DATA_DIR), train=False)
+        else:
+            full_raw = entry["cls"](save_to=str(DATA_DIR))
+            n_train = int(0.8 * len(full_raw))
+            raw_train, raw_test = torch.utils.data.random_split(
+                full_raw, [n_train, len(full_raw) - n_train]
+            )
+        self.dataset_label = entry["name"]
+        self.task_type = entry.get("kind", "classification")
+        self.cfg.TASK_TYPE = self.task_type  # so SNNTrainer/SNNTester can branch without a separate cfg wiring step
+        self.cfg.apply_dataset_shape(
+            sensor_h=sensor_size[1], sensor_w=sensor_size[0],
+            in_channels=sensor_size[2], num_classes=entry["num_classes"],
+        )
 
         self.sensor_size = sensor_size
         W, H, C = sensor_size

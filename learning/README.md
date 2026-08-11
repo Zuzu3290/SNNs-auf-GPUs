@@ -16,8 +16,7 @@ learning/
     ├── snn_norse.py                # SNN model built with Norse (LIFCell)
     ├── snn_spikingjelly.py         # SNN model built with SpikingJelly (IzhikevichNode)
     ├── snn_torch.py                # SNN model built with SNNTorch (Alpha)
-    ├── snn_sinabs.py               # SNN model built with Sinabs (DVS-first, batch-first tensors)
-    └── personal/                   # gitignored/local-only DSEC regression variants
+    └── snn_sinabs.py               # SNN model built with Sinabs (DVS-first, batch-first tensors)
 ```
 
 Per-layer spike recording + activity regularization (`ActivityMonitor`,
@@ -44,7 +43,7 @@ All hyperparameters are in `SNN_module.yaml` at the project root.
 
 ## Key Features
 
-- **Three framework backends** — Norse, SpikingJelly, SNNTorch, switchable from `main.py`
+- **Four framework backends** — Norse, SpikingJelly, SNNTorch, Sinabs, switchable from `main.py`
 - **TRADES robustness training** — adversarial perturbation during training
 - **Activity regularisation** — prevents dead and saturated neurons
 - **STDP loss** — biologically inspired spike-timing correlation term

@@ -2,30 +2,33 @@ architecture:
   input_size: 50
   hidden_size: 50
   hidden_layers: 5
-  output_size: 10
   leak: 1.0
   override: false
   network_struct: S
   simulator: ON
 
 training:
-  framework: norse           # YAML selector: norse | torch | sj | sinabs | bindsnet | spyx
+  framework: norse           # YAML selector: norse | torch | sj | sinabs
   device: auto                # cpu | cuda | auto (prompts for CPU-only / hybrid / GPU-only at
                                # an interactive terminal; autodetects in non-interactive runs)
-  epochs: 2
-  iterations_per_epoch: 100
+  epochs: 5
+  iterations_per_epoch: 400
   timesteps: 25
   batch_size: 128
   nap_times: 1
   learning_rate: 0.001
   weight_decay: 0.0001
-  num_classes: 10
-  regression_output_dim: 6      # Regression head size for Phase B datasets (MVSEC/TUM-VIE).
-                                 # Provisional (6 = 6-DoF pose) — target field isn't finalized,
-                                 # see docs/Haseeb-open-items.md. Unused by classification datasets.
+
+  # torch.compile is disabled: on this machine the inductor backend needs cl.exe
+  # (MSVC C++ compiler) for parts of the backward graph even on CUDA models, and
+  # it's not installed/on PATH — see learning/main.py's use_compile block. Flip
+  # to true once a C++ compiler is available (e.g. via VS Build Tools) to regain
+  # the ~1.5-2x speedup noted there.
+  use_torch_compile: false
+
   # TRADES robustness training — penalises the network for changing its prediction under input corruption.
   # Loss = CrossEntropy(clean) + lambda * KL(clean || adversarial).
-  trades_enabled: true          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
+  trades_enabled: false          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
 
   trades_epsilon: 0.05          # Perturbation budget: max allowed input corruption per element.
                                 # Range: 0.001 (near-imperceptible) → 0.3 (heavy corruption).
@@ -49,7 +52,6 @@ training:
 
 dataset:
   dataset_name: MNIST
-  data_path:
 
 output:
   output_dir: ./outputs
@@ -68,7 +70,7 @@ frameworks:
 
   norse:
     tau_mem_inv: 100.0
-    threshold:   0.5
+    threshold:   1.0
     optimizer:   adam
     loss_fn:     cross_entropy
 
@@ -84,16 +86,3 @@ frameworks:
     optimizer:   adam
     loss_fn:     cross_entropy
 
-  bindsnet:
-    nu_pre:      0.0001    # STDP pre-synaptic (LTP) learning rate
-    nu_post:     0.01      # STDP post-synaptic (LTD) learning rate
-    threshold:   0.5       # informational only — BindsNET's own -52.0/-65.0 mV neuron defaults are used internally
-    optimizer:   none      # no backprop — weights update via STDP inside forward()
-    loss_fn:     cross_entropy
-
-  spyx:
-    beta:        0.9
-    gamma:       0.9        # ALIF adaptation rate (only used when neuron_types.spyx.* = alif)
-    threshold:   0.5
-    optimizer:   adam
-    loss_fn:     cross_entropy
