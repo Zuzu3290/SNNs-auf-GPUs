@@ -1,8 +1,11 @@
 """
 Single source of truth for every dataset the pipeline can load: tonic class/
-loader, sensor shape, class count, sample counts, and per-dataset training
+loader, sensor shape, class count, sample counts, per-dataset training
 hyperparameters (epochs/batch_size/iterations — None means "use the
-SNN_module.yaml global default"; see apply_dataset_hyperparams).
+SNN_module.yaml global default"; see apply_dataset_hyperparams), and
+storage_size_gb (compressed download size actually pulled by this entry's
+loader, not the extracted/on-disk footprint — None where no figure has been
+measured or documented; see docs/Event-Based_camera.md for sourcing).
 """
 from __future__ import annotations
 import sys
@@ -147,6 +150,7 @@ DATASET_REGISTRY = {
         "num_classes": 10,
         "num_train_samples": 60_000,
         "num_test_samples": 10_000,
+        "storage_size_gb": 1.18,  # train.zip 965MB + test.zip 162MB
         "epochs": None,
         "batch_size": None,
         "iterations": None,
@@ -160,6 +164,7 @@ DATASET_REGISTRY = {
         "num_classes": 101,
         "num_train_samples": 6_967,
         "num_test_samples": 1_742,
+        "storage_size_gb": 3.72,  # single zip, Mendeley-hosted
         "epochs": None,
         "batch_size": None,
         "iterations": None,
@@ -173,6 +178,7 @@ DATASET_REGISTRY = {
         "num_classes": None,
         "num_train_samples": None,
         "num_test_samples": None,
+        "storage_size_gb": 0.15,  # one sequence ("shapes_rotation") — the only one this loader downloads; full 27-sequence collection is ~7.7GB
         "epochs": None,
         "batch_size": None,
         "iterations": None,
@@ -186,6 +192,7 @@ DATASET_REGISTRY = {
         "num_classes": 11,
         "num_train_samples": 1_176,
         "num_test_samples": 288,
+        "storage_size_gb": 3.0,  # compressed tar, train+test combined; ~5GB extracted
         "epochs": None,
         "batch_size": None,
         "iterations": None,
@@ -199,6 +206,7 @@ DATASET_REGISTRY = {
         "num_classes": None,
         "num_train_samples": None,
         "num_test_samples": None,
+        "storage_size_gb": None,  # not measured — no confirmed figure documented yet
         "epochs": None,
         "batch_size": None,
         "iterations": None,

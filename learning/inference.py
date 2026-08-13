@@ -11,6 +11,7 @@ from learning.training import aggregate_spike_output
 from learning.utilities import measure_dense_macs, read_gpu_runtime_diagnostics, compute_cv_isi
 from event_data_workflow.gpu_stats import GPUStats
 from event_data_workflow.prefetch import AsyncGPUPrefetcher, CudaPrefetcher
+from event_data_workflow.system_monitor import monitor
 
 # Energy per synaptic op — adjust for your target neuromorphic platform
 ENERGY_PER_SPIKE_PJ = 3.5
@@ -161,14 +162,8 @@ class SNNTester:
         host memory in ONE bulk transfer after the loop finishes. See
         SNN_GPU_Evaluation_Metrics.md and SNNTrainer.train()'s matching
         docstring for why."""
+        monitor.enter_phase("testing")
         self.model.eval_mode()
-
-        # Duck-typed: only GPURecordingCache (gpu_memory cache tier) exposes
-        # set_phase(). Widens its VRAM budget for eval (no gradients/optimizer
-        # state active) — no-op for every other cache tier.
-        set_phase = getattr(self.test_loader.dataset, "set_phase", None)
-        if set_phase is not None:
-            set_phase("eval")
 
         window_s = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
         timesteps_cfg = getattr(self.cfg, 'TIMESTEPS', 25)

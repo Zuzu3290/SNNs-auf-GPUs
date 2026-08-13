@@ -22,7 +22,7 @@ import tqdm as t
 from typing import Optional
 from skeleton import Settings
 from .cache_engine import AdaptiveCacheController, measure_event_bytes
-from .system_monitor import SystemResourceMonitor
+from .system_monitor import monitor
 from .workflow_config import WorkflowSettings
 from .dataset_registry import resolve_dataset_entry
 
@@ -101,8 +101,7 @@ def dataloader_config(settings: Settings, device: torch.device, safety_margin_gb
     RAM. Drops to num_workers=0 when the worker RAM budget is under 500MB —
     a GPU-only embedded run with no host RAM headroom for multiprocessing workers."""
     cuda_enabled = device is not None and getattr(device, "type", "") == "cuda"
-    device_idx = (device.index or 0) if device is not None and cuda_enabled else 0
-    metrics = SystemResourceMonitor(device_idx=device_idx, cuda_enabled=cuda_enabled).snapshot()
+    metrics = monitor.snapshot()
     total_gb = max(1.0, metrics.available_ram_gb - safety_margin_gb)
     worker_budget_gb = total_gb * worker_fraction
     gpu_only = cuda_enabled and worker_budget_gb < 0.5
@@ -171,6 +170,17 @@ class NeuromorphicEncoder:
 
         self.cfg = cfg
         self.wf  = WorkflowSettings()
+
+        # Configure the shared SystemResourceMonitor once, early, now that
+        # the run's device and cache path are both known — every consumer
+        # (AdaptiveCacheController, dataloader_config(), SNNTrainer,
+        # SNNTester) reads live state through this same instance instead of
+        # each building its own.
+        device = torch.device(cfg.DEVICE)
+        cuda_enabled = device.type == "cuda"
+        device_idx = (device.index or 0) if cuda_enabled else 0
+        monitor.configure(cache_path=self.wf.CACHE_PATH, device_idx=device_idx, cuda_enabled=cuda_enabled)
+
         if cache_force_mode is not None:
             self.wf.CACHE_FORCE_MODE = cache_force_mode
         self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else self.wf.TEMPORAL_SLICING_ENABLED

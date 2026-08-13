@@ -12,11 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import psutil
 import torch
-
-try:
-    import pynvml
-except ImportError:
-    pynvml = None
+import pynvml
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +46,35 @@ def is_gpu_under_pressure(metrics: CacheMetrics, threshold: float = GPU_PRESSURE
     return gpu_pressure(metrics) > threshold
 
 
+# GPU VRAM safety margin per phase — diagnostic only, see
+# SystemResourceMonitor.enter_phase(). "training" carries the larger margin
+# since the backward pass and optimizer state compete hardest for VRAM;
+# "testing" (inference, no gradients/optimizer state active) needs less
+# headroom.
+GPU_PHASE_MARGINS: dict[str, float] = {
+    "training": 0.20,
+    "testing":  0.10,
+}
+
+
+def gpu_total_memory_gb(device_idx: int = 0) -> float:
+    """Total VRAM for one CUDA device, in GB. 0.0 if CUDA isn't available.
+    The single place that reads device capacity — SystemResourceMonitor.snapshot()
+    and GPUStats both call this instead of each independently calling
+    torch.cuda.get_device_properties()."""
+    if not torch.cuda.is_available():
+        return 0.0
+    return torch.cuda.get_device_properties(device_idx).total_memory / (1024 ** 3)
+
+
 class SystemResourceMonitor:
-    """Probes RAM/GPU/disk on demand. Used by data_pipeline.dataloader_config()
-    and AdaptiveCacheController before every caching decision."""
+    """Live RAM/GPU/disk probe, plus phase-aware VRAM headroom diagnostics
+    at the training/testing boundary (see enter_phase()). One instance,
+    `monitor` below, is built once at import time and shared: every file
+    that needs live resource state imports that instance directly
+    (`from .system_monitor import monitor`) and calls its methods, instead
+    of each building its own probe and re-querying the same RAM/disk/VRAM
+    state independently."""
 
     def __init__(self, cache_path: str = "./cache", device_idx: int = 0, cuda_enabled: bool = True):
         self.cache_path = Path(cache_path)
@@ -60,6 +82,15 @@ class SystemResourceMonitor:
         # False forces GPU fields to 0 even when CUDA is physically present —
         # set when the run is explicitly CPU-only, so a GPU that exists but
         # isn't requested never affects cache/worker decisions.
+        self.cuda_enabled = cuda_enabled
+        self.phase = "training"  # see enter_phase()
+
+    def configure(self, cache_path: str = "./cache", device_idx: int = 0, cuda_enabled: bool = True) -> None:
+        """Set the run's device/cache_path once, early, as soon as the run's
+        device is known (NeuromorphicEncoder.__init__). Unconfigured, the
+        constructor defaults above apply."""
+        self.cache_path = Path(cache_path)
+        self.device_idx = device_idx
         self.cuda_enabled = cuda_enabled
 
     def snapshot(self) -> CacheMetrics:
@@ -81,14 +112,14 @@ class SystemResourceMonitor:
             disk_exists = False
 
         if self.cuda_enabled and torch.cuda.is_available():
-            props = torch.cuda.get_device_properties(self.device_idx)
-            gpu_total = props.total_memory / (1024 ** 3)
+            gpu_total = gpu_total_memory_gb(self.device_idx)
 
             # Most conservative available-VRAM estimate: driver-reported free
             # space vs. total minus PyTorch's own reserved pool, whichever is smaller.
-            free_driver, _ = torch.cuda.mem_get_info(self.device_idx)
-            reserved = torch.cuda.memory_reserved(self.device_idx)
-            gpu_available = min(free_driver, props.total_memory - reserved) / (1024 ** 3)
+            free_driver    = torch.cuda.mem_get_info(self.device_idx)[0]
+            reserved       = torch.cuda.memory_reserved(self.device_idx)
+            total_bytes    = torch.cuda.get_device_properties(self.device_idx).total_memory
+            gpu_available  = min(free_driver, total_bytes - reserved) / (1024 ** 3)
         else:
             gpu_total     = 0.0
             gpu_available = 0.0
@@ -104,6 +135,42 @@ class SystemResourceMonitor:
             cpu_percent=cpu_percent,
             cpu_count=psutil.cpu_count(logical=True) or 1,
         )
+
+    def enter_phase(self, phase: str) -> None:
+        """Diagnostic-only VRAM headroom check at the training/testing phase
+        boundary. Logs whether free VRAM is above or below that phase's
+        safety margin (GPU_PHASE_MARGINS), so a run's logs show whether the
+        model's own weights, activations, gradients, or optimizer state are
+        running close to the edge. Takes no corrective action. Call once at
+        the real train/test boundary (SNNTrainer.train(), SNNTester.run())."""
+        if phase not in GPU_PHASE_MARGINS:
+            raise ValueError(f"Unknown phase '{phase}'. Valid: {list(GPU_PHASE_MARGINS)}")
+        self.phase = phase
+        self.log_headroom()
+
+    def log_headroom(self) -> None:
+        if not self.cuda_enabled:
+            return
+        metrics = self.snapshot()
+        if metrics.gpu_memory_gb <= 0:
+            return
+        margin_gb = metrics.gpu_memory_gb * GPU_PHASE_MARGINS[self.phase]
+        if metrics.gpu_available_gb < margin_gb:
+            logger.warning(
+                f"[GPU MEMORY] {self.phase} phase: {metrics.gpu_available_gb:.2f}GB free VRAM, "
+                f"below the {margin_gb:.2f}GB safety margin for this phase — model weights, "
+                f"activations, gradients, or optimizer state may be running close to the edge."
+            )
+        else:
+            logger.info(
+                f"[GPU MEMORY] {self.phase} phase: {metrics.gpu_available_gb:.2f}GB free VRAM "
+                f"(safety margin {margin_gb:.2f}GB)"
+            )
+
+
+# The one shared instance — every file imports this directly instead of
+# constructing its own SystemResourceMonitor.
+monitor = SystemResourceMonitor()
 
 
 @dataclass
@@ -183,7 +250,7 @@ class PipelineMonitor:
         self.thresholds    = thresholds or BoundThresholds()
 
         self.nvml_handle = None
-        if self.cuda_enabled and pynvml is not None:
+        if self.cuda_enabled:
             try:
                 pynvml.nvmlInit()
                 self.nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(device_idx)

@@ -11,6 +11,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
 from event_data_workflow.gpu_stats import GPUStats
 from event_data_workflow.prefetch import AsyncGPUPrefetcher, CudaPrefetcher
+from event_data_workflow.system_monitor import monitor
 from learning.utilities import measure_dense_macs, read_gpu_runtime_diagnostics, compute_cv_isi
 
 logger = logging.getLogger(__name__)
@@ -196,6 +197,8 @@ class SNNTrainer:
         training hands off to inference. See SNN_GPU_Evaluation_Metrics.md
         for why (per-batch `.item()` calls force a CUDA stream sync, which
         stalls the GPU every iteration)."""
+        monitor.enter_phase("training")
+        self.gpu_stats.measure_idle_baseline()
 
         epochs    = self.cfg.EPOCHS
         num_iters = self.cfg.ITERA
@@ -354,10 +357,11 @@ class SNNTrainer:
             gpu            = self.gpu_stats.end_epoch()
             gpu_diag       = read_gpu_runtime_diagnostics(self.gpu_stats, self.gpu_stats.device_idx)
 
-            energy_j     = self.gpu_stats.gpu_energy_j(epoch_duration)  # None on CPU-only or without NVML
-            avg_power_w  = energy_j / epoch_duration if energy_j is not None else 0.0
-            energy_j     = energy_j or 0.0
-            gpu_active_s = epoch_duration * gpu.get("gpu_util_avg_pct", 0.0) / 100.0
+            energy_j        = self.gpu_stats.gpu_energy_j(epoch_duration)  # None on CPU-only or without NVML
+            avg_power_w     = energy_j / epoch_duration if energy_j is not None else 0.0
+            dynamic_power_w = self.gpu_stats.dynamic_power_w(avg_power_w) if energy_j is not None else 0.0
+            energy_j        = energy_j or 0.0
+            gpu_active_s    = epoch_duration * gpu.get("gpu_util_avg_pct", 0.0) / 100.0
 
             # The one necessary sync of the epoch: a host-visible accuracy
             # scalar to decide whether this is the new best checkpoint.
@@ -385,6 +389,7 @@ class SNNTrainer:
                 "gpu_diag":           gpu_diag,
                 "energy_j":           energy_j,
                 "avg_power_w":        avg_power_w,
+                "dynamic_power_w":    dynamic_power_w,
                 "gpu_active_s":       gpu_active_s,
                 "current_lr":         self.model.get_lr(),
                 "checkpoint_saved_msg": checkpoint_saved_msg,
@@ -461,6 +466,7 @@ class SNNTrainer:
                 "gpu_active_s":        round(record["gpu_active_s"], 2),
                 "energy_j":            round(record["energy_j"], 2),
                 "avg_power_w":         round(record["avg_power_w"], 2),
+                "dynamic_power_w":     round(record["dynamic_power_w"], 2),
                 "forward_latency_ms":  round(avg_fwd_ms, 3),
                 "backward_latency_ms": round(avg_bwd_ms, 3),
                 "cv_isi_mean":         round(cv_isi_mean, 4),
@@ -483,6 +489,8 @@ class SNNTrainer:
             print(f"  • Wall time      : {record['epoch_duration']:.2f}s")
             print(f"  • GPU active     : {record['gpu_active_s']:.2f}s  ({gpu.get('gpu_util_avg_pct', 0.0):.1f}% of wall time)")
             print(f"  • Energy         : {record['energy_j']:.2f} J  ({record['avg_power_w']:.1f} W avg)")
+            if self.gpu_stats.idle_power_w is not None:
+                print(f"  • Dynamic Power  : {record['dynamic_power_w']:.1f} W  (idle baseline {self.gpu_stats.idle_power_w:.1f} W subtracted)")
             if gpu:
                 print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
                 print(f"  • GPU Memory     : {gpu['gpu_mem_peak_gb']} GB / {self.gpu_stats.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")

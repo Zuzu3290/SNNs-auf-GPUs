@@ -42,8 +42,9 @@ def select_hardware_config(cfg: Settings) -> str | None:
 
     Always resolves to hybrid (CPU caches recordings, GPU trains) with
     cache-tier selection left adaptive — determine_dataset_strategy() picks
-    memory/disk/hybrid/gpu_memory per-dataset based on whether it actually
-    fits each tier's budget (see cache_engine.py)."""
+    memory/disk/hybrid per-dataset based on whether it actually fits each
+    tier's RAM/disk budget (see cache_engine.py). VRAM is never a cache
+    target; the GPU only trains."""
     if cfg.DEVICE != "auto":
         return None
     cfg.DEVICE = "cuda"
