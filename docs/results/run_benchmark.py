@@ -41,7 +41,7 @@ import numpy as np
 
 from skeleton import Settings
 from event_data_workflow import NeuromorphicEncoder, DATASET_REGISTRY
-from event_data_workflow.gpu_stats import GPUStats
+from event_data_workflow.system_monitor import PipelineMonitor
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from learning.adversarial_robustness import AdversarialEvaluator
@@ -159,9 +159,8 @@ def run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, 
     print(f"\n{'='*60}\n  {name.upper()}\n{'='*60}")
     cfg.FRAMEWORK = name
 
-    device_idx = (device.index or 0) if device.type == "cuda" else 0
-    idle_gpu_stats = GPUStats(device_idx=device_idx)
-    idle_cold_w = idle_gpu_stats.measure_idle_baseline(duration_s=3.0)
+    idle_pipeline_monitor = PipelineMonitor(cuda_enabled=device.type == "cuda")
+    idle_cold_w = idle_pipeline_monitor.measure_idle_baseline(duration_s=3.0)
     print(f"  cold idle baseline: {idle_cold_w:.2f} W" if idle_cold_w is not None else "  cold idle baseline: N/A")
 
     model = ModelClass(cfg)
@@ -177,7 +176,7 @@ def run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, 
     )
     train_time_s = time.perf_counter() - t0
 
-    idle_hot_w = idle_gpu_stats.measure_idle_baseline(duration_s=3.0)
+    idle_hot_w = idle_pipeline_monitor.measure_idle_baseline(duration_s=3.0)
     print(f"  hot idle baseline (post-train): {idle_hot_w:.2f} W" if idle_hot_w is not None else "  hot idle baseline: N/A")
 
     tester = SNNTester(model, LimitedLoader(test_loader, test_batches), cfg, device)

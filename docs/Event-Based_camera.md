@@ -114,37 +114,30 @@ recording share a single cache entry. Caching after slicing would multiply
 RAM usage by the slice expansion factor (e.g. 6x recordings = 6x cache entries
 for data that is identical up to the slice boundaries).
 
+Hardware topology is fixed and singular: CPU always loads and caches
+recordings, GPU always trains. VRAM is never a cache storage target — the
+GPU is only ever the training device. The controller chooses where one
+dataset's cache lives among RAM and disk, not between hardware
+configurations.
+
 Strategy selection (event_data_workflow/cache_engine.py):
 
     memory      — full dataset fits in RAM → tonic MemoryCachedDataset
     disk        — limited RAM but disk available → tonic DiskCachedDataset
     hybrid      — large RAM (≥32 GB) with disk → DiskCachedDataset + hot RAM layer
-    gpu_memory  — no disk, insufficient RAM, VRAM available → GPURecordingCache
     no_cache    — fallback, on-the-fly processing
 
 The selection is driven by live system metrics from SystemResourceMonitor
-(available RAM, disk space, free VRAM). GPU pressure (VRAM usage > 75%) forces
-the disk strategy to prevent the cache and CUDA's pinned-memory allocator from
+(available RAM, disk space). GPU pressure (VRAM usage > 75%) forces the disk
+strategy to prevent the cache and CUDA's pinned-memory allocator from
 competing for the same physical RAM.
 
-Cache eviction policy — S3-FIFO (SOSP'23, Yang et al.):
-    Rather than LRU, the cache uses an S3-FIFO structure with three queues:
-    - Small queue  (10%): new items enter here
-    - Main queue   (90%): items promoted after being accessed more than once
-    - Ghost set         : fingerprints of recently evicted items; a ghost hit
-                          causes the next miss to be admitted directly to Main
-    This achieves a reported 6x improvement in cache miss ratio over LRU for
-    typical access patterns. For neuromorphic data where the same recordings
-    are revisited across epochs, the ghost-set fast path is particularly useful.
-
-GPURecordingCache additionally enforces a phase-aware VRAM budget:
-    warmup    5%  — activations and parameters not yet stable
-    train    10%  — backward pass competes hard for VRAM
-    backward  5%  — most dangerous moment, cache footprint minimised
-    eval     25%  — no gradients active
-    inference 30% — largest budget, no backward pass
-
-An emergency margin of 15% of total VRAM is always kept unconditionally free.
+Cache eviction policy — plain FIFO:
+    A single deque tracks insertion order; the oldest entry is evicted once
+    the cache is full. This pipeline's access pattern is a shuffled
+    DataLoader — every recording is equally likely to recur each epoch,
+    with no popularity skew for a more elaborate policy to exploit, so
+    plain FIFO gives the same practical hit rate with far less bookkeeping.
 
 
 GPU REQUIREMENT

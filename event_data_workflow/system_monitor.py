@@ -47,24 +47,20 @@ def is_gpu_under_pressure(metrics: CacheMetrics, threshold: float = GPU_PRESSURE
 
 
 # GPU VRAM safety margin per phase — diagnostic only, see
-# SystemResourceMonitor.enter_phase(). "training" carries the larger margin
-# since the backward pass and optimizer state compete hardest for VRAM;
-# "testing" (inference, no gradients/optimizer state active) needs less
-# headroom.
 GPU_PHASE_MARGINS: dict[str, float] = {
     "training": 0.20,
     "testing":  0.10,
 }
 
 
-def gpu_total_memory_gb(device_idx: int = 0) -> float:
-    """Total VRAM for one CUDA device, in GB. 0.0 if CUDA isn't available.
-    The single place that reads device capacity — SystemResourceMonitor.snapshot()
-    and GPUStats both call this instead of each independently calling
-    torch.cuda.get_device_properties()."""
+def gpu_total_memory_gb() -> float:
+    """Total VRAM for the GPU, in GB. 0.0 if CUDA isn't available. This
+    project only ever runs single-GPU (training.device in SNN_module.yaml
+    is cpu | cuda | auto — never an indexed cuda:N), so there's no device
+    index to parameterize here — it's always device 0."""
     if not torch.cuda.is_available():
         return 0.0
-    return torch.cuda.get_device_properties(device_idx).total_memory / (1024 ** 3)
+    return torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
 
 
 class SystemResourceMonitor:
@@ -76,21 +72,19 @@ class SystemResourceMonitor:
     of each building its own probe and re-querying the same RAM/disk/VRAM
     state independently."""
 
-    def __init__(self, cache_path: str = "./cache", device_idx: int = 0, cuda_enabled: bool = True):
+    def __init__(self, cache_path: str = "./cache", cuda_enabled: bool = True):
         self.cache_path = Path(cache_path)
-        self.device_idx = device_idx
         # False forces GPU fields to 0 even when CUDA is physically present —
         # set when the run is explicitly CPU-only, so a GPU that exists but
         # isn't requested never affects cache/worker decisions.
         self.cuda_enabled = cuda_enabled
         self.phase = "training"  # see enter_phase()
 
-    def configure(self, cache_path: str = "./cache", device_idx: int = 0, cuda_enabled: bool = True) -> None:
-        """Set the run's device/cache_path once, early, as soon as the run's
-        device is known (NeuromorphicEncoder.__init__). Unconfigured, the
-        constructor defaults above apply."""
+    def configure(self, cache_path: str = "./cache", cuda_enabled: bool = True) -> None:
+        """Set the run's cache_path once, early, as soon as it's known
+        (NeuromorphicEncoder.__init__). Unconfigured, the constructor
+        defaults above apply."""
         self.cache_path = Path(cache_path)
-        self.device_idx = device_idx
         self.cuda_enabled = cuda_enabled
 
     def snapshot(self) -> CacheMetrics:
@@ -112,13 +106,13 @@ class SystemResourceMonitor:
             disk_exists = False
 
         if self.cuda_enabled and torch.cuda.is_available():
-            gpu_total = gpu_total_memory_gb(self.device_idx)
+            gpu_total = gpu_total_memory_gb()
 
             # Most conservative available-VRAM estimate: driver-reported free
             # space vs. total minus PyTorch's own reserved pool, whichever is smaller.
-            free_driver    = torch.cuda.mem_get_info(self.device_idx)[0]
-            reserved       = torch.cuda.memory_reserved(self.device_idx)
-            total_bytes    = torch.cuda.get_device_properties(self.device_idx).total_memory
+            free_driver    = torch.cuda.mem_get_info(0)[0]
+            reserved       = torch.cuda.memory_reserved(0)
+            total_bytes    = torch.cuda.get_device_properties(0).total_memory
             gpu_available  = min(free_driver, total_bytes - reserved) / (1024 ** 3)
         else:
             gpu_total     = 0.0
@@ -168,8 +162,6 @@ class SystemResourceMonitor:
             )
 
 
-# The one shared instance — every file imports this directly instead of
-# constructing its own SystemResourceMonitor.
 monitor = SystemResourceMonitor()
 
 
@@ -214,89 +206,178 @@ class BoundViolation:
 
 class PipelineMonitor:
     """
-    Continuous background sampler for CPU + GPU utilization/power/clock +
-    RAM, shared by the offline diagnostics harness
-    (diagnostics/gpu_utilization_harness.py) and, optionally, real training/
-    inference runs — the same probing SystemResourceMonitor does
-    point-in-time for cache decisions, extended into a running, phase-
+    Continuous background sampler for CPU + GPU utilization/power/clock/
+    memory + RAM, shared by the offline diagnostics harness
+    (diagnostics/gpu_utilization_harness.py) and by real training/inference
+    runs (SNNTrainer, SNNTester) — the same probing SystemResourceMonitor
+    does point-in-time for cache decisions, extended into a running, phase-
     taggable trace with sustained-violation ("out of bounds") flagging.
 
     Sampling is NVML/psutil driver queries only — never touches a CUDA
     tensor or calls torch.cuda.synchronize() — so it never perturbs the
-    training loop it's watching, the same non-blocking property GPUStats'
-    existing sampler thread already relies on.
+    training loop it's watching.
 
-    Usage:
-        monitor = PipelineMonitor(device_idx=0)
-        monitor.start()
-        monitor.set_phase("fetch")
+    This project only ever runs single-GPU (training.device in
+    SNN_module.yaml is cpu | cuda | auto — never an indexed cuda:N), so
+    there's no device index to take here — it's always device 0.
+
+    Usage — free-form phases (diagnostics harness):
+        pm = PipelineMonitor()
+        pm.start()
+        pm.set_phase("fetch")
         ...
-        monitor.set_phase("compute")
+        pm.set_phase("compute")
         ...
-        monitor.stop()
-        for v in monitor.violations: ...   # sustained out-of-bounds episodes
+        pm.stop()
+        for v in pm.violations: ...   # sustained out-of-bounds episodes
+
+    Usage — one phase per epoch (SNNTrainer/SNNTester), reusing the same
+    phase-tagged sample stream to also report per-epoch VRAM/energy:
+        pm = PipelineMonitor()
+        pm.start()
+        pm.measure_idle_baseline()
+        pm.set_phase(f"epoch_{epoch}")
+        pm.reset_epoch_memory()
+        ... run the epoch ...
+        gpu = pm.phase_summary(f"epoch_{epoch}")
+        energy_j = pm.phase_energy_j(f"epoch_{epoch}", epoch_duration_s)
+        pm.stop()
+        overall = pm.summary()  # across every phase since start()
     """
 
     def __init__(
         self,
-        device_idx: int = 0,
         cuda_enabled: bool = True,
         interval_s: float = 0.2,
         thresholds: BoundThresholds | None = None,
     ):
-        self.device_idx    = device_idx
         self.cuda_enabled  = cuda_enabled and torch.cuda.is_available()
         self.interval_s    = interval_s
         self.thresholds    = thresholds or BoundThresholds()
+
+        self.total_memory_gb = gpu_total_memory_gb()
+        self.peak_mem_each: list[float] = []  # one entry per phase_summary() call
+        self.idle_power_w: float | None = None
 
         self.nvml_handle = None
         if self.cuda_enabled:
             try:
                 pynvml.nvmlInit()
-                self.nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(device_idx)
+                self.nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
             except Exception:
                 self.nvml_handle = None
 
         self.samples: list[PipelineSample] = []
         self.violations: list[BoundViolation] = []
-        self._phase = "unset"
-        self._t_origin: float | None = None
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
+        self.phase = "unset"
+        self.t_origin: float | None = None
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
         # in-progress violation start time per kind, or None if currently within bounds
-        self._open_violation: dict[str, BoundViolation | None] = {
+        self.open_violation: dict[str, BoundViolation | None] = {
             "gpu_idle": None, "cpu_saturated": None, "ram_low": None,
         }
 
     def set_phase(self, phase: str) -> None:
-        self._phase = phase
+        self.phase = phase
+
+    def reset_epoch_memory(self) -> None:
+        """Reset PyTorch's peak-VRAM counter. Call at the start of a phase
+        (e.g. an epoch) so phase_summary()'s memory figures reflect only
+        that phase, not everything since start()."""
+        if self.cuda_enabled:
+            torch.cuda.reset_peak_memory_stats(0)
+
+    def epoch_memory_gb(self) -> tuple[float, float]:
+        """(peak_gb, current_gb) since the last reset_epoch_memory() call."""
+        if not self.cuda_enabled:
+            return 0.0, 0.0
+        peak_gb = torch.cuda.max_memory_allocated(0) / (1024 ** 3)
+        curr_gb = torch.cuda.memory_allocated(0) / (1024 ** 3)
+        return peak_gb, curr_gb
+
+    def measure_idle_baseline(self, duration_s: float = 1.0) -> float | None:
+        """Sample GPU power for a short window with no work scheduled,
+        before a run starts. Lets phase_energy_j()/dynamic_power_w() report
+        *dynamic* power/energy (above idle draw) instead of the raw total,
+        which otherwise overstates what a workload actually costs — the GPU
+        pulls non-zero power just sitting idle. No-op (returns None)
+        without CUDA/NVML. Safe to call more than once; last call wins."""
+        if not self.cuda_enabled or self.nvml_handle is None:
+            return None
+        deadline = time.perf_counter() + duration_s
+        samples = []
+        while time.perf_counter() < deadline:
+            try:
+                samples.append(float(pynvml.nvmlDeviceGetPowerUsage(self.nvml_handle)))
+            except Exception:
+                pass
+            time.sleep(self.interval_s / 2)
+        if samples:
+            self.idle_power_w = (sum(samples) / len(samples)) * 1e-3
+        return self.idle_power_w
+
+    def dynamic_power_w(self, avg_power_w: float) -> float:
+        """avg_power_w with the idle baseline subtracted (clamped at 0).
+        Falls back to avg_power_w unchanged if measure_idle_baseline() was
+        never called."""
+        if self.idle_power_w is None:
+            return avg_power_w
+        return max(0.0, avg_power_w - self.idle_power_w)
+
+    def phase_summary(self, phase: str) -> dict:
+        """Aggregate utilization for one phase's samples (e.g. one epoch),
+        plus peak/current VRAM since the last reset_epoch_memory() call.
+        Also records this call's peak VRAM into peak_mem_each, so summary()
+        can report the overall peak across every phase later."""
+        samples  = [s for s in self.samples if s.phase == phase]
+        gpu_vals = [s.gpu_util_pct for s in samples if s.gpu_util_pct is not None]
+        peak_gb, curr_gb = self.epoch_memory_gb()
+        peak_pct = peak_gb / self.total_memory_gb * 100 if self.total_memory_gb > 0 else 0.0
+        self.peak_mem_each.append(peak_gb)
+        return {
+            "gpu_util_avg_pct":  round(sum(gpu_vals) / len(gpu_vals), 1) if gpu_vals else 0.0,
+            "gpu_util_peak_pct": round(max(gpu_vals), 1) if gpu_vals else 0.0,
+            "gpu_mem_peak_gb":   round(peak_gb, 2),
+            "gpu_mem_curr_gb":   round(curr_gb, 2),
+            "gpu_mem_peak_pct":  round(peak_pct, 1),
+        }
+
+    def phase_energy_j(self, phase: str, elapsed_s: float) -> float | None:
+        """Estimated GPU energy in joules for one phase, from that phase's
+        sampled power readings. None if no power data (no CUDA / no NVML)."""
+        power_vals = [s.gpu_power_w for s in self.samples if s.phase == phase and s.gpu_power_w is not None]
+        if not power_vals:
+            return None
+        avg_w = sum(power_vals) / len(power_vals)
+        return avg_w * elapsed_s
 
     def start(self) -> None:
-        self._t_origin = time.perf_counter()
-        self._stop_event.clear()
+        self.t_origin = time.perf_counter()
+        self.stop_event.clear()
         psutil.cpu_percent(interval=None)  # prime the reference point (see snapshot()'s docstring note)
-        self._thread = threading.Thread(target=self.loop, daemon=True)
-        self._thread.start()
+        self.thread = threading.Thread(target=self.loop, daemon=True)
+        self.thread.start()
 
     def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=2.0)
         # close out any still-open violation episodes at the moment of stopping
-        now = time.perf_counter() - (self._t_origin or 0.0)
-        for kind, v in self._open_violation.items():
+        now = time.perf_counter() - (self.t_origin or 0.0)
+        for kind, v in self.open_violation.items():
             if v is not None:
                 v.ended_t_s = now
 
     def loop(self) -> None:
-        while not self._stop_event.wait(self.interval_s):
+        while not self.stop_event.wait(self.interval_s):
             try:
                 self.sample_once()
             except Exception:
                 pass  # a monitor must never take down the run it's watching
 
     def sample_once(self) -> None:
-        t = time.perf_counter() - self._t_origin
+        t = time.perf_counter() - self.t_origin
         cpu_pct = psutil.cpu_percent(interval=None)
         ram_gb  = psutil.virtual_memory().available / (1024 ** 3)
 
@@ -310,7 +391,7 @@ class PipelineMonitor:
                 pass
 
         self.samples.append(PipelineSample(
-            t_s=t, phase=self._phase, cpu_percent=cpu_pct, ram_available_gb=ram_gb,
+            t_s=t, phase=self.phase, cpu_percent=cpu_pct, ram_available_gb=ram_gb,
             gpu_util_pct=gpu_util, gpu_power_w=gpu_power, gpu_sm_clock_mhz=gpu_clock,
         ))
 
@@ -322,12 +403,12 @@ class PipelineMonitor:
                            t, self.thresholds.ram_low_sustained_s)
 
     def check_bound(self, kind: str, in_violation: bool, t: float, sustained_s: float) -> None:
-        open_v = self._open_violation[kind]
+        open_v = self.open_violation[kind]
         if in_violation:
             if open_v is None:
                 # Not flagged yet — just start tracking; only becomes a
                 # logged BoundViolation once it's been sustained long enough.
-                self._open_violation[kind] = BoundViolation(kind=kind, started_t_s=t, phase=self._phase)
+                self.open_violation[kind] = BoundViolation(kind=kind, started_t_s=t, phase=self.phase)
             elif open_v not in self.violations and (t - open_v.started_t_s) >= sustained_s:
                 self.violations.append(open_v)
                 logger.warning(
@@ -338,7 +419,7 @@ class PipelineMonitor:
             if open_v is not None:
                 if open_v in self.violations:
                     open_v.ended_t_s = t
-                self._open_violation[kind] = None
+                self.open_violation[kind] = None
 
     def summary(self) -> dict:
         """Aggregate stats across the whole run so far, plus the violation log."""
@@ -346,12 +427,17 @@ class PipelineMonitor:
             return {"n_samples": 0, "violations": []}
         cpu = [s.cpu_percent for s in self.samples]
         gpu = [s.gpu_util_pct for s in self.samples if s.gpu_util_pct is not None]
+        peak_mem     = max(self.peak_mem_each) if self.peak_mem_each else 0.0
+        peak_mem_pct = peak_mem / self.total_memory_gb * 100 if self.total_memory_gb > 0 else 0.0
         return {
-            "n_samples":        len(self.samples),
-            "avg_cpu_percent":  round(sum(cpu) / len(cpu), 1),
-            "max_cpu_percent":  round(max(cpu), 1),
-            "avg_gpu_util_pct": round(sum(gpu) / len(gpu), 1) if gpu else None,
-            "max_gpu_util_pct": round(max(gpu), 1) if gpu else None,
+            "n_samples":            len(self.samples),
+            "avg_cpu_percent":      round(sum(cpu) / len(cpu), 1),
+            "max_cpu_percent":      round(max(cpu), 1),
+            "avg_gpu_util_pct":     round(sum(gpu) / len(gpu), 1) if gpu else None,
+            "max_gpu_util_pct":     round(max(gpu), 1) if gpu else None,
+            "overall_peak_mem_gb":  round(peak_mem, 2),
+            "overall_peak_mem_pct": round(peak_mem_pct, 1),
+            "total_vram_gb":        round(self.total_memory_gb, 2),
             "violations": [
                 {"kind": v.kind, "started_t_s": round(v.started_t_s, 1),
                  "ended_t_s": round(v.ended_t_s, 1) if v.ended_t_s is not None else None,

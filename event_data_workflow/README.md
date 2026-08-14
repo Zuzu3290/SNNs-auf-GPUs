@@ -6,17 +6,16 @@ for the full design report.
 
 ## Components
 
-- **cache_engine.py** — `AdaptiveCacheController`. Selects between RAM, disk, hybrid, GPU VRAM, or no-cache strategy based on live system resources.
-- **system_monitor.py** — `SystemResourceMonitor`. RAM/disk/VRAM probing, gated by an explicit `cuda_enabled` flag so a GPU that isn't requested never influences decisions.
-- **data_pipeline.py** — `NeuromorphicEncoder`. Wires cache and slicing together into a DataLoader-ready pipeline; also holds `dataloader_config()` (worker sizing) and `create_sliced_dataset()` (temporal windowing) — both folded in from since-removed `pipeline_coordinator.py`/`temporal_slicer.py`.
-- **prefetch.py** — `AsyncGPUPrefetcher`. Background-thread double-buffering so the GPU doesn't idle waiting on the CPU to prepare the next batch.
+- **cache_engine.py** — `AdaptiveCacheController`. Selects between RAM, disk, hybrid, or no-cache strategy based on live system resources. VRAM is never a cache target — the GPU is only ever the training device, never a dataset storage location.
+- **system_monitor.py** — `SystemResourceMonitor` (shared instance: `monitor`). RAM/disk/VRAM probing, gated by an explicit `cuda_enabled` flag so a GPU that isn't requested never influences decisions. Also `PipelineMonitor` — background-thread CPU/GPU utilization/power/memory sampling, used both by the offline diagnostics harness and by `SNNTrainer`/`SNNTester` for per-epoch reporting.
+- **data_pipeline.py** — `NeuromorphicEncoder`. Wires cache and slicing together into a DataLoader-ready pipeline; also holds `dataloader_config()` (worker sizing), `create_sliced_dataset()` (temporal windowing), and `PrefetchedLoader` (background-thread CPU prefetch + CUDA-stream H2D overlap, wrapped around the DataLoaders `create_loaders()` builds).
 
 ## Correct Usage Order
 
 Cache must be applied to raw recordings **before** temporal slicing:
 
 ```python
-controller = AdaptiveCacheController(device=torch.device(cfg.DEVICE))
+controller = AdaptiveCacheController()
 cached_raw = controller.determine_dataset_strategy(raw_dataset, transform=frame_tf, split="train")
 sliced     = create_sliced_dataset(cached_raw, slice_duration_ms=15.0)
 ```
@@ -27,10 +26,9 @@ hits from a single stored entry.
 
 ## Known Limitation — Single GPU Only
 
-`SystemResourceMonitor` (and everything built on it — `AdaptiveCacheController`,
-`dataloader_config()`) tracks memory pressure for **one specific GPU** (whichever
-`device_idx` it was initialised with). On a multi-GPU machine, each instance only
-sees its own device — no visibility into VRAM usage on other GPUs. If the pipeline
-is scaled to multi-GPU training (`DataParallel` or `DistributedDataParallel`), this
-would need a separate instance per device, or extending to aggregate pressure
-across all device indices.
+This pipeline only ever addresses GPU 0 — `training.device` in `SNN_module.yaml`
+is `cpu | cuda | auto`, never an indexed `cuda:N`, so there's no multi-GPU
+selection anywhere in `SystemResourceMonitor`/`PipelineMonitor`/`AdaptiveCacheController`.
+If the pipeline is ever scaled to multi-GPU training (`DataParallel` or
+`DistributedDataParallel`), this would need a real device-index parameter
+reintroduced, plus a monitor instance per device.

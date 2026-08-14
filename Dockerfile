@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 
-RUN pip install --no-cache-dir --break-system-packages torch --index-url https://download.pytorch.org/whl/cu128
+RUN pip install --no-cache-dir --break-system-packages torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir --break-system-packages -r requirements.txt

@@ -9,9 +9,7 @@ import numpy as np
 from skeleton import Settings
 from learning.training import aggregate_spike_output
 from learning.utilities import measure_dense_macs, read_gpu_runtime_diagnostics, compute_cv_isi
-from event_data_workflow.gpu_stats import GPUStats
-from event_data_workflow.prefetch import AsyncGPUPrefetcher, CudaPrefetcher
-from event_data_workflow.system_monitor import monitor
+from event_data_workflow.system_monitor import PipelineMonitor, monitor
 
 # Energy per synaptic op — adjust for your target neuromorphic platform
 ENERGY_PER_SPIKE_PJ = 3.5
@@ -34,8 +32,7 @@ class SNNTester:
         self.batch_log   = []
         self.visualize   = visualize
         self._viz        = None  # lazily built on first use — see show_frame()
-        device_idx = (device.index or 0) if device.type == "cuda" else 0
-        self.gpu_stats = GPUStats(device_idx=device_idx)
+        self.pipeline_monitor = PipelineMonitor(cuda_enabled=device.type == "cuda")
 
         # Deferred-sync accumulation — see run()'s docstring. Nothing here is
         # read back to host memory until the whole test pass finishes.
@@ -183,17 +180,16 @@ class SNNTester:
 
         print("\n[TEST RUN]")
 
-        self.gpu_stats.measure_idle_baseline()
-        self.gpu_stats.start_epoch()
+        self.pipeline_monitor.start()
+        self.pipeline_monitor.measure_idle_baseline()
+        self.pipeline_monitor.set_phase("test_run")
+        self.pipeline_monitor.reset_epoch_memory()
         t_run_start = time.perf_counter()
 
-        # See training.py's matching comment: CudaPrefetcher overlaps the H2D
-        # copy itself with GPU compute via a side CUDA stream, on top of
-        # AsyncGPUPrefetcher's CPU-side overlap — batches arrive device-resident.
-        prefetch_depth = getattr(self.cfg, "PREFETCH_DEPTH", 8)
-        batches = CudaPrefetcher(AsyncGPUPrefetcher(self.test_loader), self.device, depth=prefetch_depth)
+        # self.test_loader is a PrefetchedLoader (event_data_workflow.data_pipeline) —
+        # batches arrive already device-resident.
         with torch.no_grad():
-            for batch_idx, (data, targets) in enumerate(batches):
+            for batch_idx, (data, targets) in enumerate(self.test_loader):
                 B = targets.size(0)
                 T = data.size(0)
 
@@ -231,11 +227,12 @@ class SNNTester:
                 })
 
         t_run_elapsed = time.perf_counter() - t_run_start
-        gpu           = self.gpu_stats.end_epoch()
-        gpu_energy_j  = self.gpu_stats.gpu_energy_j(t_run_elapsed)
+        self.pipeline_monitor.stop()
+        gpu           = self.pipeline_monitor.phase_summary("test_run")
+        gpu_energy_j  = self.pipeline_monitor.phase_energy_j("test_run", t_run_elapsed)
         avg_power_w     = gpu_energy_j / t_run_elapsed if gpu_energy_j is not None else None
-        dynamic_power_w = self.gpu_stats.dynamic_power_w(avg_power_w) if avg_power_w is not None else None
-        gpu_diag        = read_gpu_runtime_diagnostics(self.gpu_stats, self.gpu_stats.device_idx)
+        dynamic_power_w = self.pipeline_monitor.dynamic_power_w(avg_power_w) if avg_power_w is not None else None
+        gpu_diag        = read_gpu_runtime_diagnostics(self.pipeline_monitor)
         credit_assignment = self.model.credit_assignment()
 
         # ---- Bulk transfer: the single sync point for everything
@@ -356,8 +353,8 @@ class SNNTester:
             gap = gpu_energy_j / neuromorphic_j if neuromorphic_j > 0 else float("inf")
             print(f"  • GPU Energy (actual)     : {gpu_energy_j * 1e3:.2f} mJ")
             print(f"  • Mean GPU Power (actual) : {avg_power_w:.1f} W")
-            if self.gpu_stats.idle_power_w is not None:
-                print(f"  • Mean Dynamic Power      : {dynamic_power_w:.1f} W  (idle baseline {self.gpu_stats.idle_power_w:.1f} W subtracted)")
+            if self.pipeline_monitor.idle_power_w is not None:
+                print(f"  • Mean Dynamic Power      : {dynamic_power_w:.1f} W  (idle baseline {self.pipeline_monitor.idle_power_w:.1f} W subtracted)")
             else:
                 print(f"  • Mean Dynamic Power      : N/A  (idle baseline not measured — NVML unavailable)")
             print(f"  • Hardware Efficiency Gap : {gap:.2e}x  (GPU vs ideal neuromorphic silicon)")
@@ -365,7 +362,7 @@ class SNNTester:
             print(f"  • GPU Energy (actual)     : N/A  (install nvidia-ml-py for real power readings)")
 
         if gpu:
-            print(f"  • Peak GPU Memory        : {gpu['gpu_mem_peak_gb']} GB / {self.gpu_stats.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
+            print(f"  • Peak GPU Memory        : {gpu['gpu_mem_peak_gb']} GB / {self.pipeline_monitor.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
             print(f"  • GPU Utilization         : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
         print(f"  • Max Mem Reserved        : {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB   CUDNN autotune: {gpu_diag.get('cudnn_benchmark_enabled')}")
         if "gpu_temp_c" in gpu_diag:

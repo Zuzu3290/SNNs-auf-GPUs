@@ -19,9 +19,9 @@ defensible statement:
    not as one universal number for the whole pipeline.
 2. **Tail latency (p99), not median/mean** — a real-time system cares about
    worst-case jitter, not average speed.
-3. **The actual deployment config** — latency should be measured through
-   `GPURecordingCache`'s `eval`/`inference` phase budget (`cache_engine.py`),
-   not the standard training-loop config.
+3. **The actual deployment config** — latency should be measured through the
+   real inference-time cache tier `AdaptiveCacheController` picks for the
+   dataset in use (`cache_engine.py`), not the standard training-loop config.
 
 ## NIR — cross-framework numerical parameter matching
 
@@ -142,8 +142,7 @@ depend on it. Built and smoke-tested (synthetic batches, not real DVS128
 Gesture data — see below):
 
 - `src/learning/inference.py` — `SNNTester.run()` now reports p99 latency
-  alongside the existing p50/p90, and calls `set_phase("eval")` on the test
-  dataset if it exposes one (duck-typed — only `GPURecordingCache` does).
+  alongside the existing p50/p90.
 - `src/learning/realtime_eval.py` — new `RealTimeLatencyEvaluator`: runs
   `SNNTester` across multiple seeds (fresh model per seed via a
   `model_factory` callable), compares each seed's p99 against

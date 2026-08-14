@@ -2,11 +2,15 @@
 
 This documents a single working session that took `event_data_workflow`'s
 caching layer from "functionally plausible but internally inconsistent" to
-verified-correct across all three hardware configurations the project
-actually needs: CPU-only, hybrid (CPU RAM/disk cache + GPU training), and
-GPU-only (VRAM-resident cache). Supersedes `pipeline_coordinator.md`, which
-documented two files (`pipeline_coordinator.py`, `temporal_slicer.py`) that
-no longer exist — their contents were split up and relocated, see below.
+verified-correct.
+
+The project runs one hardware topology: data loading and caching on CPU,
+training on GPU. `AdaptiveCacheController` doesn't choose between hardware
+configurations — it only chooses where one dataset's cache lives (RAM,
+disk, or both). VRAM is never a cache storage target; the GPU is only ever
+the training device. `pipeline_coordinator.md` documented two files
+(`pipeline_coordinator.py`, `temporal_slicer.py`) that no longer exist —
+their contents were split up and relocated, see below.
 
 ---
 
@@ -150,23 +154,14 @@ Wired into both `SNNTrainer.train()` and `SNNTester.run()`.
 
 ---
 
-### 4. New capability: hardware-configuration picker
+### 4. Hardware resolution
 
-`training.device: auto` in `SNN_module.yaml` now triggers an interactive
-picker in `main.py` (`select_hardware_config()`), matching the existing
-dataset-picker convention:
-
-1. **CPU only** — `device=cpu`; data loading, caching, and training all stay
-   on CPU (end-to-end, verified this session).
-2. **Hybrid** — `device=cuda`, `force_mode` left adaptive so the resource
-   probe picks memory/disk/hybrid based on live RAM.
-3. **GPU only** — `device=cuda`, `force_mode=gpu_memory` — the VRAM-resident
-   cache path this session's fixes specifically targeted.
-
-Any explicit `cpu`/`cuda` value in the config skips the prompt entirely, so
-existing scripted/reproducible runs are unaffected. Non-interactive contexts
-(Colab, CI, batch jobs) autodetect instead of prompting: CUDA available →
-hybrid, else CPU-only.
+`training.device: auto` in `SNN_module.yaml` resolves via `select_hardware_config()`
+in `main.py`. There is one hardware topology — CPU loads/caches, GPU trains
+— so resolution is unconditional: `device=cuda`, `force_mode` left adaptive
+so `AdaptiveCacheController` picks memory/disk/hybrid per-dataset from live
+RAM/disk. Any explicit `cpu`/`cuda` value in the config is left untouched
+(this only fires when the config asks for `auto`).
 
 ---
 
@@ -178,13 +173,11 @@ download required) exercises exactly what changed:
 - Plain FIFO eviction order (oldest-inserted entries evicted first,
   regardless of access frequency)
 - `encode_transform` runs only on cache misses; `live_transform` runs on
-  every access and produces different output each time — both for the CPU
-  cache tier and `GPURecordingCache`
+  every access and produces different output each time
 - `SystemResourceMonitor` respects `cuda_enabled` regardless of actual
   hardware presence
 - `AdaptiveCacheController.determine_dataset_strategy()` end-to-end for
-  `memory` and `gpu_memory` forced modes, including confirming the cached
-  tensor actually lives on CUDA
+  `memory` forced mode
 
 **18/18 checks pass.** The same testing process independently isolated a
 stack-overflow crash in `tonic.DiskCachedDataset` when given non-standard
@@ -206,8 +199,7 @@ SystemResourceMonitor (cuda_enabled-gated RAM/disk/VRAM probe)
                  │
                  ├── MemoryCachedDataset   (memory mode)
                  ├── DiskCachedDataset     (disk mode)
-                 ├── BoundedRecordingCache (hybrid: CPU RAM hot layer over disk)
-                 └── GPURecordingCache     (gpu_memory: VRAM-resident cache)
+                 └── BoundedRecordingCache (hybrid: CPU RAM hot layer over disk)
                           │
                           ▼
                  DataLoader ──► AsyncGPUPrefetcher ──► training / inference loop
@@ -218,12 +210,17 @@ SystemResourceMonitor (cuda_enabled-gated RAM/disk/VRAM probe)
                                                      activity_reg.py)
 ```
 
+Hardware topology is fixed: CPU always loads and caches, GPU always trains.
+VRAM is never a cache storage target — the cache controller's job is
+choosing where one dataset's cache lives among RAM, disk, or both, not
+choosing between hardware configurations.
+
 ---
 
 ### Net result
 
-CPU-only, hybrid, and GPU-only now mean exactly what their names say, each
-independently selectable via one config value or an interactive prompt, each
-verified rather than assumed to work, and each free of the dead machinery
-that made the previous version hard to explain in a report without
-hand-waving past code that turned out not to do anything.
+`memory`, `disk`, and `hybrid` mean exactly what their names say — cache
+storage locations, not hardware configurations — each selected adaptively
+from live RAM/disk, each verified rather than assumed to work, and each free
+of the dead machinery that made the previous version hard to explain in a
+report without hand-waving past code that turned out not to do anything.

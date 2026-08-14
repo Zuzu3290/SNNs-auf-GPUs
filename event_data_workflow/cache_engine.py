@@ -194,14 +194,11 @@ class AdaptiveCacheController:
     the GPU is only ever the training device, never a dataset storage
     location."""
 
-    def __init__(self, cache_path: str = "./cache", memory_safety_margin_gb: float = 2.0, memory_cache_threshold_gb: float = 6.0, max_cached_recordings: int = 500, device=None):
+    def __init__(self, cache_path: str = "./cache", memory_safety_margin_gb: float = 2.0, memory_cache_threshold_gb: float = 6.0, max_cached_recordings: int = 500):
         self.cache_path = Path(cache_path)
         self.memory_safety_margin = memory_safety_margin_gb
         self.memory_threshold = memory_cache_threshold_gb
         self.max_cached_recordings = max_cached_recordings
-        self.device = device
-        self.cuda_enabled = device is not None and getattr(device, "type", "") == "cuda"
-        self.device_idx = (device.index or 0) if device is not None and self.cuda_enabled else 0
         self.cache_path.mkdir(parents=True, exist_ok=True)
 
     def estimate_dataset_memory_footprint(self, dataset: Dataset, num_samples_to_probe: int = 10) -> float:
@@ -226,8 +223,7 @@ class AdaptiveCacheController:
         return (total_bytes / successful_probes * len(dataset)) / (1024 ** 3)
 
     def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train", num_workers: int = 1,
-        force_mode: Optional[Literal["memory", "disk", "hybrid", "no_cache"]] = None,
-    ) -> Dataset:
+        force_mode: Optional[Literal["memory", "disk", "hybrid", "no_cache"]] = None) -> Dataset:
         """
         Pick a cache tier from live resources and wrap dataset in it.
 

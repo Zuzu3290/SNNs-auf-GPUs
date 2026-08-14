@@ -44,7 +44,7 @@ def load_results():
 def attach_real_training_energy(results):
     """
     run_one()'s summary JSON doesn't include the per-epoch GPU energy that
-    SNNTrainer.train() measures (via GPUStats/NVML) — it's only in the
+    SNNTrainer.train() measures (via PipelineMonitor/NVML) — it's only in the
     {name}_train.csv it writes. Pull it in here rather than re-running training.
     """
     for name, r in results.items():

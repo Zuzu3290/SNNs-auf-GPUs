@@ -7,6 +7,9 @@ from __future__ import annotations
 import os
 import sys
 import logging
+import collections
+import queue
+import threading
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -163,6 +166,112 @@ def mb_init(self, *a, **kw):
 t.tqdm.__init__ = mb_init
 
 
+class PrefetchedLoader:
+    """Keeps a DataLoader one batch ahead of the training loop in a
+    background thread, and overlaps the host->device copy itself with GPU
+    compute via a CUDA stream, keeping `depth` device-resident batches
+    queued at once — the standard "DataPrefetcher" pattern (NVIDIA's
+    ImageNet examples, timm's PrefetchLoader), extended to a configurable
+    lookahead instead of just one batch ahead. Closes the transfer gap that
+    a plain `.to(device, non_blocking=True)` call inside the training loop
+    still leaves on the GPU, since that copy is issued only once the
+    previous batch's work is already done, not ahead of time.
+
+    `depth` batches sit device-resident at once — cheap in VRAM (a 128-
+    sample event-frame batch is typically a few MB, so depth=8-16 costs
+    tens of MB, not gigabytes) but smooths over any per-batch fetch-latency
+    variance beyond what depth=1 already covers, since a slow CPU-side
+    batch doesn't stall the GPU as long as the queue ahead of it hasn't run
+    dry.
+
+    Built by NeuromorphicEncoder.create_loaders() — training/inference just
+    iterate self.train_loader/self.test_loader directly; the tensors they
+    get are already resident on `device`, so no further `.to(device)` call
+    is needed in the training loop.
+    """
+
+    def __init__(self, loader, device: torch.device, depth: int = 1, queue_size: int = 2):
+        self.loader = loader
+        self.device = device
+        self.depth = max(1, depth)
+        self.queue_size = max(1, queue_size)
+        self.stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
+
+    def __len__(self) -> int:
+        return len(self.loader)
+
+    def to_device(self, batch):
+        data, targets = batch
+        data = data.to(self.device, non_blocking=True)
+        targets = targets.to(self.device, non_blocking=True)
+        return data, targets
+
+    def cpu_prefetch(self):
+        """Background-thread generator: stays one raw batch ahead of the
+        caller, so CPU-side batch prep (DataLoader + cache) runs on its own
+        thread instead of blocking whatever the caller does with each batch
+        (here, the CUDA-stream transfer below)."""
+        buf: queue.Queue = queue.Queue(maxsize=self.queue_size)
+        sentinel = object()
+        errors: list[Exception] = []
+
+        def produce():
+            try:
+                for batch in self.loader:
+                    buf.put(batch)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                buf.put(sentinel)
+
+        thread = threading.Thread(target=produce, daemon=True)
+        thread.start()
+
+        while True:
+            item = buf.get()
+            if item is sentinel:
+                if errors:
+                    raise errors[0]
+                return
+            yield item
+
+    def __iter__(self):
+        raw_batches = self.cpu_prefetch()
+
+        if self.stream is None:
+            # CPU run: no stream to overlap on, just forward the transfer.
+            for batch in raw_batches:
+                yield self.to_device(batch)
+            return
+
+        pending: collections.deque = collections.deque()
+
+        def preload_one() -> bool:
+            try:
+                batch = next(raw_batches)
+            except StopIteration:
+                return False
+            with torch.cuda.stream(self.stream):
+                pending.append(self.to_device(batch))
+            return True
+
+        for i in range(self.depth):
+            if not preload_one():
+                break
+
+        while pending:
+            torch.cuda.current_stream(self.device).wait_stream(self.stream)
+            data, targets = pending.popleft()
+            # Tell the caching allocator these tensors are still in use by the
+            # side stream's copy until the default stream catches up, so it
+            # can't reclaim/overwrite that memory early (required whenever a
+            # tensor crosses streams like this — see PyTorch's CUDA stream docs).
+            data.record_stream(torch.cuda.current_stream(self.device))
+            targets.record_stream(torch.cuda.current_stream(self.device))
+            preload_one()
+            yield data, targets
+
+
 class NeuromorphicEncoder:
     """Loads a dataset, caches it, and builds the train/test DataLoaders used by training."""
 
@@ -176,18 +285,16 @@ class NeuromorphicEncoder:
         # (AdaptiveCacheController, dataloader_config(), SNNTrainer,
         # SNNTester) reads live state through this same instance instead of
         # each building its own.
-        device = torch.device(cfg.DEVICE)
-        cuda_enabled = device.type == "cuda"
-        device_idx = (device.index or 0) if cuda_enabled else 0
-        monitor.configure(cache_path=self.wf.CACHE_PATH, device_idx=device_idx, cuda_enabled=cuda_enabled)
+        cuda_enabled = torch.device(cfg.DEVICE).type == "cuda"
+        monitor.configure(cache_path=self.wf.CACHE_PATH, cuda_enabled=cuda_enabled)
 
         if cache_force_mode is not None:
             self.wf.CACHE_FORCE_MODE = cache_force_mode
         self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else self.wf.TEMPORAL_SLICING_ENABLED
         self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)
         self.events_per_slice = events_per_slice
-        self.train_loader: DataLoader
-        self.test_loader: DataLoader
+        self.train_loader: PrefetchedLoader
+        self.test_loader: PrefetchedLoader
         self.build()
 
     def build(self):
@@ -259,7 +366,6 @@ class NeuromorphicEncoder:
             memory_safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
             memory_cache_threshold_gb=self.wf.MEMORY_CACHE_THRESHOLD_GB,
             max_cached_recordings=self.wf.MAX_CACHED_RECORDINGS,
-            device=torch.device(self.cfg.DEVICE),
         )
         controller = self.controller
 
@@ -312,9 +418,12 @@ class NeuromorphicEncoder:
         return train_data, test_data
 
     def create_loaders(self, train_data, test_data):
-        """Build the train/test DataLoaders, with worker config sized from live RAM."""
+        """Build the train/test DataLoaders, with worker config sized from live
+        RAM, wrapped in PrefetchedLoader so training/inference never need to
+        wrap them a second time — batches arrive already device-resident."""
         batch_size = self.cfg.BATCH_SIZE
-        base_cfg = dataloader_config(self.cfg, torch.device(self.cfg.DEVICE))
+        device = torch.device(self.cfg.DEVICE)
+        base_cfg = dataloader_config(self.cfg, device)
 
         # Regression targets (MVSEC's tuple, TUM-VIE's dict) aren't torch.tensor()-able —
         # tonic's own PadTensors would crash on them. Only classification datasets get it.
@@ -323,16 +432,20 @@ class NeuromorphicEncoder:
         else:
             pad = tonic.collation.PadTensors(batch_first=False)
 
-        self.train_loader = DataLoader(train_data, batch_size=batch_size, collate_fn=pad, shuffle=True, drop_last=True,
+        train_loader = DataLoader(train_data, batch_size=batch_size, collate_fn=pad, shuffle=True, drop_last=True,
             **self.loader_kwargs(train_data, base_cfg),
         )
-        self.test_loader = DataLoader(test_data, batch_size=batch_size, collate_fn=pad,
+        test_loader = DataLoader(test_data, batch_size=batch_size, collate_fn=pad,
             **self.loader_kwargs(test_data, base_cfg),
         )
 
-        logger.info(f"[PIPELINE] Train batches : {len(self.train_loader)}")
-        logger.info(f"[PIPELINE] Test batches  : {len(self.test_loader)}")
+        logger.info(f"[PIPELINE] Train batches : {len(train_loader)}")
+        logger.info(f"[PIPELINE] Test batches  : {len(test_loader)}")
         logger.info(f"[PIPELINE] Batch size    : {batch_size}")
+
+        prefetch_depth = getattr(self.cfg, "PREFETCH_DEPTH", 8)
+        self.train_loader = PrefetchedLoader(train_loader, device, depth=prefetch_depth)
+        self.test_loader  = PrefetchedLoader(test_loader,  device, depth=prefetch_depth)
 
     def loader_kwargs(self, dataset, base_cfg: dict) -> dict:
         """Force single-process loading for a dataset that needs it (see requires_single_process_loading)."""
@@ -343,7 +456,7 @@ class NeuromorphicEncoder:
             cfg = base_cfg
         return {k: v for k, v in cfg.items() if v is not None}
 
-    def get_dataloaders(self) -> tuple[DataLoader, DataLoader]:
+    def get_dataloaders(self) -> tuple[PrefetchedLoader, PrefetchedLoader]:
         return self.train_loader, self.test_loader
 
     def clear_cache(self, split: str | None = None):
@@ -362,7 +475,7 @@ class NeuromorphicEncoder:
             sys.exit(1)
 
 
-def main() -> tuple[DataLoader, DataLoader]:
+def main() -> tuple[PrefetchedLoader, PrefetchedLoader]:
     cfg = Settings()
     encoder = NeuromorphicEncoder(cfg)
     return encoder.get_dataloaders()

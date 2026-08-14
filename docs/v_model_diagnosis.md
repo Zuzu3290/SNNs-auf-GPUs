@@ -231,10 +231,10 @@ also explored and later dropped — see `docs/frameworks/additional_frameworks.m
 | IT-01 | Data pipeline → Learning module | Event tensor shape and dtype produced by `NeuromorphicEncoder` matches what `SNNTrainer` expects (T × B × C convention) |
 | IT-02 | Framework swap | Training run with Norse vs SNNTorch vs SpikingJelly vs Sinabs produces equivalent output shapes and loss trajectories |
 | IT-04 | Skeleton config → All modules | `Settings` loaded from `SNN_module.yaml` correctly propagates to trainer, tester, and encoder |
-| IT-05 | Cache engine → GPU pressure | Under simulated GPU pressure, `AdaptiveCacheController` correctly demotes from GPU VRAM to disk |
+| IT-05 | Cache engine → GPU pressure | Under simulated GPU pressure, `AdaptiveCacheController` correctly demotes from memory/hybrid to disk (VRAM is never a candidate) |
 | IT-06 | Adversarial evaluator → Framework | `AdversarialEvaluator` produces valid perturbations for each of the four SNN backends |
 | IT-07 | End-to-end pipeline | Full run of `main.py` from data load to evaluation completes without error on CPU (CI-friendly smoke test) |
-| IT-08 | Hardware-config picker | `training.device: auto` resolves correctly for all three configurations (CPU-only/hybrid/GPU-only), interactively and via autodetect fallback |
+| IT-08 | Hardware resolution | `training.device: auto` resolves to `cuda` with adaptive `force_mode`, matching the project's single CPU-loads/GPU-trains topology |
 
 ---
 
@@ -319,7 +319,7 @@ also explored and later dropped — see `docs/frameworks/additional_frameworks.m
 | Priority | Action | Maps To |
 |----------|--------|---------|
 | 1 | Write `tests/integration/test_pipeline_e2e.py` (IT-07 smoke test, CPU-only) | Integration Tests |
-| 2 | Write `tests/unit/test_cache_engine.py` (FIFO eviction, GPU budget, transform freshness — formalize the synthetic sample test from this session) | Unit Tests |
+| 2 | Write `tests/unit/test_cache_engine.py` (FIFO eviction, transform freshness — formalize the synthetic sample test from this session) | Unit Tests |
 | 3 | Write `tests/unit/test_activity_reg.py` (dead neuron penalty, STDP gradient) | Unit Tests |
 | 4 | Create `docs/requirements/system_requirements.md` with TR IDs and pass criteria | Technical Requirements |
 | 5 | Create `docs/requirements/user_requirements.md` with UR IDs and rationale | User Requirements |

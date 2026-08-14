@@ -337,13 +337,15 @@ def measure_dense_macs(model, sample_batch: torch.Tensor) -> Dict[str, float]:
     return dense_macs
 
 
-def read_gpu_runtime_diagnostics(gpu_stats, device_idx: int) -> Dict[str, object]:
-    """Point-in-time GPU runtime diagnostics beyond what GPUStats already
-    tracks (SNN_GPU_Evaluation_Metrics.md new "Runtime GPU diagnostics"
+def read_gpu_runtime_diagnostics(pipeline_monitor) -> Dict[str, object]:
+    """Point-in-time GPU runtime diagnostics beyond what PipelineMonitor
+    already tracks (SNN_GPU_Evaluation_Metrics.md new "Runtime GPU diagnostics"
     section): max memory *reserved* by PyTorch's caching allocator (distinct
     from max allocated — the allocator's high-water mark, including memory
     held but not currently in use), whether CUDNN autotune is active, and —
     when NVML is available — GPU temperature and SM/memory clock speed.
+    Single-GPU only (device 0) — see event_data_workflow/README.md's
+    "Known Limitation" note.
 
     These are NVML/driver queries, not CUDA-stream operations, so unlike
     `.item()`/`.cpu()` they do NOT force a wait on kernel completion — safe
@@ -353,11 +355,11 @@ def read_gpu_runtime_diagnostics(gpu_stats, device_idx: int) -> Dict[str, object
     diag: Dict[str, object] = {
         "cudnn_benchmark_enabled": torch.backends.cudnn.benchmark,
         "max_memory_reserved_gb": (
-            torch.cuda.max_memory_reserved(device_idx) / (1024 ** 3) if torch.cuda.is_available() else 0.0
+            torch.cuda.max_memory_reserved(0) / (1024 ** 3) if torch.cuda.is_available() else 0.0
         ),
     }
 
-    nvml_handle = getattr(gpu_stats, "nvml_handle", None)
+    nvml_handle = getattr(pipeline_monitor, "nvml_handle", None)
     if nvml_handle is not None and pynvml is not None:
         try:
             diag["gpu_temp_c"]   = pynvml.nvmlDeviceGetTemperature(nvml_handle, pynvml.NVML_TEMPERATURE_GPU)

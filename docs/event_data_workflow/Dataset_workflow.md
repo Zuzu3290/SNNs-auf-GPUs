@@ -23,35 +23,27 @@ dataclasses library helps create cleaner, more maintainable classes for structur
 
 then we use torch and tonic to throughly manage the daatset before explicit use, this is related to wen working with neuromorphic dataset. 
 
-GPU_PHASE_CAPS is just a safety percentage for how much of the currently free GPU memory the cache is allowed to use in each phase. Warmup is when the GPU is starting to shape up, activations, CUDA kernels, and memory usage may not be stable yet.
+The project's hardware topology is fixed and singular: CPU always loads and caches recordings, GPU always trains. There is no separate GPU-only path, and VRAM is never used to store the dataset cache — only RAM and disk are cache storage targets. The cache controller's job is choosing where one dataset's cache lives among those two, not choosing between hardware configurations.
 
 ---
 
-## BaseS3FIFOCache
+## BaseRecordingCache
 
-BaseS3FIFOCache is the in-memory cache engine for raw neuromorphic recordings. It sits between the raw dataset on disk and the training loop — when a recording is requested, the cache serves it from RAM instead of re-reading from disk.
+BaseRecordingCache is the in-memory cache engine for raw neuromorphic recordings. It sits between the raw dataset on disk and the training loop — when a recording is requested, the cache serves it from RAM instead of re-reading from disk.
 
-The algorithm is S3-FIFO (Simple, Scalable, and Space-efficient FIFO), published at SOSP 2023. It uses three structures:
-
-**Small queue (10% of cache)** — every new recording enters here first. If it gets accessed more than once before being evicted, it is promoted to the Main queue. If it is only accessed once, it is evicted and its index is added to the Ghost set (no data stored, just the index).
-
-**Main queue (90% of cache)** — the stable working set. Uses a CLOCK-style second chance: when a recording is due for eviction, if it has been accessed recently its frequency counter is decremented and it is reinserted at the back of the queue. Only recordings with a frequency of zero are actually evicted.
-
-**Ghost set** — a lightweight list of recently evicted indices (no data). If a recording that was previously evicted is requested again, it is admitted directly into Main instead of Small. This gives recurring recordings a fast path back into the hot layer.
+The eviction policy is plain FIFO: a single deque tracks insertion order, and the oldest entry is evicted once the cache is full. This pipeline's access pattern is a shuffled `DataLoader` — every recording is equally likely to recur each epoch, with no popularity skew for a more elaborate policy (e.g. S3-FIFO) to exploit, so plain FIFO gives the same practical hit rate with far less bookkeeping.
 
 Two limits apply simultaneously: `max_recordings` (count cap) and `max_bytes` (RAM byte cap). Whichever is hit first triggers eviction. This prevents the cache from consuming unbounded memory regardless of how many or how large the recordings are.
 
-The class is abstract — subclasses must implement `prepare_item()`, which defines what happens to a recording before it is stored. This is where CPU vs GPU behaviour diverges.
+The class is abstract — subclasses must implement `prepare_item()`, which defines what happens to a recording before it is stored.
 
-### Subclasses
+### Subclass
 
 **BoundedRecordingCache** — stores recordings in CPU RAM as-is. `prepare_item()` is a no-op (returns the raw recording unchanged). Used in hybrid mode as the hot layer on top of DiskCachedDataset.
 
-**GPURecordingCache** — stores *encoded* recordings in CUDA VRAM. `prepare_item()` runs the supplied transform (Denoise → ToFrame, CPU/tonic, unavoidable — raw structured events have no CUDA tensor equivalent) and only then moves the resulting frame tensor to the GPU device; a cache hit returns it without re-encoding. Requires a transform (raises otherwise) and does not support temporal slicing, since slicing needs raw event timestamps that no longer exist post-encoding. Used as a last resort when there is no disk and insufficient RAM, with a strictly computed VRAM budget so the cache never competes with model parameters or gradients.
-
 ### Bigger picture
 
-`BaseS3FIFOCache` is the engine. It owns all the queuing, eviction, byte accounting, and thread safety. `BoundedRecordingCache` and `GPURecordingCache` are just two expressions of the same engine — one stores recordings in CPU RAM, the other in GPU VRAM. The only thing that differs between them is `prepare_item()`. `determine_dataset_strategy` decides which subclass gets instantiated based on available hardware, so the rest of the pipeline never needs to know which one is running.
+`BaseRecordingCache` owns all the queuing, eviction, byte accounting, and thread safety. `BoundedRecordingCache` is CPU RAM only — there is no GPU-VRAM counterpart. `determine_dataset_strategy()` picks between `MemoryCachedDataset` (tonic), `DiskCachedDataset` (tonic), and `BoundedRecordingCache`-over-`DiskCachedDataset` (hybrid) based on live RAM/disk, so the rest of the pipeline never needs to know which one is running.
 
 ---
 
@@ -67,7 +59,7 @@ The class is abstract — subclasses must implement `prepare_item()`, which defi
                     (probes 10 random samples → extrapolates total GB)
                            │
                     SystemResourceMonitor.snapshot()
-                    (live RAM, disk, VRAM readings)
+                    (live RAM, disk readings)
                            │
                     determine_dataset_strategy()
                            │
@@ -89,13 +81,10 @@ The class is abstract — subclasses must implement `prepare_item()`, which defi
                             (RAM hot layer on top
                              of DiskCachedDataset)
                                     │
-                            No disk + no RAM?
-                            GPU free ≥ 0.5GB?
+                            Nothing fits?
                                     │
                                     ▼
-                            GPURecordingCache
-                            (VRAM fallback,
-                             lowest priority)
+                            RuntimeError (system halt)
 ```
 
 All modes flow into the DataLoader. The cache is always applied to raw recordings before temporal slicing, so N slices from the same recording share one cache entry.

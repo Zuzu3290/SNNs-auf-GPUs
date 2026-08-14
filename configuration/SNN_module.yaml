@@ -8,7 +8,7 @@ architecture:
   simulator: ON
 
 training:
-  framework: norse           # YAML selector: norse | torch | sj | sinabs
+  framework: sj           # YAML selector: norse | torch | sj | sinabs
   device: auto                # cpu | cuda | auto (prompts for CPU-only / hybrid / GPU-only at
                                # an interactive terminal; autodetects in non-interactive runs)
   epochs: 5

@@ -9,9 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
-from event_data_workflow.gpu_stats import GPUStats
-from event_data_workflow.prefetch import AsyncGPUPrefetcher, CudaPrefetcher
-from event_data_workflow.system_monitor import monitor
+from event_data_workflow.system_monitor import PipelineMonitor, monitor
 from learning.utilities import measure_dense_macs, read_gpu_runtime_diagnostics, compute_cv_isi
 
 logger = logging.getLogger(__name__)
@@ -113,8 +111,7 @@ class SNNTrainer:
         self.bwd_events          = []
         self.dense_macs_per_layer = {}
 
-        device_idx = (device.index or 0) if device.type == "cuda" else 0
-        self.gpu_stats = GPUStats(device_idx=device_idx)
+        self.pipeline_monitor = PipelineMonitor(cuda_enabled=device.type == "cuda")
 
         use_amp = getattr(cfg, "USE_AMP", True) and device.type == "cuda"
         self.scaler           = torch.amp.GradScaler("cuda", enabled=use_amp)  # type: ignore[attr-defined]
@@ -198,7 +195,8 @@ class SNNTrainer:
         for why (per-batch `.item()` calls force a CUDA stream sync, which
         stalls the GPU every iteration)."""
         monitor.enter_phase("training")
-        self.gpu_stats.measure_idle_baseline()
+        self.pipeline_monitor.start()
+        self.pipeline_monitor.measure_idle_baseline()
 
         epochs    = self.cfg.EPOCHS
         num_iters = self.cfg.ITERA
@@ -233,21 +231,17 @@ class SNNTrainer:
             epoch_synops_sum = torch.zeros((), device=self.device)
             n, step_count = 0, 0
             t0 = time.perf_counter()
-            self.gpu_stats.start_epoch()
+            self.pipeline_monitor.set_phase(f"epoch_{epoch}")
+            self.pipeline_monitor.reset_epoch_memory()
 
             self.model.zero_grad()
 
             fwd_start_idx = len(self.fwd_events)
             bwd_start_idx = len(self.bwd_events)
 
-            # CudaPrefetcher wraps AsyncGPUPrefetcher: the latter overlaps
-            # CPU-side batch prep (DataLoader + cache) with training in a
-            # background thread, the former additionally overlaps the H2D
-            # copy itself with GPU compute via a side CUDA stream — batches
-            # arrive already device-resident, no .to(device) needed below.
-            prefetch_depth = getattr(self.cfg, "PREFETCH_DEPTH", 8)
-            batches = CudaPrefetcher(AsyncGPUPrefetcher(self.train_loader), self.device, depth=prefetch_depth)
-            for i, (data, targets) in enumerate(batches):
+            # self.train_loader is a PrefetchedLoader (event_data_workflow.data_pipeline) —
+            # batches arrive already device-resident, no .to(device) needed below.
+            for i, (data, targets) in enumerate(self.train_loader):
                 targets = targets.long()
 
                 if self.cfg.TRADES_ENABLED:
@@ -354,12 +348,13 @@ class SNNTrainer:
                 self.scheduler.step()
 
             epoch_duration = time.perf_counter() - t0
-            gpu            = self.gpu_stats.end_epoch()
-            gpu_diag       = read_gpu_runtime_diagnostics(self.gpu_stats, self.gpu_stats.device_idx)
+            epoch_phase    = f"epoch_{epoch}"
+            gpu            = self.pipeline_monitor.phase_summary(epoch_phase)
+            gpu_diag       = read_gpu_runtime_diagnostics(self.pipeline_monitor)
 
-            energy_j        = self.gpu_stats.gpu_energy_j(epoch_duration)  # None on CPU-only or without NVML
+            energy_j        = self.pipeline_monitor.phase_energy_j(epoch_phase, epoch_duration)  # None on CPU-only or without NVML
             avg_power_w     = energy_j / epoch_duration if energy_j is not None else 0.0
-            dynamic_power_w = self.gpu_stats.dynamic_power_w(avg_power_w) if energy_j is not None else 0.0
+            dynamic_power_w = self.pipeline_monitor.dynamic_power_w(avg_power_w) if energy_j is not None else 0.0
             energy_j        = energy_j or 0.0
             gpu_active_s    = epoch_duration * gpu.get("gpu_util_avg_pct", 0.0) / 100.0
 
@@ -399,11 +394,12 @@ class SNNTrainer:
         # accumulated above, now that every epoch has finished training. ----
         self.finalize_epoch_reports(raw_epoch_records, epochs, timesteps, window_s)
 
-        overall = self.gpu_stats.summary()
-        if overall:
+        self.pipeline_monitor.stop()
+        overall = self.pipeline_monitor.summary()
+        if overall.get("avg_gpu_util_pct") is not None:
             print("\nGPU Training Summary")
-            print(f"  • Avg utilization  : {overall['overall_avg_util_pct']}%")
-            print(f"  • Peak utilization : {overall['overall_peak_util_pct']}%")
+            print(f"  • Avg utilization  : {overall['avg_gpu_util_pct']}%")
+            print(f"  • Peak utilization : {overall['max_gpu_util_pct']}%")
             print(f"  • Peak VRAM used   : {overall['overall_peak_mem_gb']} GB / {overall['total_vram_gb']} GB  ({overall['overall_peak_mem_pct']}%)")
 
         self.write_csv(csv_path)
@@ -489,11 +485,11 @@ class SNNTrainer:
             print(f"  • Wall time      : {record['epoch_duration']:.2f}s")
             print(f"  • GPU active     : {record['gpu_active_s']:.2f}s  ({gpu.get('gpu_util_avg_pct', 0.0):.1f}% of wall time)")
             print(f"  • Energy         : {record['energy_j']:.2f} J  ({record['avg_power_w']:.1f} W avg)")
-            if self.gpu_stats.idle_power_w is not None:
-                print(f"  • Dynamic Power  : {record['dynamic_power_w']:.1f} W  (idle baseline {self.gpu_stats.idle_power_w:.1f} W subtracted)")
+            if self.pipeline_monitor.idle_power_w is not None:
+                print(f"  • Dynamic Power  : {record['dynamic_power_w']:.1f} W  (idle baseline {self.pipeline_monitor.idle_power_w:.1f} W subtracted)")
             if gpu:
                 print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
-                print(f"  • GPU Memory     : {gpu['gpu_mem_peak_gb']} GB / {self.gpu_stats.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
+                print(f"  • GPU Memory     : {gpu['gpu_mem_peak_gb']} GB / {self.pipeline_monitor.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
             print(f"  • Max Mem Reserved: {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB   CUDNN autotune: {gpu_diag.get('cudnn_benchmark_enabled')}")
             if "gpu_temp_c" in gpu_diag:
                 print(f"  • GPU Temp/Clock : {gpu_diag['gpu_temp_c']}°C   SM {gpu_diag.get('sm_clock_mhz')} MHz   Mem {gpu_diag.get('mem_clock_mhz')} MHz")
