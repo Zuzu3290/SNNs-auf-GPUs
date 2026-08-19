@@ -84,9 +84,9 @@ class AdversarialEvaluator:
         self.model.eval_mode()
         correct = total = 0
 
+        # self.test_loader is a PrefetchedLoader — data/targets already device-resident.
         for data, targets in self.test_loader:
-            data    = data.to(self.device)
-            targets = targets.to(self.device).long()
+            targets = targets.long()
             if self.model.tensor_format() == "BT":
                 data = data.permute(1, 0, 2, 3, 4).contiguous()
 
@@ -108,7 +108,7 @@ class AdversarialEvaluator:
 
     def evaluate(
         self,
-        epsilons: Sequence[float] = (0.01, 0.05, 0.1, 0.2),
+        epsilons: Sequence[float] = (0.01, 0.05, 0.1, 0.15),
         pgd_steps: int = 20,
         csv_path: str = "./outputs/data/adversarial_robustness.csv",
     ) -> list[dict]:

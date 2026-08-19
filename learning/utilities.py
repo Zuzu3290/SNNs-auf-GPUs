@@ -5,6 +5,8 @@ framework modules.
 Import pattern in each framework file:
     from learning.utilities import build_optimizer, build_loss, ActivityMonitor
 """
+import gc
+import logging
 import threading
 import numpy as np
 import torch
@@ -12,7 +14,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.flop_counter import FlopCounterMode
 from typing import Dict, List, Optional
-import pynvml
+
+logger = logging.getLogger(__name__)
 
 
 def build_optimizer(params, fw_cfg: dict) -> torch.optim.Optimizer:
@@ -31,6 +34,12 @@ def build_optimizer(params, fw_cfg: dict) -> torch.optim.Optimizer:
     if opt == "sgd":
         return torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=wd)
     return torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999), weight_decay=wd)
+
+
+def sum_over_time_cross_entropy(spk_rec: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Cross entropy over spike counts summed across the time dimension
+    (dim 0): spk_rec is [T, B, C], as returned by Norse/SNNTorch/SNN_LIF."""
+    return F.cross_entropy(spk_rec.float().sum(0), targets)
 
 
 def build_loss(fw_cfg: dict, framework: str = "norse"):
@@ -52,7 +61,7 @@ def build_loss(fw_cfg: dict, framework: str = "norse"):
     if loss_name == "cross_entropy":
         if framework == "spikingjelly":
             return nn.CrossEntropyLoss()
-        return lambda spk_rec, targets: F.cross_entropy(spk_rec.float().sum(0), targets)
+        return sum_over_time_cross_entropy
 
     if loss_name == "mse_count":
         from snntorch import functional as SF
@@ -70,14 +79,11 @@ class DenseTimestepBuffer:
 
     def __init__(self) -> None:
         self.events: List[torch.Tensor] = []
-        self.step_shape: Optional[tuple] = None
         self.lock = threading.Lock()
 
     def push(self, spk: torch.Tensor) -> None:
         tensor = spk.detach()
         with self.lock:
-            if self.step_shape is None:
-                self.step_shape = tuple(spk.shape)
             self.events.append(tensor)
 
     def stack(self) -> Optional[torch.Tensor]:
@@ -89,55 +95,17 @@ class DenseTimestepBuffer:
     def clear(self) -> None:
         with self.lock:
             self.events.clear()
-            self.step_shape = None
-
-    @property
-    def num_spikes(self) -> int:
-        with self.lock:
-            return int(sum(e.sum().item() for e in self.events))
-
-    @property
-    def num_timesteps(self) -> int:
-        with self.lock:
-            return len(self.events)
-
-    @property
-    def memory_bytes(self) -> int:
-        with self.lock:
-            return sum(e.element_size() * e.numel() for e in self.events)
-
-    @property
-    def firing_rate(self) -> float:
-        with self.lock:
-            if not self.events or self.step_shape is None:
-                return 0.0
-            total_per_step = 1
-            for d in self.step_shape:
-                total_per_step *= d
-            total = total_per_step * len(self.events)
-            fired = int(sum(e.sum().item() for e in self.events))
-            return fired / total if total > 0 else 0.0
 
     def firing_rate_tensor(self) -> Optional[torch.Tensor]:
-        """GPU-resident equivalent of `firing_rate` — same fraction-of-
-        neuron-timesteps-active ratio, but returned as a 0-dim tensor on the
-        buffer's own device instead of a Python float. No `.item()`/`.cpu()`
-        call happens here, so this is safe to call every batch without
-        forcing a CUDA sync; the caller decides when (if ever) to read it
-        back to host memory."""
+        """GPU-resident fraction-of-neuron-timesteps-active ratio, returned
+        as a 0-dim tensor on the buffer's own device instead of a Python
+        float. No `.item()`/`.cpu()` call happens here, so this is safe to
+        call every batch without forcing a CUDA sync; the caller decides
+        when (if ever) to read it back to host memory."""
         with self.lock:
             if not self.events:
                 return None
             return torch.stack(self.events).float().mean()
-
-    def __getstate__(self):
-        state = self.__dict__.copy()
-        state["lock"] = None
-        return state
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self.lock = threading.Lock()
 
 
 class ActivityMonitor:
@@ -337,36 +305,130 @@ def measure_dense_macs(model, sample_batch: torch.Tensor) -> Dict[str, float]:
     return dense_macs
 
 
-def read_gpu_runtime_diagnostics(pipeline_monitor) -> Dict[str, object]:
-    """Point-in-time GPU runtime diagnostics beyond what PipelineMonitor
-    already tracks (SNN_GPU_Evaluation_Metrics.md new "Runtime GPU diagnostics"
-    section): max memory *reserved* by PyTorch's caching allocator (distinct
-    from max allocated — the allocator's high-water mark, including memory
-    held but not currently in use), whether CUDNN autotune is active, and —
-    when NVML is available — GPU temperature and SM/memory clock speed.
-    Single-GPU only (device 0) — see event_data_workflow/README.md's
-    "Known Limitation" note.
+def safe_empty_cache() -> None:
+    """gc.collect() then torch.cuda.empty_cache(), with the cache-clear
+    itself guarded against raising."""
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+    except (torch.cuda.OutOfMemoryError, torch.AcceleratorError):
+        pass
 
-    These are NVML/driver queries, not CUDA-stream operations, so unlike
-    `.item()`/`.cpu()` they do NOT force a wait on kernel completion — safe
-    to call once per epoch/test-run without reintroducing the sync stalls
-    the deferred-logging design is eliminating elsewhere.
+
+def measure_batch_vram(model_cls, cfg, device, batch_size: int) -> Optional[float]:
+    """One real forward+backward pass at batch_size, on synthetic data at
+    the exact target shape, with AMP autocast+GradScaler (cfg.USE_AMP) and
+    gradient accumulation (cfg.GRAD_ACCUM_STEPS micro-batches, peak read
+    after the last one) -- mirrors SNNTrainer's own use_amp/grad_accum_steps
+    setup. Returns peak VRAM in GB, or None on OOM.
+
+    Catches both torch.cuda.OutOfMemoryError and torch.AcceleratorError --
+    sibling exception classes on this PyTorch build, neither a subclass of
+    the other, so a real OOM can surface as either one.
     """
-    diag: Dict[str, object] = {
-        "cudnn_benchmark_enabled": torch.backends.cudnn.benchmark,
-        "max_memory_reserved_gb": (
-            torch.cuda.max_memory_reserved(0) / (1024 ** 3) if torch.cuda.is_available() else 0.0
-        ),
-    }
+    safe_empty_cache()
+    torch.cuda.reset_peak_memory_stats(device)
+    try:
+        model = model_cls(cfg)
+        use_amp = getattr(cfg, "USE_AMP", True) and device.type == "cuda"
+        grad_accum_steps = max(1, getattr(cfg, "GRAD_ACCUM_STEPS", 1))
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+        for _ in range(grad_accum_steps):
+            data = torch.rand(cfg.TIMESTEPS, batch_size, cfg.IN_CHANNELS, cfg.SENSOR_H, cfg.SENSOR_W, device=device)
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
+                spk_rec = model(data)
+                loss = spk_rec.float().sum()
+            scaler.scale(loss).backward()
+            del data, spk_rec, loss
+        del scaler
+        torch.cuda.synchronize()
+        peak_gb = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+        del model
+        safe_empty_cache()
+        return peak_gb
+    except (torch.cuda.OutOfMemoryError, torch.AcceleratorError):
+        safe_empty_cache()
+        return None
 
-    nvml_handle = getattr(pipeline_monitor, "nvml_handle", None)
-    if nvml_handle is not None and pynvml is not None:
-        try:
-            diag["gpu_temp_c"]   = pynvml.nvmlDeviceGetTemperature(nvml_handle, pynvml.NVML_TEMPERATURE_GPU)
-            diag["sm_clock_mhz"] = pynvml.nvmlDeviceGetClockInfo(nvml_handle, pynvml.NVML_CLOCK_SM)
-            diag["mem_clock_mhz"] = pynvml.nvmlDeviceGetClockInfo(nvml_handle, pynvml.NVML_CLOCK_MEM)
-        except Exception:
-            pass  # driver/permission hiccup — diagnostics are best-effort, never worth failing a run over
 
-    return diag
+# The dataset's batch must never be the constraint on how large the model
+# itself can grow -- so calibration targets a bounded VRAM fraction, not
+# the largest batch size that avoids OOM. One policy, covers both training
+# and inference (inference's actual footprint is smaller, so a size that
+# fits training fits inference too).
+BATCH_VRAM_BAND_MIN = 0.30
+BATCH_VRAM_BAND_OPTIMAL = 0.34
+BATCH_VRAM_BAND_MAX = 0.35
 
+
+def calibrate_batch_size(model_cls, cfg, device, data_vram_fraction: float = BATCH_VRAM_BAND_OPTIMAL,
+                          max_batch_size: int = 256, min_batch_size: int = 1,
+                          baseline_sensor_px: int = 34 * 34, baseline_batch_size: int = 128) -> int:
+    """Picks a batch size that fits within data_vram_fraction of total VRAM
+    (default: the 30-35% policy band above), instead of the largest one
+    that avoids OOM.
+
+    Starting guess: baseline_batch_size scaled by sensor pixel-count ratio
+    against baseline_sensor_px. One probe at the guess, then one probe at a
+    linearly-scaled target (memory ~ batch size for fixed architecture/T) --
+    at most 2 real forward/backward passes total. Falls back to halving on
+    OOM, or to the already-confirmed guess if the scaled probe fails.
+    """
+    total_vram_gb = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
+    vram_budget_gb = total_vram_gb * data_vram_fraction
+
+    baseline_px = cfg.SENSOR_H * cfg.SENSOR_W
+    guess = max(min_batch_size, int(baseline_batch_size * (baseline_sensor_px / baseline_px)))
+    guess = min(guess, max_batch_size)
+
+    peak_gb = measure_batch_vram(model_cls, cfg, device, guess)
+    while peak_gb is None and guess > min_batch_size:
+        guess //= 2
+        peak_gb = measure_batch_vram(model_cls, cfg, device, guess)
+    if peak_gb is None:
+        _log_stable_batch_size(cfg, min_batch_size, 0.0, total_vram_gb)
+        return min_batch_size
+
+    scaled = max(min_batch_size, min(max_batch_size, int(guess * (vram_budget_gb / peak_gb))))
+    if scaled == guess:
+        _log_stable_batch_size(cfg, guess, peak_gb, total_vram_gb)
+        return guess  # already at budget, no second probe needed
+
+    scaled_peak_gb = measure_batch_vram(model_cls, cfg, device, scaled)
+    if scaled_peak_gb is not None:
+        _log_stable_batch_size(cfg, scaled, scaled_peak_gb, total_vram_gb)
+        return scaled
+    _log_stable_batch_size(cfg, guess, peak_gb, total_vram_gb)
+    return guess  # scaled estimate didn't hold up -- fall back to the already-confirmed value
+
+
+def _log_stable_batch_size(cfg, batch_size: int, peak_gb: float, total_vram_gb: float) -> None:
+    """One-line notification: the stable batch size found for this
+    dataset, and whether it landed inside the policy band. Uses print(),
+    not logger.info() -- logger.info has no attached handler anywhere in
+    this project (configure_logging() in skeleton/snn_logging.py is never
+    called), so it would otherwise be silently dropped.
+    """
+    dataset = getattr(cfg, "DATASET_NAME", None) or "unknown dataset"
+    pct = 100 * peak_gb / total_vram_gb if total_vram_gb else 0.0
+    in_band = BATCH_VRAM_BAND_MIN * 100 <= pct <= BATCH_VRAM_BAND_MAX * 100
+    band_note = "within policy band" if in_band else "OUTSIDE policy band"
+    print(f"[CALIBRATE] {dataset}: stable batch_size={batch_size} at {pct:.1f}% VRAM ({band_note})", flush=True)
+
+
+def select_inference_mode() -> bool:
+    """Ask whether inference should show a live visualization alongside the usual
+    statistical output, or statistics only. No stdin attached (Colab, CI, batch)
+    defaults to statistics-only rather than crashing on EOFError.
+    Returns True if visualization was requested."""
+    print("\n[MAIN] Inference output:")
+    print("  1) Statistics only")
+    print("  2) Statistics + live visualization (opens a window showing input frames vs. predictions)")
+    try:
+        choice = input("Enter number [1]: ").strip() or "1"
+    except EOFError:
+        choice = "1"
+    if choice not in ("1", "2"):
+        print(f"[MAIN] Invalid selection '{choice}' — defaulting to statistics only")
+        choice = "1"
+    return choice == "2"

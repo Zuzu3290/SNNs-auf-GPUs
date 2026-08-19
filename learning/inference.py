@@ -8,17 +8,19 @@ import torch
 import numpy as np
 from skeleton import Settings
 from learning.training import aggregate_spike_output
-from learning.utilities import measure_dense_macs, read_gpu_runtime_diagnostics, compute_cv_isi
+from learning.utilities import measure_dense_macs, compute_cv_isi
 from event_data_workflow.system_monitor import PipelineMonitor, monitor
+import matplotlib.pyplot as plt
 
-# Energy per synaptic op — adjust for your target neuromorphic platform
+
+# Neuromorphic energy-estimate constants — see SNN_GPU_Evaluation_Metrics.md
 ENERGY_PER_SPIKE_PJ = 3.5
-
-# Horowitz 45nm per-operation energy constant for the SynOps-based estimate
-# (SNN_GPU_Evaluation_Metrics.md §2.4/§4.4) — reported *alongside* the flat
-# ENERGY_PER_SPIKE_PJ estimate above, not replacing it (the doc explicitly
-# wants both: a simple spike-count estimate and a per-layer SynOps one).
 SYNOPS_ENERGY_PJ_PER_MAC = 4.6
+
+# Number of early test batches to also probe with a genuine batch_size=1
+# forward pass, timed on its own (see run()'s single_sample_events) — a
+# real single-sample measurement, not batch-latency divided by batch size.
+SINGLE_SAMPLE_LATENCY_PROBES = 10
 
 
 class SNNTester:
@@ -31,12 +33,13 @@ class SNNTester:
         self.num_classes = cfg.NUM_CLASSES
         self.batch_log   = []
         self.visualize   = visualize
-        self._viz        = None  # lazily built on first use — see show_frame()
-        self.pipeline_monitor = PipelineMonitor(cuda_enabled=device.type == "cuda")
+        self.viz_window  = None  # lazily built on first use — see show_frame()
+        self.pipeline_monitor = PipelineMonitor(enabled=getattr(cfg, "ENABLE_PIPELINE_MONITOR", True))
 
         # Deferred-sync accumulation — see run()'s docstring. Nothing here is
         # read back to host memory until the whole test pass finishes.
-        self.fwd_events = []  # (start, end) CUDA event pairs, or (t0, t1) perf_counter pairs on CPU
+        self.fwd_events = []  # (start, end) CUDA event pairs
+        self.single_sample_events = []  # (start, end) pairs, batch_size=1 probes only — see SINGLE_SAMPLE_LATENCY_PROBES
         self.dense_macs_per_layer = {}
 
     def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
@@ -47,32 +50,20 @@ class SNNTester:
 
     @contextmanager
     def timed(self, event_list: list):
-        """Same deferred-timing pattern as SNNTrainer.timed — brackets one
-        operation with a CUDA event pair (CPU: a perf_counter pair) without
-        blocking; the blocking readout (`elapsed_time()`) only happens once,
-        in run()'s post-loop bulk sync. This also fixes a latent measurement
-        bug in the old forward-latency code: a bare `time.perf_counter()`
-        pair around an async CUDA call measures kernel-*launch* overhead,
-        not real GPU execution time, unless something forces a sync in
-        between — which the old code didn't do."""
-        if self.device.type == "cuda":
-            start = torch.cuda.Event(enable_timing=True)
-            end   = torch.cuda.Event(enable_timing=True)
-            start.record()
-            yield
-            end.record()
-            event_list.append((start, end))
-        else:
-            t0 = time.perf_counter()
-            yield
-            event_list.append((t0, time.perf_counter()))
+        """Brackets one operation with a CUDA event pair, queued on the stream
+        without blocking; the blocking readout (`elapsed_time()`) only happens
+        once, in run()'s post-loop bulk sync."""
+        start = torch.cuda.Event(enable_timing=True)
+        end   = torch.cuda.Event(enable_timing=True)
+        start.record()
+        yield
+        end.record()
+        event_list.append((start, end))
 
     @staticmethod
     def elapsed_ms(pair) -> float:
-        a, b = pair
-        if isinstance(a, torch.cuda.Event):
-            return a.elapsed_time(b)
-        return (b - a) * 1000.0
+        start, end = pair
+        return start.elapsed_time(end)
 
     def show_frame(self, data: torch.Tensor, preds: torch.Tensor, tgts: torch.Tensor, batch_idx: int) -> None:
         """Live view of one sample from the batch: the input event-frame (summed over
@@ -83,34 +74,31 @@ class SNNTester:
         Opt-in (visualize=True) live-view path — inherently synchronous
         (matplotlib drawing blocks regardless), so the GPU->CPU conversions
         here are unrelated to the deferred-sync design used for the hot loop."""
-        import matplotlib.pyplot as plt
 
         # data: [T, B, C, H, W] (or [B, T, ...] already normalized to T-first by
         # forward_pass's caller — here it's the raw batch, still whatever tensor_format
         # the DataLoader produced, which is always time-first per data_pipeline.py).
         frame = data[:, 0].sum(dim=(0, 1)).detach().cpu().numpy()  # sum T and C -> [H, W]
 
-        if self._viz is None:
+        if self.viz_window is None:
             plt.ion()
             fig, ax = plt.subplots(figsize=(4, 4))
             im = ax.imshow(frame, cmap="hot")
             ax.set_axis_off()
-            self._viz = (fig, ax, im)
+            self.viz_window = (fig, ax, im)
         else:
-            fig, ax, im = self._viz
+            fig, ax, im = self.viz_window
             im.set_data(frame)
             im.set_clim(frame.min(), frame.max())
 
-        fig, ax, im = self._viz
         ax.set_title(f"Batch {batch_idx} | Pred: {int(preds[0])}  GT: {int(tgts[0])}")
         fig.canvas.draw_idle()
         plt.pause(0.001)
 
     def close_visualization(self) -> None:
-        if self._viz is not None:
-            import matplotlib.pyplot as plt
-            plt.close(self._viz[0])
-            self._viz = None
+        if self.viz_window is not None:
+            plt.close(self.viz_window[0])
+            self.viz_window = None
 
     def class_metrics(self, cm: np.ndarray) -> list[dict]:
         total = cm.sum()
@@ -165,10 +153,9 @@ class SNNTester:
         window_s = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
         timesteps_cfg = getattr(self.cfg, 'TIMESTEPS', 25)
 
-        # "Measure FLOPs first": one-time dense-MAC measurement the SynOps
-        # energy estimate is built on — see utilities.measure_dense_macs.
+        # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4.
+        # self.test_loader is a PrefetchedLoader — probe_data is already device-resident.
         probe_data, _ = next(iter(self.test_loader))
-        probe_data = probe_data.to(self.device)
         if self.model.tensor_format() == "BT":
             probe_data = probe_data.permute(1, 0, 2, 3, 4).contiguous()
         self.dense_macs_per_layer = measure_dense_macs(self.model, probe_data)
@@ -195,6 +182,10 @@ class SNNTester:
 
                 with self.timed(self.fwd_events):
                     spk_rec = self.forward_pass(data)
+
+                if batch_idx < SINGLE_SAMPLE_LATENCY_PROBES:
+                    with self.timed(self.single_sample_events):
+                        self.forward_pass(data[:, 0:1])
 
                 batch_spikes_gpu       = spk_rec.sum()
                 batch_input_spikes_gpu = data.sum()
@@ -228,11 +219,12 @@ class SNNTester:
 
         t_run_elapsed = time.perf_counter() - t_run_start
         self.pipeline_monitor.stop()
-        gpu           = self.pipeline_monitor.phase_summary("test_run")
-        gpu_energy_j  = self.pipeline_monitor.phase_energy_j("test_run", t_run_elapsed)
-        avg_power_w     = gpu_energy_j / t_run_elapsed if gpu_energy_j is not None else None
-        dynamic_power_w = self.pipeline_monitor.dynamic_power_w(avg_power_w) if avg_power_w is not None else None
-        gpu_diag        = read_gpu_runtime_diagnostics(self.pipeline_monitor)
+        energy_report   = self.pipeline_monitor.phase_energy_report("test_run", t_run_elapsed)
+        gpu             = energy_report["gpu"]
+        gpu_energy_j    = energy_report["gpu_energy_j"]
+        avg_power_w     = energy_report["avg_power_w"]
+        dynamic_power_w = energy_report["dynamic_power_w"]
+        gpu_diag        = energy_report["gpu_diag"]
         credit_assignment = self.model.credit_assignment()
 
         # ---- Bulk transfer: the single sync point for everything
@@ -242,6 +234,7 @@ class SNNTester:
         np.add.at(cm, (all_targets.numpy(), all_preds.numpy()), 1)
 
         fwd_latencies_ms = [self.elapsed_ms(p) for p in self.fwd_events]
+        single_sample_latencies_ms = [self.elapsed_ms(p) for p in self.single_sample_events]
         cv_isi            = compute_cv_isi(last_activity_snapshot)
         cv_isi_mean       = cv_isi.get("network_wide", 0.0)
 
@@ -305,9 +298,14 @@ class SNNTester:
         overall_acc            = (all_preds == all_targets).float().mean().item() if total_samples > 0 else 0.0
         avg_latency_ms         = total_latency_ms / len(self.batch_log) if self.batch_log else 0.0
         avg_latency_per_sample = total_latency_ms / total_samples if total_samples > 0 else 0.0
+        # True single-sample latency: a genuinely timed batch_size=1 forward pass
+        # (SINGLE_SAMPLE_LATENCY_PROBES of them), not avg_latency_per_sample's
+        # batch-latency-divided-by-batch-size approximation.
+        true_single_sample_latency_ms        = float(np.mean(single_sample_latencies_ms)) if single_sample_latencies_ms else 0.0
+        true_single_sample_latency_median_ms = float(np.median(single_sample_latencies_ms)) if single_sample_latencies_ms else 0.0
         median_latency_per_sample_ms = float(np.percentile(per_sample_latencies_ms, 50)) if per_sample_latencies_ms else 0.0
-        # Tail latency, not just median/p90 — a real-time deadline is missed by
-        # the slow outliers, not the typical case. See RealTimeLatencyEvaluator.
+        # Tail latency, not just median/p90 — worst-case outliers matter for
+        # latency-sensitive use, not just the typical case.
         p90_latency_per_sample_ms    = float(np.percentile(per_sample_latencies_ms, 90)) if per_sample_latencies_ms else 0.0
         p99_latency_per_sample_ms    = float(np.percentile(per_sample_latencies_ms, 99)) if per_sample_latencies_ms else 0.0
         throughput_samples_per_s     = total_samples / t_run_elapsed if t_run_elapsed > 0 else 0.0
@@ -339,6 +337,8 @@ class SNNTester:
         print(f"  • CV_ISI (network-wide)   : {cv_isi_mean:.3f}  (last batch)")
         print(f"  • Avg Batch Latency       : {avg_latency_ms:.2f} ms")
         print(f"  • Avg Latency / Sample    : {avg_latency_per_sample:.3f} ms")
+        print(f"  • True Single-Sample Latency : {true_single_sample_latency_ms:.3f} ms  "
+              f"(median {true_single_sample_latency_median_ms:.3f} ms, n={len(single_sample_latencies_ms)}, batch_size=1)")
         print(f"  • Median Latency / Sample : {median_latency_per_sample_ms:.3f} ms  (p50)")
         print(f"  • p90 Latency / Sample    : {p90_latency_per_sample_ms:.3f} ms")
         print(f"  • p99 Latency / Sample    : {p99_latency_per_sample_ms:.3f} ms")
@@ -348,25 +348,15 @@ class SNNTester:
         print(f"  • SynOps Energy Estimate  : {total_synops_pj:.1f} pJ  (per-layer, dense-MAC-weighted)")
         print(f"  • SynOps Energy / Sample  : {synops_energy_per_sample_pj:.2f} pJ")
 
-        if gpu_energy_j is not None:
-            neuromorphic_j = total_energy_pj * 1e-12
-            gap = gpu_energy_j / neuromorphic_j if neuromorphic_j > 0 else float("inf")
-            print(f"  • GPU Energy (actual)     : {gpu_energy_j * 1e3:.2f} mJ")
-            print(f"  • Mean GPU Power (actual) : {avg_power_w:.1f} W")
-            if self.pipeline_monitor.idle_power_w is not None:
-                print(f"  • Mean Dynamic Power      : {dynamic_power_w:.1f} W  (idle baseline {self.pipeline_monitor.idle_power_w:.1f} W subtracted)")
-            else:
-                print(f"  • Mean Dynamic Power      : N/A  (idle baseline not measured — NVML unavailable)")
-            print(f"  • Hardware Efficiency Gap : {gap:.2e}x  (GPU vs ideal neuromorphic silicon)")
-        else:
-            print(f"  • GPU Energy (actual)     : N/A  (install nvidia-ml-py for real power readings)")
-
-        if gpu:
-            print(f"  • Peak GPU Memory        : {gpu['gpu_mem_peak_gb']} GB / {self.pipeline_monitor.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
-            print(f"  • GPU Utilization         : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
-        print(f"  • Max Mem Reserved        : {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB   CUDNN autotune: {gpu_diag.get('cudnn_benchmark_enabled')}")
-        if "gpu_temp_c" in gpu_diag:
-            print(f"  • GPU Temp/Clock          : {gpu_diag['gpu_temp_c']}°C   SM {gpu_diag.get('sm_clock_mhz')} MHz   Mem {gpu_diag.get('mem_clock_mhz')} MHz")
+        print(f"  • GPU Energy (actual)     : {gpu_energy_j * 1e3:.2f} mJ")
+        print(f"  • Mean GPU Power (actual) : {avg_power_w:.1f} W")
+        print(f"  • Mean Dynamic Power      : {dynamic_power_w:.1f} W  (idle baseline {self.pipeline_monitor.idle_power_w:.1f} W subtracted)")
+        print(f"  • Peak GPU Memory        : {gpu['gpu_mem_peak_gb']} GB / {self.pipeline_monitor.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
+        print(f"  • GPU Utilization         : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
+        if gpu.get("gpu_idle_episodes", 0) > 0:
+            print(f"  • GPU Idle               : {gpu['gpu_idle_episodes']} episode(s), {gpu['gpu_idle_total_s']:.1f}s total")
+        print(f"  • Max Mem Reserved        : {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB")
+        print(f"  • GPU Temp/Clock          : {gpu_diag['gpu_temp_c']}°C   SM {gpu_diag.get('sm_clock_mhz')} MHz   Mem {gpu_diag.get('mem_clock_mhz')} MHz")
 
         print("\n  Per-class metrics:")
         for row in class_metrics:
@@ -397,6 +387,8 @@ class SNNTester:
             "cv_isi_mean":               cv_isi_mean,
             "avg_latency_ms":            avg_latency_ms,
             "avg_latency_per_sample_ms": avg_latency_per_sample,
+            "true_single_sample_latency_ms":        true_single_sample_latency_ms,
+            "true_single_sample_latency_median_ms": true_single_sample_latency_median_ms,
             "median_latency_per_sample_ms": median_latency_per_sample_ms,
             "p90_latency_per_sample_ms":    p90_latency_per_sample_ms,
             "p99_latency_per_sample_ms":    p99_latency_per_sample_ms,
@@ -411,7 +403,6 @@ class SNNTester:
             "gpu_mem_peak_gb":           gpu.get("gpu_mem_peak_gb") if gpu else None,
             "gpu_util_avg_pct":          gpu.get("gpu_util_avg_pct") if gpu else None,
             "max_memory_reserved_gb":    gpu_diag.get("max_memory_reserved_gb"),
-            "cudnn_benchmark_enabled":   gpu_diag.get("cudnn_benchmark_enabled"),
             "gpu_temp_c":                gpu_diag.get("gpu_temp_c"),
             "sm_clock_mhz":              gpu_diag.get("sm_clock_mhz"),
             "mem_clock_mhz":             gpu_diag.get("mem_clock_mhz"),

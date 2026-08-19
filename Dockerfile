@@ -19,8 +19,7 @@ RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 COPY . .
 
-ENV TF_CPP_MIN_LOG_LEVEL=3 \
-    PYTHONUNBUFFERED=1 \
+ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 CMD ["/bin/bash"]

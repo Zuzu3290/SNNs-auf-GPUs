@@ -114,6 +114,14 @@ For this project specifically, Option 1 is actually the right choice. You're com
   too, but it will still fail at the test-metrics step for the same `SNNTester` reason
   above.
 
+  **Also open**: `DATASET_REGISTRY`'s DAVIS Camera Pose and DSEC entries carry
+  `num_classes: 1` — a placeholder so `Settings.apply_dataset_shape()`/`display()` and
+  the in-repo (non-regression) framework files have a value to build an output layer
+  from, not a real class count. It has no bearing on the real regression path: the
+  actual (gitignored) regression models use `DenseDecoder`'s per-pixel output, inferred
+  from `SENSOR_H`/`SENSOR_W` directly, not from a neuron-count field. Revisit this
+  placeholder once the in-repo model files gain real regression support.
+
 
 
 # Deferred — Haseeb parameter alignment (not applied, needs a decision)

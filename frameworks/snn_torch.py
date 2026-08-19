@@ -4,7 +4,7 @@ from snntorch import utils
 import torch
 import torch.nn as nn
 from skeleton.snn_config import Settings
-from learning.frameworks.model_interface import ModelInterface
+from frameworks.model_interface import ModelInterface
 from learning.utilities import build_optimizer, build_loss, ActivityMonitor
 
 

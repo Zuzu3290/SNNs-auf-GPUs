@@ -4,17 +4,14 @@ recordings, cache them via AdaptiveCacheController, optionally slice into
 temporal windows, then wrap in DataLoaders.
 """
 from __future__ import annotations
-import os
 import sys
 import logging
-import collections
-import queue
-import threading
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
 logger = logging.getLogger(__name__)
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 import tonic
@@ -23,11 +20,11 @@ import tonic.slicers as slicers
 import torchvision
 import tqdm as t
 from typing import Optional
-from skeleton import Settings
+from skeleton import Settings, WorkflowSettings
 from .cache_engine import AdaptiveCacheController, measure_event_bytes
 from .system_monitor import monitor
-from .workflow_config import WorkflowSettings
 from .dataset_registry import resolve_dataset_entry
+from .prefetch import AsyncGPUPrefetcher, CudaPrefetcher
 
 
 class LabelToIndex:
@@ -99,42 +96,6 @@ def pad_events_passthrough_target(batch):
     return samples_output, targets_output
 
 
-def dataloader_config(settings: Settings, device: torch.device, safety_margin_gb: float = 2.0, worker_fraction: float = 0.3, batch_bytes: int = 0) -> dict:
-    """num_workers/prefetch/pin_memory/persistent_workers, sized from live
-    RAM. Drops to num_workers=0 when the worker RAM budget is under 500MB —
-    a GPU-only embedded run with no host RAM headroom for multiprocessing workers."""
-    cuda_enabled = device is not None and getattr(device, "type", "") == "cuda"
-    metrics = monitor.snapshot()
-    total_gb = max(1.0, metrics.available_ram_gb - safety_margin_gb)
-    worker_budget_gb = total_gb * worker_fraction
-    gpu_only = cuda_enabled and worker_budget_gb < 0.5
-
-    if gpu_only:
-        cfg = {
-            "num_workers":        0,
-            "prefetch_factor":    None,
-            "pin_memory":         False,
-            "persistent_workers": False,
-        }
-        logger.info("[PIPELINE] GPU-only mode — num_workers=0, pin_memory=False")
-    else:
-        worker_bytes = worker_budget_gb * (1024 ** 3)
-        if batch_bytes > 0:
-            max_workers = max(1, int(worker_bytes / (2 * batch_bytes)))
-        else:
-            max_workers = settings.NUM_WORKERS
-        max_workers = min(max_workers, os.cpu_count() or 1)
-        cfg = {
-            "num_workers":        max_workers,
-            "prefetch_factor":    2 if max_workers > 0 else None,
-            "pin_memory":         True,
-            "persistent_workers": max_workers > 0,
-        }
-
-    logger.info(f"[PIPELINE] DataLoader config: {cfg}")
-    return cfg
-
-
 def create_sliced_dataset(
     dataset: Dataset,
     slice_duration_ms: float = 15.0,
@@ -155,6 +116,25 @@ def create_sliced_dataset(
 
     return tonic.SlicedDataset(dataset, slicer=slicer, transform=transform, metadata_path=metadata_path)  # type: ignore[arg-type]
 
+
+def calibrate_events_per_slice(dataset: Dataset, target_bins_per_recording: int = 8,
+                                min_events_per_slice: int = 100, sample_recordings: int = 200) -> int:
+    """Picks events_per_slice for SliceByEventCount from this dataset's own
+    event-rate statistics, instead of a guessed constant.
+
+    Anchors on the 10th percentile of sampled per-recording event counts
+    (not the median), so a below-typical-length recording still clears
+    target_bins_per_recording slices. SliceByEventCount itself clamps
+    event_count = min(event_count, n_events), so a too-large constant
+    doesn't drop a short recording, it just returns one whole-recording
+    slice with no subdivision -- the failure mode this anchor avoids."""
+    sample_size = min(sample_recordings, len(dataset))
+    indices = torch.randperm(len(dataset))[:sample_size]
+    event_counts = [len(dataset[int(i)][0]) for i in indices]
+
+    anchor = int(np.percentile(event_counts, 10))
+    return max(min_events_per_slice, anchor // target_bins_per_recording)
+
 # Show progress bars for large downloads in bytes instead of raw item counts.
 orig_tqdm_init = t.tqdm.__init__
 def mb_init(self, *a, **kw):
@@ -167,132 +147,54 @@ t.tqdm.__init__ = mb_init
 
 
 class PrefetchedLoader:
-    """Keeps a DataLoader one batch ahead of the training loop in a
-    background thread, and overlaps the host->device copy itself with GPU
-    compute via a CUDA stream, keeping `depth` device-resident batches
-    queued at once — the standard "DataPrefetcher" pattern (NVIDIA's
-    ImageNet examples, timm's PrefetchLoader), extended to a configurable
-    lookahead instead of just one batch ahead. Closes the transfer gap that
-    a plain `.to(device, non_blocking=True)` call inside the training loop
-    still leaves on the GPU, since that copy is issued only once the
-    previous batch's work is already done, not ahead of time.
+    """The class training and testing actually use. Underneath, it just
+    combines the two prefetchers in prefetch.py: one to fetch data on the
+    CPU, one to move it onto the GPU ahead of time."""
 
-    `depth` batches sit device-resident at once — cheap in VRAM (a 128-
-    sample event-frame batch is typically a few MB, so depth=8-16 costs
-    tens of MB, not gigabytes) but smooths over any per-batch fetch-latency
-    variance beyond what depth=1 already covers, since a slow CPU-side
-    batch doesn't stall the GPU as long as the queue ahead of it hasn't run
-    dry.
-
-    Built by NeuromorphicEncoder.create_loaders() — training/inference just
-    iterate self.train_loader/self.test_loader directly; the tensors they
-    get are already resident on `device`, so no further `.to(device)` call
-    is needed in the training loop.
-    """
-
-    def __init__(self, loader, device: torch.device, depth: int = 1, queue_size: int = 2):
+    def __init__(self, loader, device: torch.device, depth: int = 1, queue_size: int | None = None):
         self.loader = loader
         self.device = device
         self.depth = max(1, depth)
-        self.queue_size = max(1, queue_size)
-        self.stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
+        # Unset queue_size defaults to depth: the raw CPU-side buffer feeding
+        # the CUDA-stream copies must be at least as deep as the device-
+        # resident buffer it feeds, or it becomes the tighter bottleneck and
+        # throttles the GPU below what `depth` was chosen to sustain.
+        self.queue_size = max(1, queue_size if queue_size is not None else self.depth)
+        self.current: CudaPrefetcher | None = None
 
     def __len__(self) -> int:
         return len(self.loader)
 
-    def to_device(self, batch):
-        data, targets = batch
-        data = data.to(self.device, non_blocking=True)
-        targets = targets.to(self.device, non_blocking=True)
-        return data, targets
-
-    def cpu_prefetch(self):
-        """Background-thread generator: stays one raw batch ahead of the
-        caller, so CPU-side batch prep (DataLoader + cache) runs on its own
-        thread instead of blocking whatever the caller does with each batch
-        (here, the CUDA-stream transfer below)."""
-        buf: queue.Queue = queue.Queue(maxsize=self.queue_size)
-        sentinel = object()
-        errors: list[Exception] = []
-
-        def produce():
-            try:
-                for batch in self.loader:
-                    buf.put(batch)
-            except Exception as exc:
-                errors.append(exc)
-            finally:
-                buf.put(sentinel)
-
-        thread = threading.Thread(target=produce, daemon=True)
-        thread.start()
-
-        while True:
-            item = buf.get()
-            if item is sentinel:
-                if errors:
-                    raise errors[0]
-                return
-            yield item
-
     def __iter__(self):
-        raw_batches = self.cpu_prefetch()
-
-        if self.stream is None:
-            # CPU run: no stream to overlap on, just forward the transfer.
-            for batch in raw_batches:
-                yield self.to_device(batch)
-            return
-
-        pending: collections.deque = collections.deque()
-
-        def preload_one() -> bool:
-            try:
-                batch = next(raw_batches)
-            except StopIteration:
-                return False
-            with torch.cuda.stream(self.stream):
-                pending.append(self.to_device(batch))
-            return True
-
-        for i in range(self.depth):
-            if not preload_one():
-                break
-
-        while pending:
-            torch.cuda.current_stream(self.device).wait_stream(self.stream)
-            data, targets = pending.popleft()
-            # Tell the caching allocator these tensors are still in use by the
-            # side stream's copy until the default stream catches up, so it
-            # can't reclaim/overwrite that memory early (required whenever a
-            # tensor crosses streams like this — see PyTorch's CUDA stream docs).
-            data.record_stream(torch.cuda.current_stream(self.device))
-            targets.record_stream(torch.cuda.current_stream(self.device))
-            preload_one()
-            yield data, targets
+        if self.current is not None:
+            self.current.stop()
+        async_stage = AsyncGPUPrefetcher(self.loader, queue_size=self.queue_size)
+        self.current = CudaPrefetcher(async_stage, self.device, depth=self.depth)
+        yield from self.current
 
 
 class NeuromorphicEncoder:
     """Loads a dataset, caches it, and builds the train/test DataLoaders used by training."""
 
-    def __init__(self, cfg: Settings, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None, events_per_slice: int | None = None, cache_force_mode: str | None = None):
+    def __init__(self, cfg: Settings, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None, events_per_slice: int | None = None, calibrate_events_per_slice: bool | None = None):
 
         self.cfg = cfg
         self.wf  = WorkflowSettings()
 
         # Configure the shared SystemResourceMonitor once, early, now that
         # the run's device and cache path are both known — every consumer
-        # (AdaptiveCacheController, dataloader_config(), SNNTrainer,
+        # (AdaptiveCacheController, monitor.dataloader_config(), SNNTrainer,
         # SNNTester) reads live state through this same instance instead of
         # each building its own.
         cuda_enabled = torch.device(cfg.DEVICE).type == "cuda"
         monitor.configure(cache_path=self.wf.CACHE_PATH, cuda_enabled=cuda_enabled)
 
-        if cache_force_mode is not None:
-            self.wf.CACHE_FORCE_MODE = cache_force_mode
         self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else self.wf.TEMPORAL_SLICING_ENABLED
         self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)
-        self.events_per_slice = events_per_slice
+        self.events_per_slice = events_per_slice if events_per_slice is not None else self.wf.EVENTS_PER_SLICE
+        self.calibrate_events_per_slice = (
+            calibrate_events_per_slice if calibrate_events_per_slice is not None else self.wf.CALIBRATE_EVENTS_PER_SLICE
+        )
         self.train_loader: PrefetchedLoader
         self.test_loader: PrefetchedLoader
         self.build()
@@ -377,19 +279,28 @@ class NeuromorphicEncoder:
 
         num_workers = self.cfg.NUM_WORKERS
 
-        if self.use_temporal_slicing:
-            # Cache raw recordings first — slicing needs the raw timestamps.
-            cached_train = controller.determine_dataset_strategy(raw_train, split="train", num_workers=num_workers, force_mode=self.wf.CACHE_FORCE_MODE)
-            cached_test  = controller.determine_dataset_strategy(raw_test,  split="test",  num_workers=num_workers, force_mode=self.wf.CACHE_FORCE_MODE)
+       
+        dataset_prefix = self.dataset_label.replace(" ", "_")
 
-            metadata_dir = str(PROJECT_ROOT / "metadata")
+        if self.use_temporal_slicing:
+
+            if self.calibrate_events_per_slice:
+                self.events_per_slice = calibrate_events_per_slice(raw_train)
+                logger.info(f"[PIPELINE] Case A calibration: events_per_slice={self.events_per_slice} (from raw_train)")
+
+            # Cache raw recordings first — slicing needs the raw timestamps.
+            cached_train = controller.determine_dataset_strategy(raw_train, split=f"{dataset_prefix}/train", num_workers=num_workers)
+            cached_test  = controller.determine_dataset_strategy(raw_test,  split=f"{dataset_prefix}/test",  num_workers=num_workers)
+
+            metadata_dir = str(PROJECT_ROOT / "metadata" / dataset_prefix)
             train_data = create_sliced_dataset(cached_train,
                 slice_duration_ms=self.slice_duration_ms,
                 events_per_slice=self.events_per_slice, transform=train_tf,
                 metadata_path=f"{metadata_dir}/train",
             )
             test_data = create_sliced_dataset(cached_test,
-                slice_duration_ms=self.slice_duration_ms, transform=test_tf,
+                slice_duration_ms=self.slice_duration_ms,
+                events_per_slice=self.events_per_slice, transform=test_tf,
                 metadata_path=f"{metadata_dir}/test",
             )
             logger.info(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
@@ -397,13 +308,13 @@ class NeuromorphicEncoder:
                 raise RuntimeError(
                     f"[PIPELINE] Temporal slicing produced an empty dataset — "
                     f"train: {len(train_data)} samples, test: {len(test_data)} samples. "
-                    "Reduce min_events_per_slice or increase slice_duration_ms in your config."
+                    "Increase architecture.temporal_slice_duration in SNN_module.yaml."
                 )
         else:
             # Cache the deterministic frame transform; keep the random
             # augmentation out of the cached value (transform/live_transform split).
-            train_data = controller.determine_dataset_strategy(raw_train, transform=frame_tf, live_transform=train_augment, split="train", num_workers=num_workers, force_mode=self.wf.CACHE_FORCE_MODE)
-            test_data  = controller.determine_dataset_strategy(raw_test,  transform=test_tf,  split="test",  num_workers=num_workers, force_mode=self.wf.CACHE_FORCE_MODE)
+            train_data = controller.determine_dataset_strategy(raw_train, transform=frame_tf, live_transform=train_augment, split=f"{dataset_prefix}/train", num_workers=num_workers)
+            test_data  = controller.determine_dataset_strategy(raw_test,  transform=test_tf,  split=f"{dataset_prefix}/test",  num_workers=num_workers)
 
         # tonic's DiskCachedDataset/MemoryCachedDataset and torch's Subset (from
         # random_split) don't forward attribute access to the wrapped dataset, so a
@@ -423,7 +334,7 @@ class NeuromorphicEncoder:
         wrap them a second time — batches arrive already device-resident."""
         batch_size = self.cfg.BATCH_SIZE
         device = torch.device(self.cfg.DEVICE)
-        base_cfg = dataloader_config(self.cfg, device)
+        base_cfg = monitor.dataloader_config(self.cfg, device)
 
         # Regression targets (MVSEC's tuple, TUM-VIE's dict) aren't torch.tensor()-able —
         # tonic's own PadTensors would crash on them. Only classification datasets get it.

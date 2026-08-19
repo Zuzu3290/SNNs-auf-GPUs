@@ -30,24 +30,66 @@ with neuron count alone, which is the more commonly assumed scaling factor.
   effective batch size, verified via `diagnostics/verify_dataset_load.py`,
   with peak VRAM logged before/after.
 
-## 3. Naive baseline resolution (already validated, not yet applied)
+## 3. Naive baseline resolution — APPLIED AND VERIFIED (2026-08-18)
 
 The simplest fix, already empirically confirmed in
 `vram_batch_scaling_task.md`: shrink the per-dataset batch size.
 `batch_size=16` completes real forward+backward passes on this 8GB card;
-`batch_size=128` (the current global default) OOMs. This is a one-line
-registry change (`dataset_registry.py`'s N-Caltech101 entry, currently
-`"batch_size": None`), not a design problem. Two already-wired (not
-hypothetical) mechanisms pair with it to keep training dynamics sane at a
-smaller physical batch:
+`batch_size=128` (the previous global default) OOMs. Applied as a registry
+change (`dataset_registry.py`'s N-Caltech101 entry: `batch_size: 16,
+grad_accum_steps: 8`, effective batch size 128, matching the global
+default's training dynamics). `apply_dataset_hyperparams()` extended to
+apply `grad_accum_steps` from the registry (it previously only handled
+`epochs`/`batch_size`/`iterations` — `grad_accum_steps` wasn't threaded
+through despite `GRAD_ACCUM_STEPS` already existing as a config field).
 
-- `GRAD_ACCUM_STEPS` — real, used in `training.py:202`. Lets a smaller
-  physical batch simulate a larger effective batch size via accumulation.
+**Two real, previously-undiscovered bugs found and fixed while verifying
+this end-to-end** (`diagnostics/verify_ncaltech101_batch_fix.py`), neither
+hypothetical — both blocked N-Caltech101 from ever actually completing a
+real training run before, independent of the batch-size question:
+
+1. **Disk cache collision across datasets.** `AdaptiveCacheController`'s
+   cache directory was keyed only by split name (`cache/train`,
+   `cache/test`), not by dataset — any two datasets both using the
+   `"train"`/`"test"` split labels silently shared the same cache
+   directory. Confirmed as live, not theoretical: `cache/train/0_0.hdf5`
+   held a `(16, 2, 34, 34)` tensor — N-MNIST's shape, from a run days
+   earlier — and `DiskCachedDataset` returned it as a cache hit when
+   N-Caltech101 (240x180 sensor) asked for the same index, instead of ever
+   decoding the real recording. Surfaced as a shape-mismatch crash deep
+   inside `measure_dense_macs()`, nowhere near the actual bug. Fixed:
+   `NeuromorphicEncoder.apply_pipeline()` now namespaces every cache and
+   slicing-metadata path by dataset name
+   (`event_data_workflow/data_pipeline.py`). Stale un-namespaced
+   `cache/train`/`cache/test` deleted (regeneratable, confirmed
+   wrong-shaped).
+2. **Gradient-accumulation flush double-backward.** `SNNTrainer.train()`'s
+   "flush a partial final accumulation batch" branch called
+   `backward_pass()` a second time on `loss_val`, whose graph had already
+   been consumed by that same iteration's in-loop call —
+   `RuntimeError: Trying to backward through the graph a second time`.
+   Only reachable when `GRAD_ACCUM_STEPS > 1`, which defaults to `1`
+   everywhere else in this project, so the branch had apparently never
+   fired in a real run before. Fixed: the flush now steps the optimizer
+   directly using gradients already accumulated in `.grad`, instead of
+   re-invoking `.backward()` (`learning/training.py`).
+
+**Verified, real run** (`cfg.ITERA=3`, 1 epoch, through the actual
+`SNNTrainer.train()` path, not a synthetic probe): peak VRAM 6.18GB/7.96GB
+(77.7%), no OOM, real per-epoch metrics reported (loss, accuracy, spike
+rate, SynOps energy). `diagnostics/verify_ncaltech101_batch_fix.py` kept as
+a permanent regression check.
+
 - `USE_AMP` — real, full `autocast`+`GradScaler` wiring in
-  `training.py:118-119,206`. Already halves memory for the ops it covers.
+  `training.py:118-119,206`. Already halves memory for the ops it covers;
+  active in the verified run above.
 
-**This tier is hours of work, not days — infrastructure already exists,
-it just hasn't been pointed at this specific dataset yet.**
+**This tier is done.** What looked like "hours of work, infrastructure
+already exists" going in was accurate for the batch-size change itself,
+but verifying it end-to-end (rather than trusting the one-line config
+change in isolation) surfaced two real bugs that would have silently
+produced wrong results — the cache collision in particular would have
+affected any future dataset switch, not just this one.
 
 ## 4. Grounding in real research — two tiers, correctly separated
 
@@ -110,11 +152,11 @@ Before touching `learning/training.py`:
 
 ## 7. Phased implementation plan
 
-| Phase | Scope | Estimated effort |
-|---|---|---|
-| 1 | Set `batch_size`/`grad_accum_steps` for N-Caltech101 in the registry, verify via `diagnostics/verify_dataset_load.py` | Hours |
-| 2 | Build the Tier-A test harness (§6), implement gradient checkpointing, verify per-backend (start with one backend, expand once proven) | 1-2 days |
-| 3 (stretch, not committed) | Investigate OTTT/e-prop/FPTT adoption feasibility against this project's 4 backends | Multi-week research scope — separate from this semester's timeline |
+| Phase | Scope | Estimated effort | Status |
+|---|---|---|---|
+| 1 | Set `batch_size`/`grad_accum_steps` for N-Caltech101 in the registry, verify via a real training run | Hours | **DONE** (2026-08-18) — §3 above |
+| 2 | Build the Tier-A test harness (§6), implement gradient checkpointing, verify per-backend (start with one backend, expand once proven) | 1-2 days | **DONE for SNNTorch — DROPPED.** `Case_Study_Evaluation_Report.md` Case B: architectural incompatibility (`init_hidden=True` state breaks `torch.utils.checkpoint`'s recompute assumption), confirmed two independent ways via PyTorch's own error diagnostics. Norse left as an untested lead (explicit state-threading, the natural next candidate) — not yet built. |
+| 3 (stretch, not committed) | Investigate OTTT/e-prop/FPTT adoption feasibility against this project's 4 backends | Multi-week research scope — separate from this semester's timeline | Not started, still out of scope |
 
 ## 8. Confirming the two claims raised in discussion
 

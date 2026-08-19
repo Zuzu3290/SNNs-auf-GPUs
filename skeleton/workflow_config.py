@@ -16,17 +16,19 @@ class WorkflowSettings:
 
         slicing = config.get("temporal_slicing", {})
         self.TEMPORAL_SLICING_ENABLED = bool(slicing.get("enabled", False))
-        self.SLICE_DURATION_MS        = float(slicing.get("slice_duration_ms", 15.0))
+        # null (default) -> SliceByTime, using cfg.TEMPORAL_SLICE_DURATION (the
+        # "normal"/timing-window method, set in SNN_module.yaml). An int here
+        # switches slicing to SliceByEventCount instead. See
+        # CALIBRATE_EVENTS_PER_SLICE below for the third strategy.
+        events_per_slice = slicing.get("events_per_slice", None)
+        self.EVENTS_PER_SLICE = int(events_per_slice) if events_per_slice is not None else None
+        # true -> SliceByEventCount with a value calibrated from the dataset's
+        # own recordings (Case A) instead of a guessed constant; overrides
+        # EVENTS_PER_SLICE above whenever both are set.
+        self.CALIBRATE_EVENTS_PER_SLICE = bool(slicing.get("calibrate_events_per_slice", False))
 
         cache = config.get("cache", {})
         self.CACHE_PATH                = cache.get("path", "./cache")
         self.MEMORY_SAFETY_MARGIN_GB   = float(cache.get("memory_safety_margin_gb", 2.0))
         self.MEMORY_CACHE_THRESHOLD_GB = float(cache.get("memory_cache_threshold_gb", 6.0))
         self.MAX_CACHED_RECORDINGS     = int(cache.get("max_cached_recordings", 500))
-        # Adaptive on/off switch: None → probe live resources and pick a
-        # strategy; a value here forces that strategy instead.
-        self.CACHE_FORCE_MODE          = cache.get("force_mode", None)
-
-        realtime = config.get("realtime", {})
-        # {dataset_name: deadline_ms} — see docs/frameworks/realtime_nir_evaluation.md
-        self.REALTIME_DEADLINE_MS = {k: float(v) for k, v in realtime.get("deadline_ms", {}).items()}

@@ -101,10 +101,16 @@ The pipeline passes:
     metadata/train/slice_metadata.h5  — for the training split
     metadata/test/slice_metadata.h5   — for the test split
 
-AdaptiveTemporalSlicer (event_data_workflow/temporal_slicer.py) is the only
-custom slicing code retained. It samples N recordings, measures event density
-and recording duration, and suggests an appropriate slice duration when one is
-not known in advance. This is specific to the project and not in tonic.
+AdaptiveTemporalSlicer (event_data_workflow/temporal_slicer.py) has since been
+removed entirely — nothing in the codebase references it any more. Its
+successor is calibrate_events_per_slice() (event_data_workflow/data_pipeline.py,
+Case A of Case_Study_Evaluation_Report.pdf): it samples recordings, measures
+their event-count distribution, and derives an events_per_slice value for
+SliceByEventCount instead of a guessed constant. It's the project's only
+remaining custom slicing code, and is opt-in via
+configuration/data_workflow.yaml's temporal_slicing.calibrate_events_per_slice
+(false by default — timing-window slicing, SliceByTime, remains the default
+method either way).
 
 
 CACHING SYSTEM — AdaptiveCacheController

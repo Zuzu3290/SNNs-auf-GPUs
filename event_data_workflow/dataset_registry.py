@@ -69,7 +69,7 @@ class WindowedRecordingDataset(Dataset):
         return window, targets[frame_idx]
 
 
-def _load_dsec(save_to: str, split: str) -> WindowedRecordingDataset:
+def load_dsec(save_to: str, split: str) -> WindowedRecordingDataset:
     """DSEC via tonic's own DSEC class, windowed by its optical-flow timestamps."""
     dsec = tonic.datasets.DSEC(
         save_to=save_to, split=split, data_selection="events_left",
@@ -84,7 +84,7 @@ def _load_dsec(save_to: str, split: str) -> WindowedRecordingDataset:
 
 
 DAVIS_POSE_SENSOR_SIZE = (240, 180, 2)  # DAVIS240C
-_DAVIS_POSE_DTYPE = np.dtype([("x", np.int64), ("y", np.int64), ("t", np.int64), ("p", np.int64)])
+DAVIS_POSE_DTYPE = np.dtype([("x", np.int64), ("y", np.int64), ("t", np.int64), ("p", np.int64)])
 
 
 class DAVISPoseRecordings(Dataset):
@@ -112,7 +112,7 @@ class DAVISPoseRecordings(Dataset):
         seq_dir = self.root / self.sequences[idx]
 
         raw_events = np.loadtxt(seq_dir / "events.txt")
-        events = np.empty(len(raw_events), dtype=_DAVIS_POSE_DTYPE)
+        events = np.empty(len(raw_events), dtype=DAVIS_POSE_DTYPE)
         events["t"] = (raw_events[:, 0] * 1e6).astype(np.int64)
         events["x"] = raw_events[:, 1].astype(np.int64)
         events["y"] = raw_events[:, 2].astype(np.int64)
@@ -126,7 +126,7 @@ class DAVISPoseRecordings(Dataset):
         return events, (poses[:-1], windows)
 
 
-def _load_davis_pose(save_to: str, split: str) -> WindowedRecordingDataset:
+def load_davis_pose(save_to: str, split: str) -> WindowedRecordingDataset:
     """Camera 6-DOF pose (Mueggler et al., Event-Camera Dataset) via DAVISPoseRecordings."""
     recordings = DAVISPoseRecordings(save_to, sequences=["shapes_rotation"])
     return WindowedRecordingDataset(
@@ -143,7 +143,6 @@ def _load_davis_pose(save_to: str, split: str) -> WindowedRecordingDataset:
 DATASET_REGISTRY = {
     "1": {
         "name": "N-MNIST",
-        "category": "classification",
         "cls": tonic.datasets.NMNIST,
         "has_train_split": True,
         "sensor_size": tonic.datasets.NMNIST.sensor_size,
@@ -154,10 +153,10 @@ DATASET_REGISTRY = {
         "epochs": None,
         "batch_size": None,
         "iterations": None,
+        "grad_accum_steps": None,
     },
     "2": {
         "name": "N-Caltech101",
-        "category": "classification",
         "cls": tonic.datasets.NCALTECH101,
         "has_train_split": False,
         "sensor_size": (240, 180, 2),
@@ -166,26 +165,34 @@ DATASET_REGISTRY = {
         "num_test_samples": 1_742,
         "storage_size_gb": 3.72,  # single zip, Mendeley-hosted
         "epochs": None,
-        "batch_size": None,
+        # BPTT holds all T=16 timesteps' activations live at once; at the
+        # global default batch_size=128, Conv1's output alone is ~4GB for
+        # this dataset's 240x180 sensor (vs N-MNIST's 34x34), which OOMs on
+        # an 8GB card -- confirmed empirically in vram_batch_scaling_task.md
+        # (batch_size=128 crashes inside SNN_TORCH.forward(), batch_size=16
+        # completes real forward+backward passes). grad_accum_steps=8 keeps
+        # the effective batch size at 16*8=128, matching the global default,
+        # so training dynamics stay comparable across datasets.
+        "batch_size": 16,
         "iterations": None,
+        "grad_accum_steps": 8,
     },
     "3": {
         "name": "DAVIS Camera Pose",
-        "category": "6-DOF camera pose (position + quaternion)",
         "kind": "regression",
-        "loader": _load_davis_pose,
+        "loader": load_davis_pose,
         "sensor_size": DAVIS_POSE_SENSOR_SIZE,
-        "num_classes": None,
+        "num_classes": 1,
         "num_train_samples": None,
         "num_test_samples": None,
         "storage_size_gb": 0.15,  # one sequence ("shapes_rotation") — the only one this loader downloads; full 27-sequence collection is ~7.7GB
         "epochs": None,
         "batch_size": None,
         "iterations": None,
+        "grad_accum_steps": None,
     },
     "4": {
         "name": "DVS128 Gesture",
-        "category": "classification",
         "cls": tonic.datasets.DVSGesture,
         "has_train_split": True,
         "sensor_size": tonic.datasets.DVSGesture.sensor_size,
@@ -196,34 +203,37 @@ DATASET_REGISTRY = {
         "epochs": None,
         "batch_size": None,
         "iterations": None,
+        "grad_accum_steps": None,
     },
     "5": {
         "name": "DSEC",
-        "category": "optical flow / disparity (target not finalized)",
         "kind": "regression",
-        "loader": _load_dsec,
+        "loader": load_dsec,
         "sensor_size": tonic.datasets.DSEC.sensor_size,
-        "num_classes": None,
+        "num_classes": 1,
         "num_train_samples": None,
         "num_test_samples": None,
         "storage_size_gb": None,  # not measured — no confirmed figure documented yet
         "epochs": None,
         "batch_size": None,
         "iterations": None,
+        "grad_accum_steps": None,
     },
 }
 
 
 def apply_dataset_hyperparams(cfg, entry: dict) -> None:
-    """Override cfg.EPOCHS/BATCH_SIZE/ITERA with this entry's values, for whichever
-    fields aren't None. Must run before NeuromorphicEncoder builds DataLoaders and
-    before SNNTrainer is constructed."""
+    """Override cfg.EPOCHS/BATCH_SIZE/ITERA/GRAD_ACCUM_STEPS with this entry's
+    values, for whichever fields aren't None. Must run before NeuromorphicEncoder
+    builds DataLoaders and before SNNTrainer is constructed."""
     if entry.get("epochs") is not None:
         cfg.EPOCHS = int(entry["epochs"])
     if entry.get("batch_size") is not None:
         cfg.BATCH_SIZE = int(entry["batch_size"])
     if entry.get("iterations") is not None:
         cfg.ITERA = int(entry["iterations"])
+    if entry.get("grad_accum_steps") is not None:
+        cfg.GRAD_ACCUM_STEPS = int(entry["grad_accum_steps"])
 
 
 def resolve_dataset_entry(cfg) -> dict:
@@ -239,8 +249,8 @@ def resolve_dataset_entry(cfg) -> dict:
     if sys.stdin.isatty():
         print("\n[PIPELINE] Select a dataset:")
         for key, entry in DATASET_REGISTRY.items():
-            output = f"{entry['num_classes']} classes" if entry["num_classes"] is not None else "target TBD"
-            print(f"  {key}) {entry['name']}  [{entry['category']}, {output}]")
+            output = f"{entry['num_classes']} classes" if entry.get("kind", "classification") == "classification" else "regression target TBD"
+            print(f"  {key}) {entry['name']}  [{output}]")
         try:
             choice = input("Enter number: ").strip()
         except EOFError:

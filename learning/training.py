@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import csv
 import time
@@ -10,14 +9,10 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
 from event_data_workflow.system_monitor import PipelineMonitor, monitor
-from learning.utilities import measure_dense_macs, read_gpu_runtime_diagnostics, compute_cv_isi
-
+from learning.utilities import measure_dense_macs, compute_cv_isi
 logger = logging.getLogger(__name__)
 
-# Horowitz 45nm per-operation energy constant used to convert SynOps into an
-# estimated-Joules figure (SNN_GPU_Evaluation_Metrics.md §2.4/§4.4). SynOps
-# here are MAC-equivalent (dense conv/linear ops gated by spike firing rate),
-# so the MAC constant applies, not the AC one.
+# Neuromorphic SynOps energy constant — see SNN_GPU_Evaluation_Metrics.md §2.4/§4.4
 SYNOPS_ENERGY_PJ_PER_MAC = 4.6
 
 
@@ -69,11 +64,10 @@ def aggregate_spike_output(spk_rec: torch.Tensor) -> torch.Tensor:
 
 def buffer_report(activity_snapshot: dict) -> str:
     """Sparse-vs-dense spike buffer memory diagnostic (AER memory savings),
-    reconstructed from a stored ActivityMonitor.recordings() snapshot rather
-    than DenseTimestepBuffer's own `.memory_bytes`/`.firing_rate` (which call
-    `.item()` internally) — this is only ever invoked from the deferred
-    end-of-training report, using tensors already captured GPU-side during
-    the run, so the one sync it costs happens there, not mid-loop."""
+    computed from a stored ActivityMonitor.recordings() snapshot — this is
+    only ever invoked from the deferred end-of-training report, using
+    tensors already captured GPU-side during the run, so the one `.item()`
+    sync it costs happens there, not mid-loop."""
     tensors = {k: v for k, v in activity_snapshot.items() if v is not None}
     if not tensors:
         return "no hooks"
@@ -111,7 +105,7 @@ class SNNTrainer:
         self.bwd_events          = []
         self.dense_macs_per_layer = {}
 
-        self.pipeline_monitor = PipelineMonitor(cuda_enabled=device.type == "cuda")
+        self.pipeline_monitor = PipelineMonitor(enabled=getattr(cfg, "ENABLE_PIPELINE_MONITOR", True))
 
         use_amp = getattr(cfg, "USE_AMP", True) and device.type == "cuda"
         self.scaler           = torch.amp.GradScaler("cuda", enabled=use_amp)  # type: ignore[attr-defined]
@@ -211,12 +205,9 @@ class SNNTrainer:
 
         best_acc = 0.0
 
-        # "Measure FLOPs first": one-time dense-MAC measurement the SynOps
-        # energy estimate is built on (SNN_GPU_Evaluation_Metrics.md §2.4/
-        # §4.4) — a single forward pass with temporary hooks, not a
-        # per-batch/epoch cost.
+        # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4.
+        # self.train_loader is a PrefetchedLoader — probe_data is already device-resident.
         probe_data, _ = next(iter(self.train_loader))
-        probe_data = probe_data.to(self.device)
         if self.model.tensor_format() == "BT":
             probe_data = probe_data.permute(1, 0, 2, 3, 4).contiguous()
         self.dense_macs_per_layer = measure_dense_macs(self.model, probe_data)
@@ -330,10 +321,21 @@ class SNNTrainer:
                 if i == num_iters:
                     break
 
-            # flush any gradients accumulated in a partial final batch
+            # Flush any gradients accumulated in a partial final batch (fires
+            # when the loop exits mid-accumulation-cycle, e.g. ITERA not a
+            # multiple of accum). Must NOT call backward_pass() again here --
+            # that re-invokes loss.backward() on loss_val's graph, which the
+            # in-loop call above (line ~300) already consumed, and PyTorch
+            # frees a graph after backward() by default. The gradients from
+            # every in-loop call are already accumulated in .grad; this only
+            # needs to step the optimizer with them, mirroring backward_pass's
+            # own scaler-branch logic without repeating the backward() call.
             if step_count % accum != 0:
-                with self.timed(self.bwd_events):
-                    self.model.backward_pass(loss_val, scaler=self.scaler, do_step=True)
+                if self.use_amp:
+                    self.scaler.step(self.model.optimizer)
+                    self.scaler.update()
+                else:
+                    self.model.optimizer.step()
                 self.model.zero_grad()
 
             # Exact per-epoch event counts — fwd_events always gains exactly n
@@ -349,13 +351,12 @@ class SNNTrainer:
 
             epoch_duration = time.perf_counter() - t0
             epoch_phase    = f"epoch_{epoch}"
-            gpu            = self.pipeline_monitor.phase_summary(epoch_phase)
-            gpu_diag       = read_gpu_runtime_diagnostics(self.pipeline_monitor)
-
-            energy_j        = self.pipeline_monitor.phase_energy_j(epoch_phase, epoch_duration)  # None on CPU-only or without NVML
-            avg_power_w     = energy_j / epoch_duration if energy_j is not None else 0.0
-            dynamic_power_w = self.pipeline_monitor.dynamic_power_w(avg_power_w) if energy_j is not None else 0.0
-            energy_j        = energy_j or 0.0
+            energy_report  = self.pipeline_monitor.phase_energy_report(epoch_phase, epoch_duration)  # None fields on CPU-only or without NVML
+            gpu             = energy_report["gpu"]
+            gpu_diag        = energy_report["gpu_diag"]
+            energy_j        = energy_report["gpu_energy_j"] or 0.0
+            avg_power_w     = energy_report["avg_power_w"] or 0.0
+            dynamic_power_w = energy_report["dynamic_power_w"] or 0.0
             gpu_active_s    = epoch_duration * gpu.get("gpu_util_avg_pct", 0.0) / 100.0
 
             # The one necessary sync of the epoch: a host-visible accuracy
@@ -490,7 +491,10 @@ class SNNTrainer:
             if gpu:
                 print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
                 print(f"  • GPU Memory     : {gpu['gpu_mem_peak_gb']} GB / {self.pipeline_monitor.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
-            print(f"  • Max Mem Reserved: {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB   CUDNN autotune: {gpu_diag.get('cudnn_benchmark_enabled')}")
+                if gpu.get("gpu_idle_episodes", 0) > 0:
+                    print(f"  • GPU Idle       : {gpu['gpu_idle_episodes']} episode(s), {gpu['gpu_idle_total_s']:.1f}s total "
+                          f"— CPU-side data prep couldn't keep up with the GPU this often")
+            print(f"  • Max Mem Reserved: {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB")
             if "gpu_temp_c" in gpu_diag:
                 print(f"  • GPU Temp/Clock : {gpu_diag['gpu_temp_c']}°C   SM {gpu_diag.get('sm_clock_mhz')} MHz   Mem {gpu_diag.get('mem_clock_mhz')} MHz")
             if record["checkpoint_saved_msg"]:

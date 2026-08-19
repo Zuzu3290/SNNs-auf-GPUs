@@ -18,11 +18,11 @@ import shutil
 from abc import abstractmethod
 from collections import deque
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional
 import torch
 from torch.utils.data import Dataset
 from tonic import DiskCachedDataset, MemoryCachedDataset
-from .system_monitor import CacheMetrics, monitor, is_gpu_under_pressure
+from .system_monitor import monitor, is_gpu_under_pressure
 
 logger = logging.getLogger(__name__)
 
@@ -201,8 +201,14 @@ class AdaptiveCacheController:
         self.max_cached_recordings = max_cached_recordings
         self.cache_path.mkdir(parents=True, exist_ok=True)
 
-    def estimate_dataset_memory_footprint(self, dataset: Dataset, num_samples_to_probe: int = 10) -> float:
-        """Estimate total dataset size in GB by sampling a few items."""
+    def estimate_dataset_memory_footprint(self, dataset: Dataset, transform=None, num_samples_to_probe: int = 10) -> float:
+        """Estimate total dataset size in GB by sampling a few items, measuring
+        the POST-transform size when a deterministic transform is given.
+        Memory/hybrid mode caches PreTransformedDataset's output (the
+        already-ToFrame'd dense array), not the raw sparse event stream —
+        measuring the raw sample here would price a few dozen bytes per
+        event and silently undercount what actually ends up resident in RAM
+        once the dense per-bin frames are what's held."""
         sample_indices = torch.randperm(len(dataset))[:min(num_samples_to_probe, len(dataset))]
         total_bytes = 0
         successful_probes = 0
@@ -210,6 +216,8 @@ class AdaptiveCacheController:
         for idx in sample_indices:
             try:
                 events, target = dataset[int(idx)]
+                if transform is not None:
+                    events = transform(events)
                 total_bytes += measure_event_bytes(events)
                 successful_probes += 1
             except Exception as e:
@@ -222,8 +230,7 @@ class AdaptiveCacheController:
 
         return (total_bytes / successful_probes * len(dataset)) / (1024 ** 3)
 
-    def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train", num_workers: int = 1,
-        force_mode: Optional[Literal["memory", "disk", "hybrid", "no_cache"]] = None) -> Dataset:
+    def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train", num_workers: int = 1) -> Dataset:
         """
         Pick a cache tier from live resources and wrap dataset in it.
 
@@ -236,46 +243,41 @@ class AdaptiveCacheController:
             cache's own per-access hook instead.
         num_workers: workers that will share this cache — the hybrid byte
             budget is divided across them to avoid RAM overcommit.
-        force_mode: the adaptive on/off switch. None probes live resources
-            and picks a strategy; any other value forces that strategy
-            instead (still reads live resources once, only to size the
-            cache budget within it, not to choose it).
         """
         if hasattr(dataset, "slice_map"):
             raise ValueError(
                 "determine_dataset_strategy() received an already-sliced dataset. "
                 "Cache must be applied to raw recordings BEFORE slicing — "
                 "use: cached_raw = determine_dataset_strategy(raw_dataset); "
-                "sliced = TemporalSlicedDataset(cached_raw, config)"
+                "sliced = create_sliced_dataset(cached_raw, ...)  (event_data_workflow/data_pipeline.py)"
             )
 
         metrics             = monitor.snapshot()
-        dataset_size_gb     = self.estimate_dataset_memory_footprint(dataset)
+        dataset_size_gb     = self.estimate_dataset_memory_footprint(dataset, transform=transform)
         available_for_cache = metrics.available_ram_gb - self.memory_safety_margin
-        self.log_diagnostics(metrics, dataset_size_gb)
 
         cache_dir = self.cache_path / split
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        if force_mode:
-            mode = force_mode
-            threshold_gb = {
-                "memory":   available_for_cache,
-                "hybrid":   available_for_cache * 0.5,
-                "disk":     0.0,
-                "no_cache": 0.0,
-            }[mode]
-        elif is_gpu_under_pressure(metrics) and metrics.disk_exists:
+        if is_gpu_under_pressure(metrics) and metrics.disk_exists:
             # A busy GPU means CUDA's pinned-memory allocator is competing
             # for the same physical RAM a memory/hybrid cache would use —
             # disk sidesteps that contention entirely.
             mode, threshold_gb = "disk", 0.0
         elif available_for_cache >= self.memory_threshold and dataset_size_gb < available_for_cache * 0.7:
             mode, threshold_gb = "memory", available_for_cache
-        elif metrics.total_ram_gb >= 32.0 and metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.5:
-            mode, threshold_gb = "hybrid", available_for_cache * 0.5
         elif metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.2:
+            # Checked before "hybrid": measured directly (a FIFO cache
+            # against a fully shuffled index order, 5 epochs) — hybrid's RAM
+            # hot layer gets a ~0.01% hit rate. Training reshuffles every
+            # epoch, so a bounded FIFO window (a small fraction of the
+            # dataset) almost never still holds a sample by the time it's
+            # needed again. The layer adds real bookkeeping overhead for
+            # essentially no benefit under this access pattern, so plain
+            # "disk" (same permanent cache, no extra layer) wins by default.
             mode, threshold_gb = "disk", 0.0
+        elif metrics.total_ram_gb >= 16.0 and metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * 1.5:
+            mode, threshold_gb = "hybrid", available_for_cache * 0.5
         else:
             raise RuntimeError(
                 f"[CACHE CONTROLLER] System halt: insufficient resources. "
@@ -289,32 +291,37 @@ class AdaptiveCacheController:
         # augmentation is present.
         numpy_bridge = torch.from_numpy if live_transform is not None else None
 
-        # Bake the deterministic transform in BEFORE handing to tonic's cache
-        # classes: MemoryCachedDataset/DiskCachedDataset only skip re-fetching
-        # the raw sample on a cache hit, they unconditionally re-run whatever
-        # `transform` they're given on every access. Wrapping first means
-        # what gets cached is already the (expensive) post-transform result;
-        # only numpy_bridge/live_transform run fresh per access, matching how
-        # hybrid mode's BoundedRecordingCache already behaves (see its own
-        # __getitem__: raw is memoized, self.transform runs fresh on top).
         pre_transformed = PreTransformedDataset(dataset, transform) if transform is not None else dataset
 
         if mode == "memory":
             return MemoryCachedDataset(pre_transformed, transform=compose_transforms(numpy_bridge, live_transform))
 
+        # Both "disk" and "hybrid" cache the same thing: the already-
+        # transformed dense frame, permanently, on disk — the expensive
+        # part (measured ~136ms/sample: fetch + Denoise + ToFrame) paid
+        # once per sample, ever, not once per epoch. They share this exact
+        # subdirectory on purpose, since the content is identical; switching
+        # between the two modes never needs to rebuild it.
         if mode == "disk":
-            return DiskCachedDataset(pre_transformed, transform=compose_transforms(numpy_bridge, live_transform), cache_path=str(cache_dir), compress=False)
+            return DiskCachedDataset(pre_transformed, transform=compose_transforms(numpy_bridge, live_transform), cache_path=str(cache_dir / "disk"), compress=False)
 
         if mode == "hybrid":
+            # A plain disk read of an already-cached sample still costs
+            # ~40ms (measured) — real time at dataset scale, even with the
+            # transform itself eliminated. "hybrid" adds a bounded RAM hot
+            # layer in front of the same permanent disk cache disk mode
+            # uses: a repeat access that's still in RAM skips the disk read
+            # entirely (measured ~0.0004ms — about 100,000x faster). Nothing
+            # here is baked into what gets cached but the deterministic
+            # transform — live_transform (stochastic augmentation) runs
+            # fresh on every access, whether served from RAM or disk.
             effective_workers = max(1, num_workers)
             max_bytes = int(threshold_gb * (1024 ** 3)) // effective_workers
             logger.info(
                 f"[CACHE CONTROLLER] Hybrid hot layer: {threshold_gb:.1f}GB ÷ {effective_workers} workers "
                 f"= {max_bytes / (1024**3):.2f}GB per worker"
             )
-            # Cache only the deterministic transform; live_transform runs via
-            # BoundedRecordingCache's own per-access hook, not baked in.
-            disk_cached = DiskCachedDataset(dataset, transform=transform, cache_path=str(cache_dir), compress=False)
+            disk_cached = DiskCachedDataset(pre_transformed, transform=None, cache_path=str(cache_dir / "disk"), compress=False)
             return BoundedRecordingCache(
                 disk_cached, max_recordings=self.max_cached_recordings, max_bytes=max_bytes,
                 transform=compose_transforms(numpy_bridge, live_transform),
@@ -322,26 +329,6 @@ class AdaptiveCacheController:
 
         logger.info(f"[CACHE CONTROLLER] {split.upper()} → NO_CACHE (on-the-fly processing)")
         return dataset
-
-    def log_diagnostics(self, metrics: CacheMetrics, dataset_size_gb: float):
-        sep = "=" * 70
-        logger.info(sep)
-        logger.info("ADAPTIVE CACHE CONTROLLER - SYSTEM DIAGNOSTICS")
-        logger.info(sep)
-        logger.info(f"  Total RAM        : {metrics.total_ram_gb:.2f} GB")
-        logger.info(f"  Available RAM    : {metrics.available_ram_gb:.2f} GB")
-        logger.info(f"  RAM Usage        : {metrics.ram_usage_percent:.1f}%")
-        logger.info(f"  Disk Available   : {'YES' if metrics.disk_exists else 'NO'}")
-        if metrics.disk_exists:
-            logger.info(f"  Free Disk Space  : {metrics.disk_available_gb:.2f} GB")
-        if metrics.gpu_memory_gb > 0:
-            logger.info(f"  GPU Memory       : {metrics.gpu_memory_gb:.2f} GB")
-            logger.info(f"  GPU Available    : {metrics.gpu_available_gb:.2f} GB")
-        else:
-            logger.info("  GPU              : Not available or not detected")
-        logger.info(f"  Est. Dataset     : ~{dataset_size_gb:.2f} GB")
-        logger.info(f"  Safety Margin    : {self.memory_safety_margin:.2f} GB (reserved for system)")
-        logger.info(sep)
 
     def clear_cache(self, split: Optional[str] = None):
         """Delete the disk cache for one split, or all splits if none is given."""

@@ -9,8 +9,7 @@ architecture:
 
 training:
   framework: sj           # YAML selector: norse | torch | sj | sinabs
-  device: auto                # cpu | cuda | auto (prompts for CPU-only / hybrid / GPU-only at
-                               # an interactive terminal; autodetects in non-interactive runs)
+  device: cuda
   epochs: 5
   iterations_per_epoch: 400
   timesteps: 25
@@ -18,13 +17,6 @@ training:
   nap_times: 1
   learning_rate: 0.001
   weight_decay: 0.0001
-
-  # torch.compile is disabled: on this machine the inductor backend needs cl.exe
-  # (MSVC C++ compiler) for parts of the backward graph even on CUDA models, and
-  # it's not installed/on PATH — see learning/main.py's use_compile block. Flip
-  # to true once a C++ compiler is available (e.g. via VS Build Tools) to regain
-  # the ~1.5-2x speedup noted there.
-  use_torch_compile: false
 
   # TRADES robustness training — penalises the network for changing its prediction under input corruption.
   # Loss = CrossEntropy(clean) + lambda * KL(clean || adversarial).
@@ -47,8 +39,15 @@ training:
 
   num_workers: 6                # CPU DataLoader workers that prefetch batches while the GPU trains.
                                 # More workers reduce GPU starvation between batches (better utilisation).
-                                # Recommended: 4–8 on a workstation. Capped by CPU count automatically.
-                                # Set to 0 to disable multiprocessing (needed for non-picklable transforms).
+                                # Capped by CPU count automatically. Set to 0 to disable multiprocessing
+                                # (needed for non-picklable transforms).
+
+  prefetch_depth: 16             # Batches kept queued (CPU hand-off buffer and GPU-resident buffer
+                                # both use this depth). Raised alongside num_workers so the buffer
+                                # can hold what the extra workers are now capable of producing.
+
+  enable_pipeline_monitor: true  # Background CPU/GPU utilization sampler (utilization, power, clock,
+                                # sustained-idle warnings). Diagnostic only — set false to disable.
 
 dataset:
   dataset_name: MNIST

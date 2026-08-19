@@ -15,7 +15,6 @@ Usage:
     python docs/results/run_benchmark.py --full --trades           # TRADES on during training
 """
 import sys
-import os
 import argparse
 import hashlib
 import json
@@ -27,7 +26,6 @@ from pathlib import Path
 HERE = Path(__file__).parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT))
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 # training.py's logging prints unicode arrows (→); when stdout is redirected to
 # a file on Windows it defaults to the cp1252 locale encoding, which can't
@@ -44,11 +42,11 @@ from event_data_workflow import NeuromorphicEncoder, DATASET_REGISTRY
 from event_data_workflow.system_monitor import PipelineMonitor
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
-from learning.adversarial_robustness import AdversarialEvaluator
-from learning.frameworks.snn_torch import SNN_TORCH
-from learning.frameworks.snn_norse import SNN_NORSE
-from learning.frameworks.snn_spikingjelly import SNN_SJ
-from learning.frameworks.snn_sinabs import SNN_SINABS
+from learning.robustness import AdversarialEvaluator
+from frameworks.snn_torch import SNN_TORCH
+from frameworks.snn_norse import SNN_NORSE
+from frameworks.snn_spikingjelly import SNN_SJ
+from frameworks.snn_sinabs import SNN_SINABS
 
 DIAGNOSTIC_CONFIG = dict(
     EPOCHS=1,
@@ -71,7 +69,7 @@ CLASSIFICATION_MODELS = {
 # Regression variants (Phase B: DSEC) live under frameworks/personal/,
 # gitignored/local-only — degrade gracefully if this checkout doesn't have it.
 try:
-    from learning.frameworks.personal import (
+    from frameworks.personal import (
         SNN_TORCH_REGRESSION, SNN_NORSE_REGRESSION, SNN_SJ_REGRESSION,
     )
     REGRESSION_MODELS = {
