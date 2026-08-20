@@ -185,12 +185,7 @@ class PrefetchedLoader:
         try:
             yield from self.current
         finally:
-            # Closes the leak from any abandoned iteration (a bare next(iter(self))
-            # probe, or a `break` mid-epoch) immediately, not just on the next
-            # __iter__() call — with num_workers=0 the background thread runs
-            # __getitem__ (including live_transform) in-process, so leaving it
-            # alive races PyTorch's global RNG against whatever runs next.
-            self.current.stop()
+            self.current.stop()  # closes any abandoned iteration immediately, not just on the next __iter__() call — else the leaked thread races the global RNG (num_workers=0) against whatever runs next
 
 
 class NeuromorphicEncoder:
