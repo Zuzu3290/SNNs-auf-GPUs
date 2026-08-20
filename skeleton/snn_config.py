@@ -21,7 +21,6 @@ class Settings:
         architecture = self.config.get("architecture", {})
         training     = self.config.get("training", {})
         dataset      = self.config.get("dataset", {})
-        input_cfg    = self.config.get("input", {})
         output       = self.config.get("output", {})
         frameworks   = self.config.get("frameworks", {})
 
@@ -41,12 +40,6 @@ class Settings:
         self.TEMPORAL_SLICE_DURATION = int(architecture.get("temporal_slice_duration", 15000))
         self.TEMPORAL_OVERLAP        = int(architecture.get("temporal_overlap", 0))
         self.TOTAL_TIME_WINDOW       = int(architecture.get("total_time_window", 30000))
-
-        # Input control (reserved for future use — expose when input_mode is needed)
-        # self.INPUT_MODE      = input_cfg.get("input_mode", "2D")
-        # self.IMAGE_CHANNELS  = int(input_cfg.get("image_channels", 1))
-        # self.IMAGE_HEIGHT    = int(input_cfg.get("image_height", 28))
-        # self.IMAGE_WIDTH     = int(input_cfg.get("image_width", 28))
 
         # Conv-SNN architecture (from network_architecture.yaml)
         self.SENSOR_H     = int(conv.get("sensor_h",     34))

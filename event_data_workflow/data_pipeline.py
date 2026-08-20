@@ -451,7 +451,7 @@ class NeuromorphicEncoder:
 
     def validate_first_sample(self, dataset, split: str) -> int:
         try:
-            events, target = dataset[0]
+            events, _ = dataset[0]
             if events is None or (hasattr(events, "numel") and events.numel() == 0):
                 raise ValueError("first sample is empty")
             sample_bytes = measure_event_bytes(events)

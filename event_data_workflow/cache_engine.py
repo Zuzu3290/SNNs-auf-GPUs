@@ -120,7 +120,7 @@ class AdaptiveCacheController:
 
         for idx in sample_indices:
             try:
-                events, target = dataset[int(idx)]
+                events, _ = dataset[int(idx)]
                 if transform is not None:
                     events = transform(events)
                 total_bytes += measure_event_bytes(events)

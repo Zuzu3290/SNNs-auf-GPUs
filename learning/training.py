@@ -33,7 +33,7 @@ def generate_trades_adversarial(model: torch.nn.Module, data: torch.Tensor, clea
 
     model.activity.pause()
     try:
-        for a in range(steps):
+        for _ in range(steps):
             adv = adv.requires_grad_(True)
             adv_logits = aggregate_spike_output(model(adv).float())
             kl   = F.kl_div(F.log_softmax(adv_logits, dim=1), clean_prob, reduction="batchmean")
@@ -525,7 +525,7 @@ class SNNTrainer:
         spk = self.last_spk_rec.cpu()
         spk_sample = spk[:, 0, :] if spk.dim() == 3 else spk
         timesteps, neurons = spk_sample.numpy().nonzero()
-        fig, ax = plt.subplots(figsize=(10, 3))
+        _, ax = plt.subplots(figsize=(10, 3))
         ax.scatter(timesteps, neurons, s=2, c="black", marker="|")
         ax.set_title("Output Neuron Spike Raster  (last batch · sample 0)")
         ax.set_xlabel("Time step")

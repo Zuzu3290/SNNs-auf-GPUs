@@ -1,6 +1,5 @@
 import logging
 import sys
-from typing import Optional
 
 # Default log format: includes timestamp, level, module, and message
 DEFAULT_FORMAT = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
