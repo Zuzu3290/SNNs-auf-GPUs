@@ -27,6 +27,9 @@ class WorkflowSettings:
         # EVENTS_PER_SLICE above whenever both are set.
         self.CALIBRATE_EVENTS_PER_SLICE = bool(slicing.get("calibrate_events_per_slice", False))
 
+        augmentation = config.get("augmentation", {})
+        self.RANDOM_ROTATION_ENABLED = bool(augmentation.get("random_rotation_enabled", True))
+
         cache = config.get("cache", {})
         self.CACHE_PATH = cache.get("path", "./cache")
 
@@ -45,3 +48,4 @@ class WorkflowSettings:
         self.PREFETCH_DEPTH_MAX        = int(rp.get("prefetch_depth_max", 32))
         self.MEMORY_TIER_HEADROOM_FRACTION = float(rp.get("memory_tier_headroom_fraction", 0.7))
         self.DISK_TIER_HEADROOM_MULTIPLE   = float(rp.get("disk_tier_headroom_multiple", 1.2))
+        self.WORKER_RAM_FRACTION           = float(rp.get("worker_ram_fraction", 0.25))

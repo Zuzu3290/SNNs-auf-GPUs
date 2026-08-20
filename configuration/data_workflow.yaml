@@ -10,14 +10,20 @@ temporal_slicing:
   events_per_slice: null
   calibrate_events_per_slice: false
 
+# Train-only augmentation. Applied after ToFrame, on the dense frame — a
+# rotated frame interpolates, so spike counts on an augmented sample become
+# fractional rather than binary. Toggle off to keep training spike-count
+# semantics identical to test-time (no augmentation there either way).
+augmentation:
+  random_rotation_enabled: true
+
 cache:
   path: "./cache"
 
 # Every threshold that governs the pipeline's live-resource judgment calls —
-# cache tier, GPU-pressure detection, batch/VRAM sizing — lives here in one
-# block, instead of scattered hardcoded constants across cache_engine.py /
-# system_monitor.py / utilities.py. Worker count is not here: it's computed
-# live from physical core count with no tunable knob (see dataloader_config()).
+# cache tier, GPU-pressure detection, batch/VRAM sizing, DataLoader worker
+# count — lives here in one block, instead of scattered hardcoded constants
+# across cache_engine.py / system_monitor.py / utilities.py.
 resource_policy:
   memory_safety_margin_gb: 2.0     # RAM always held back before sizing the cache tier and workers
   memory_cache_threshold_gb: 6.0   # min free RAM before the "memory" cache tier is even considered
@@ -36,6 +42,7 @@ resource_policy:
   prefetch_depth_max: 32           # ceiling on calibrated prefetch depth
   memory_tier_headroom_fraction: 0.7   # dataset must fit under this fraction of available RAM to pick the "memory" cache tier
   disk_tier_headroom_multiple: 1.2     # free disk space must exceed dataset size by this multiple to pick the "disk" cache tier
+  worker_ram_fraction: 0.25            # share of available RAM DataLoader workers' in-flight buffers may occupy; caps num_workers for large-sensor datasets
 
 # batch_size lives in SNN_module.yaml (training section)
 

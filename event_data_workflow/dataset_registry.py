@@ -10,6 +10,7 @@ import sys
 import logging
 from pathlib import Path
 
+import h5py
 import numpy as np
 import tonic
 from tonic.download_utils import download_and_extract_archive
@@ -67,10 +68,13 @@ class WindowedRecordingDataset(Dataset):
         return window, targets[frame_idx]
 
 
+DSEC_RECORDINGS = [name for name, has_flow in tonic.datasets.DSEC.recordings["train"].items() if has_flow]  # full 18-recording optical-flow "train" set, ~134M events each
+
+
 def load_dsec(save_to: str, split: str) -> WindowedRecordingDataset:
-    """DSEC via tonic's own DSEC class, windowed by its optical-flow timestamps."""
+    """DSEC via tonic's own DSEC class, windowed by its optical-flow timestamps. `split` is unused (kept for call-site symmetry) -- always loads DSEC_RECORDINGS."""
     dsec = tonic.datasets.DSEC(
-        save_to=save_to, split=split, data_selection="events_left",
+        save_to=save_to, split=DSEC_RECORDINGS, data_selection="events_left",
         target_selection=["optical_flow_forward_event", "optical_flow_forward_timestamps"],
     )
     return WindowedRecordingDataset(
@@ -82,7 +86,8 @@ def load_dsec(save_to: str, split: str) -> WindowedRecordingDataset:
 
 
 DAVIS_POSE_SENSOR_SIZE = (240, 180, 2)  # DAVIS240C
-DAVIS_POSE_DTYPE = np.dtype([("x", np.int64), ("y", np.int64), ("t", np.int64), ("p", np.int64)])
+EVENT_XYTP_I64_DTYPE = np.dtype([("x", np.int64), ("y", np.int64), ("t", np.int64), ("p", np.int64)])
+DAVIS_POSE_SEQUENCES = [name for name in tonic.datasets.DAVISDATA.recordings if name != "calibration"]  # full Event-Camera-Dataset collection minus the groundtruth-less calibration recording
 
 
 class DAVISPoseRecordings(Dataset):
@@ -110,7 +115,7 @@ class DAVISPoseRecordings(Dataset):
         seq_dir = self.root / self.sequences[idx]
 
         raw_events = np.loadtxt(seq_dir / "events.txt")
-        events = np.empty(len(raw_events), dtype=DAVIS_POSE_DTYPE)
+        events = np.empty(len(raw_events), dtype=EVENT_XYTP_I64_DTYPE)
         events["t"] = (raw_events[:, 0] * 1e6).astype(np.int64)
         events["x"] = raw_events[:, 1].astype(np.int64)
         events["y"] = raw_events[:, 2].astype(np.int64)
@@ -126,7 +131,48 @@ class DAVISPoseRecordings(Dataset):
 
 def load_davis_pose(save_to: str, split: str) -> WindowedRecordingDataset:
     """Camera 6-DOF pose (Mueggler et al., Event-Camera Dataset) via DAVISPoseRecordings."""
-    recordings = DAVISPoseRecordings(save_to, sequences=["shapes_rotation"])
+    recordings = DAVISPoseRecordings(save_to, sequences=DAVIS_POSE_SEQUENCES)
+    return WindowedRecordingDataset(
+        recordings,
+        get_events=lambda rec: rec[0],
+        get_targets=lambda rec: rec[1][0],
+        get_windows=lambda rec: rec[1][1],
+    )
+
+
+EYETRACKING_SENSOR_SIZE = (240, 180, 2)  # DAVIS240C, same sensor family as DAVIS Camera Pose
+EYETRACKING_RECORDINGS = 1  # curated subset -- tonic's full "train" split is 16 recordings, millions of events each
+
+
+class EyeTrackingRecordings(Dataset):
+    """One recording = one 3ET-Eyetracking video: DVS events + per-frame (x, y) gaze position, windowed by that recording's own frame timestamps."""
+
+    sensor_size = EYETRACKING_SENSOR_SIZE
+
+    def __init__(self, save_to: str, split: str = "train"):
+        base = tonic.datasets.ThreeET_Eyetracking(save_to=save_to, split=split)
+        self.data, self.targets = base.data[:EYETRACKING_RECORDINGS], base.targets[:EYETRACKING_RECORDINGS]
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx: int):
+        with h5py.File(self.data[idx], "r") as f:
+            raw = f["events"][:]
+        events = np.empty(len(raw), dtype=EVENT_XYTP_I64_DTYPE)
+        events["t"], events["x"], events["y"], events["p"] = raw[:, 0], raw[:, 1], raw[:, 2], raw[:, 3]
+
+        gaze = np.loadtxt(self.targets[idx]).astype(np.float32)  # (N, 2): x, y gaze position per frame
+        times_us = (np.loadtxt(self.data[idx].replace(".h5", "-frame_times.txt"), skiprows=2, usecols=1) * 1e6).astype(np.int64)
+
+        n = min(len(gaze), len(times_us) - 1)
+        windows = np.stack([times_us[:n], times_us[1:n + 1]], axis=1)
+        return events, (gaze[:n], windows)
+
+
+def load_eyetracking(save_to: str, split: str) -> WindowedRecordingDataset:
+    """3ET-Eyetracking gaze-position regression via EyeTrackingRecordings."""
+    recordings = EyeTrackingRecordings(save_to, split="train")
     return WindowedRecordingDataset(
         recordings,
         get_events=lambda rec: rec[0],
@@ -165,9 +211,9 @@ DATASET_REGISTRY = {
         "loader": load_davis_pose,
         "sensor_size": DAVIS_POSE_SENSOR_SIZE,
         "num_classes": 1,
-        "num_train_samples": None,
+        "num_train_samples": None,  # full DAVIS_POSE_SEQUENCES collection -- not measured until actually run
         "num_test_samples": None,
-        "storage_size_gb": 0.15,  # one sequence ("shapes_rotation") — the only one this loader downloads; full 27-sequence collection is ~7.7GB
+        "storage_size_gb": 7.7,  # full Event-Camera-Dataset collection (DAVIS_POSE_SEQUENCES, 24 sequences)
     },
     "4": {
         "name": "DVS128 Gesture",
@@ -175,8 +221,8 @@ DATASET_REGISTRY = {
         "has_train_split": True,
         "sensor_size": tonic.datasets.DVSGesture.sensor_size,
         "num_classes": 11,
-        "num_train_samples": 1_176,
-        "num_test_samples": 288,
+        "num_train_samples": 1_077,
+        "num_test_samples": 264,
         "storage_size_gb": 3.0,  # compressed tar, train+test combined; ~5GB extracted
     },
     "5": {
@@ -185,9 +231,19 @@ DATASET_REGISTRY = {
         "loader": load_dsec,
         "sensor_size": tonic.datasets.DSEC.sensor_size,
         "num_classes": 1,
-        "num_train_samples": None,
+        "num_train_samples": None,  # full DSEC_RECORDINGS optical-flow set -- not measured until actually run
         "num_test_samples": None,
-        "storage_size_gb": None,  # not measured — no confirmed figure documented yet
+        "storage_size_gb": None,  # full 18-recording optical-flow set, likely tens of GB -- not measured until actually run
+    },
+    "6": {
+        "name": "Eye Tracking",
+        "kind": "regression",
+        "loader": load_eyetracking,
+        "sensor_size": EYETRACKING_SENSOR_SIZE,
+        "num_classes": 1,
+        "num_train_samples": 1_599,
+        "num_test_samples": 400,
+        "storage_size_gb": 3.87,  # whole-dataset zip (all subjects/videos); only EYETRACKING_RECORDINGS of them get used
     },
 }
 
@@ -212,5 +268,10 @@ def resolve_dataset_entry(cfg) -> dict:
         if choice in DATASET_REGISTRY:
             return DATASET_REGISTRY[choice]
         logger.warning(f"[PIPELINE] Invalid selection '{choice}' — defaulting to N-MNIST")
+        return DATASET_REGISTRY["1"]
 
+    logger.warning(
+        f"[PIPELINE] DATASET_NAME '{cfg.DATASET_NAME}' matched no entry in DATASET_REGISTRY "
+        "and no interactive terminal is attached — defaulting to N-MNIST"
+    )
     return DATASET_REGISTRY["1"]

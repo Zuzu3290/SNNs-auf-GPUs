@@ -1,8 +1,12 @@
-# Open task — VRAM doesn't scale with sensor resolution (batch_size is per-dataset, not global)
+# Resolved — VRAM doesn't scale with sensor resolution (batch_size is per-dataset, not global)
 
-Status: **open, not yet resolved.** Discovered while smoke-testing N-Caltech101 through the
-real pipeline (`diagnostics/verify_dataset_load.py`). Filed here (not `docs/`) because it's an
-`event_data_workflow` / training-config concern, not a written-up report.
+Status: **resolved**, by `calibrate_batch_size()` (`learning/utilities.py`) — see
+`docs/functions.md` for the full mechanism. Not resolved by any of the candidate techniques
+listed below; `calibrate_batch_size` already existed independently and turned out to fully
+cover this failure mode (real per-dataset, per-GPU probe, on by default). Originally
+discovered while smoke-testing N-Caltech101 through the real pipeline
+(`diagnostics/verify_dataset_load.py`); kept here as the finding's derivation, now moved into
+`docs/` since `docs/functions.md` references it as the source.
 
 ## The concern, in one line
 
@@ -89,6 +93,11 @@ there instead of `None`.
    requirement, just how efficiently the allocator packs it, so it's a minor mitigation at
    best, not a fix on its own.
 
-None of the above has been applied to the production pipeline (`data_pipeline.py`,
-`learning/training.py`) — this file only records the finding and the option space so the
-decision doesn't get lost.
+None of the above was applied directly. `calibrate_batch_size()` resolved this instead: it
+already probes a real forward+backward pass at the dataset's actual sensor resolution and
+picks a batch size within a target VRAM band — which subsumes technique 1 (per-dataset value,
+but derived live instead of hand-set), already runs under AMP and grad accumulation if those
+are enabled (folding in 2 and 3's effect without a separate change), and made 4/5/6
+unnecessary for this specific failure mode. `training.calibrate_batch_size: false` still opts
+out of all of this and re-exposes the original global-batch_size risk — that's an explicit,
+documented trade a user takes on, not a gap.

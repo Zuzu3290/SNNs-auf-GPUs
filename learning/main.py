@@ -38,6 +38,12 @@ if __name__ == "__main__":
             "DVS128 Gesture) instead."
         )
 
+    if cfg.FRAMEWORK not in FRAMEWORK_MODULES:
+        raise ValueError(
+            f"training.framework='{cfg.FRAMEWORK}' has no model implementation wired up. "
+            f"Available: {sorted(FRAMEWORK_MODULES)}. ('spyx'/'bindsnet' exist as config "
+            "scaffolding in network_architecture.yaml only — no frameworks/snn_*.py backs them yet.)"
+        )
     module_name, class_name = FRAMEWORK_MODULES[cfg.FRAMEWORK]
     ModelClass = getattr(importlib.import_module(module_name), class_name)
 

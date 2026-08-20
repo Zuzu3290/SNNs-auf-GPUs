@@ -164,6 +164,11 @@ class Settings:
     @property
     def active_fw_cfg(self) -> dict:
         """Config dict for whichever framework is currently selected."""
+        if self.FRAMEWORK not in FW_TO_CFG_KEY:
+            raise ValueError(
+                f"training.framework='{self.FRAMEWORK}' has no FW_TO_CFG_KEY mapping. "
+                f"Available: {sorted(FW_TO_CFG_KEY)}."
+            )
         return self.FRAMEWORK_CFG[FW_TO_CFG_KEY[self.FRAMEWORK]]
 
     def compute_fc_in(self, sensor_h: int, sensor_w: int) -> int:

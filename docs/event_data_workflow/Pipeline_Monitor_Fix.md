@@ -59,3 +59,11 @@ Set it directly in `learning/main.py`, next to the existing
 ```python
 cfg.ENABLE_PIPELINE_MONITOR = True  # background CPU/GPU utilization + power sampling; set False to disable
 ```
+
+## Note for the report
+
+With the monitor on (the default), it costs nothing measurable — a 0.2s-interval
+read-only NVML/psutil poll on its own thread, never touching CUDA. With it off,
+GPU utilization%, power draw, and energy-per-epoch all report as `0.0` instead of
+being measured — GPU memory and every training metric (loss, accuracy, spike
+rate) stay real and correct either way, since they don't depend on this monitor.

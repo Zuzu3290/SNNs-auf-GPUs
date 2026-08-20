@@ -45,9 +45,6 @@ training:
   enable_pipeline_monitor: true  # Background CPU/GPU utilization sampler (utilization, power, clock,
                                 # sustained-idle warnings). Diagnostic only — set false to disable.
 
-dataset:
-  dataset_name: MNIST
-
 output:
   output_dir: ./outputs
   plot_dir: ./outputs/plots

@@ -17,6 +17,22 @@ rhythms**, and conflating them is the easiest way to misread how the
 system behaves.
 
 **Decided once, before training starts, then frozen for the entire run:**
+- *Which dataset* is loaded at all — `resolve_dataset_entry()`
+  (`event_data_workflow/dataset_registry.py`) matches `cfg.DATASET_NAME`
+  against `DATASET_REGISTRY` once, before any other decision in this list;
+  everything below (sensor shape, class count, cache sizing) derives from
+  whichever entry this step returns. `DATASET_REGISTRY` is the single
+  source of truth for which datasets exist — `configuration/SNN_module.yaml`
+  carries no dataset declaration of its own anymore, only the
+  `cfg.DATASET_NAME` lookup key this step consumes.
+
+  *Fixed:* a name that matched nothing in the registry used to fall
+  through silently to the N-MNIST default in any non-interactive run
+  (scripts, CI, notebooks) — no log line indicated the requested dataset
+  had never actually resolved. The non-interactive fallback now logs a
+  warning naming the exact `DATASET_NAME` that failed to match before
+  defaulting, so a typo'd or stale dataset name is visible in the run's
+  own log instead of silently substituting N-MNIST.
 - *Which* cache mechanism holds the data — RAM (`memory`) or disk
   (`disk`). Chosen by `AdaptiveCacheController.determine_dataset_strategy()`,
   called exactly once per split (train, test) inside

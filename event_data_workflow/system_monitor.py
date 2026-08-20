@@ -118,19 +118,28 @@ class SystemResourceMonitor:
             gpu_available_gb=gpu_available,
         )
 
-    def dataloader_config(self, device: torch.device, safety_margin_gb: float = 2.0) -> dict:
-        """num_workers/prefetch/pin_memory/persistent_workers. Uses every
-        physical core (not logical/hyperthreaded — a CPU-bound worker gets
-        little from a sibling hyperthread, and Windows CUDA pinned-memory
-        handles run out well before the logical-core count is reached),
-        trusting the OS scheduler for contention the way it already handles
-        any other multi-process workload. The one exception: num_workers=0
-        when available RAM is under safety_margin_gb, since a genuinely
-        RAM-starved host can't safely take on worker processes at all."""
+    def dataloader_config(self, device: torch.device, safety_margin_gb: float = 2.0,
+                          bytes_per_batch: float = 0.0, worker_ram_fraction: float = 0.25) -> dict:
+        """num_workers/prefetch/pin_memory/persistent_workers, capped from physical-core count by bytes_per_batch so large-sensor datasets don't overrun Windows' shared-memory commit limit."""
         cuda_enabled = device is not None and getattr(device, "type", "") == "cuda"
         metrics = self.snapshot()
         physical_cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
+        prefetch_factor = 2
         num_workers = physical_cores if metrics.available_ram_gb >= safety_margin_gb else 0
+
+        if num_workers > 0 and bytes_per_batch > 0:
+            budget_bytes = metrics.available_ram_gb * worker_ram_fraction * (1024 ** 3)
+            max_workers_by_ram = int(budget_bytes / (prefetch_factor * bytes_per_batch))
+            capped = max(0, min(num_workers, max_workers_by_ram))
+            if capped < num_workers:
+                logger.info(
+                    f"[PIPELINE] Worker count capped by RAM budget: {physical_cores} physical cores "
+                    f"would need ~{physical_cores * prefetch_factor * bytes_per_batch / (1024**3):.2f}GB "
+                    f"of in-flight worker shared memory ({bytes_per_batch / (1024**2):.1f}MB/batch x "
+                    f"prefetch_factor={prefetch_factor}), over the {worker_ram_fraction:.0%} of "
+                    f"{metrics.available_ram_gb:.2f}GB available RAM this policy allows -> using {capped} workers"
+                )
+            num_workers = capped
 
         logger.info(f"[PIPELINE] Available workers: {physical_cores} physical cores -> using {num_workers}")
 
@@ -144,12 +153,13 @@ class SystemResourceMonitor:
             logger.info(
                 f"[PIPELINE] GPU-only mode — num_workers=0, pin_memory=False "
                 f"(available RAM {metrics.available_ram_gb:.2f}GB below the "
-                f"{safety_margin_gb:.2f}GB safety margin)"
+                f"{safety_margin_gb:.2f}GB safety margin, or the RAM budget for "
+                f"this dataset's batch size capped it to zero)"
             )
         else:
             cfg = {
                 "num_workers":        num_workers,
-                "prefetch_factor":    2 if num_workers > 0 else None,
+                "prefetch_factor":    prefetch_factor if num_workers > 0 else None,
                 "pin_memory":         True,
                 "persistent_workers": num_workers > 0,
             }

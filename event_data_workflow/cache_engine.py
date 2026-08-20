@@ -47,6 +47,17 @@ class ComposedTransform:
         return x
 
 
+class FixedToFrame:
+    """Wraps tonic's ToFrame: its empty-input zero-fill branch returns (T,C,W,H), swapped vs its real (T,C,H,W) output -- breaks batching on non-square sensors."""
+    def __init__(self, to_frame):
+        self.to_frame = to_frame
+
+    def __call__(self, events):
+        frame = self.to_frame(events)
+        h, w = self.to_frame.sensor_size[1], self.to_frame.sensor_size[0]
+        return frame.swapaxes(-1, -2) if frame.shape[-2:] != (h, w) else frame
+
+
 class PreTransformedDataset(Dataset):
     """Applies a deterministic transform once, inside __getitem__, so that a
     wrapping MemoryCachedDataset/DiskCachedDataset caches the POST-transform

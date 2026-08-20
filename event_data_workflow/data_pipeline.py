@@ -8,7 +8,6 @@ import os
 import sys
 import logging
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
 logger = logging.getLogger(__name__)
@@ -21,12 +20,23 @@ import tonic.transforms as transforms
 import tonic.slicers as slicers
 import torchvision
 import tqdm as t
-from typing import Optional
-from skeleton import Settings, WorkflowSettings
-from .cache_engine import AdaptiveCacheController, measure_event_bytes
+from typing import Optional, Protocol
+from skeleton import WorkflowSettings
 from .system_monitor import monitor
+from .cache_engine import AdaptiveCacheController, ComposedTransform, FixedToFrame, measure_event_bytes
 from .dataset_registry import resolve_dataset_entry
 from .prefetch import AsyncGPUPrefetcher, CudaPrefetcher
+
+
+class DatasetAwareConfig(Protocol):
+    """Narrow structural contract this module needs from Settings, not the whole object."""
+    DEVICE: str
+    DATASET_NAME: str
+    BATCH_SIZE: int
+    TEMPORAL_SLICE_DURATION: int
+    TASK_TYPE: str
+
+    def apply_dataset_shape(self, sensor_h: int, sensor_w: int, in_channels: int, num_classes: int) -> None: ...
 
 
 class LabelToIndex:
@@ -172,13 +182,21 @@ class PrefetchedLoader:
             self.current.stop()
         async_stage = AsyncGPUPrefetcher(self.loader, queue_size=self.queue_size)
         self.current = CudaPrefetcher(async_stage, self.device, depth=self.depth)
-        yield from self.current
+        try:
+            yield from self.current
+        finally:
+            # Closes the leak from any abandoned iteration (a bare next(iter(self))
+            # probe, or a `break` mid-epoch) immediately, not just on the next
+            # __iter__() call — with num_workers=0 the background thread runs
+            # __getitem__ (including live_transform) in-process, so leaving it
+            # alive races PyTorch's global RNG against whatever runs next.
+            self.current.stop()
 
 
 class NeuromorphicEncoder:
     """Loads a dataset, caches it, and builds the train/test DataLoaders used by training."""
 
-    def __init__(self, cfg: Settings, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None, events_per_slice: int | None = None, calibrate_events_per_slice: bool | None = None):
+    def __init__(self, cfg: DatasetAwareConfig, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None, events_per_slice: int | None = None, calibrate_events_per_slice: bool | None = None):
 
         self.cfg = cfg
         self.wf  = WorkflowSettings()
@@ -249,6 +267,7 @@ class NeuromorphicEncoder:
         self.dataset_label = entry["name"]
         self.task_type = entry.get("kind", "classification")
         self.cfg.TASK_TYPE = self.task_type  # so SNNTrainer/SNNTester can branch without a separate cfg wiring step
+        # Re-derives the same shape main.py already applied, from the same locked DATASET_NAME — a provable no-op there, kept so this encoder works standalone too.
         self.cfg.apply_dataset_shape(
             sensor_h=sensor_size[1], sensor_w=sensor_size[0],
             in_channels=sensor_size[2], num_classes=entry["num_classes"],
@@ -268,7 +287,8 @@ class NeuromorphicEncoder:
             to_frame = transforms.ToFrame(sensor_size=sensor_size, n_time_bins=self.wf.N_TIME_BINS)
         else:
             to_frame = transforms.ToFrame(sensor_size=sensor_size, time_window=self.wf.TIME_WINDOW_US)
-        frame_tf = transforms.Compose([transforms.Denoise(filter_time=10000), to_frame])
+        # ComposedTransform, not tonic's own Compose -- Compose breaks out early once events go empty, skipping ToFrame's zero-fill.
+        frame_tf = ComposedTransform([transforms.Denoise(filter_time=10000), FixedToFrame(to_frame)])
 
         # One real transform, paid once here, so create_loaders() can size
         # DataLoader workers from the actual post-transform frame a batch is
@@ -293,8 +313,11 @@ class NeuromorphicEncoder:
 
         # train_augment is random, so it must run fresh every access rather
         # than get baked into a persistent cache — see determine_dataset_strategy.
-        train_augment = torchvision.transforms.RandomRotation([-10, 10])
-        train_tf = transforms.Compose([frame_tf, torch.from_numpy, train_augment])
+        # Toggled via data_workflow.yaml's augmentation.random_rotation_enabled.
+        train_augment = torchvision.transforms.RandomRotation([-10, 10]) if self.wf.RANDOM_ROTATION_ENABLED else None
+        logger.info(f"[PIPELINE] Random rotation augmentation: {'ENABLED' if train_augment is not None else 'DISABLED'}")
+        train_tf_steps = [frame_tf, torch.from_numpy] + ([train_augment] if train_augment is not None else [])
+        train_tf = transforms.Compose(train_tf_steps)
         test_tf = frame_tf
 
         dataset_prefix = self.dataset_label.replace(" ", "_")
@@ -342,16 +365,30 @@ class NeuromorphicEncoder:
         if getattr(source, "requires_single_process_loading", False):
             setattr(train_data, "requires_single_process_loading", True)
             setattr(test_data, "requires_single_process_loading", True)
+            self.warm_recording_cache(train_data, raw_train)
+            self.warm_recording_cache(test_data, raw_test)
 
         return train_data, test_data
+
+    def warm_recording_cache(self, cached_data, raw_subset) -> None:
+        """Populates cached_data in recording order (not raw_subset's random_split order) so a multi-recording WindowedRecordingDataset's single-recording load cache doesn't thrash on the first pass."""
+        for local_idx in sorted(range(len(raw_subset)), key=lambda i: raw_subset.indices[i]):
+            cached_data[local_idx]
 
     def create_loaders(self, train_data, test_data):
         """Build the train/test DataLoaders, with worker config sized from live
         RAM, wrapped in PrefetchedLoader so training/inference never need to
         wrap them a second time — batches arrive already device-resident."""
         batch_size = self.cfg.BATCH_SIZE
+        if len(train_data) < batch_size:  # calibrate_batch_size sizes from VRAM only, blind to a small dataset's real sample count
+            logger.info(f"[PIPELINE] Batch size {batch_size} > {len(train_data)} train samples -> clamping to {len(train_data)} so drop_last=True still yields a batch")
+            batch_size = max(1, len(train_data))
         device = torch.device(self.cfg.DEVICE)
-        base_cfg = monitor.dataloader_config(device, safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB)
+        base_cfg = monitor.dataloader_config(
+            device, safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
+            bytes_per_batch=self.batch_sample_bytes * batch_size,
+            worker_ram_fraction=self.wf.WORKER_RAM_FRACTION,
+        )
 
         # Regression targets (MVSEC's tuple, TUM-VIE's dict) aren't torch.tensor()-able —
         # tonic's own PadTensors would crash on them. Only classification datasets get it.
@@ -431,6 +468,8 @@ class NeuromorphicEncoder:
 
 
 def main() -> tuple[PrefetchedLoader, PrefetchedLoader]:
+    """Standalone entrypoint; Settings imported locally since only this function needs it."""
+    from skeleton import Settings
     cfg = Settings()
     encoder = NeuromorphicEncoder(cfg)
     return encoder.get_dataloaders()

@@ -30,7 +30,13 @@ class SNNTester:
         self.test_loader = test_loader
         self.cfg         = cfg
         self.device      = device
-        self.num_classes = cfg.NUM_CLASSES
+        self.num_classes = getattr(cfg, "NUM_CLASSES", None)
+        if self.num_classes is None:
+            raise ValueError(
+                "cfg.NUM_CLASSES is not set — call cfg.apply_dataset_shape() "
+                "(NeuromorphicEncoder.load_raw() does this automatically) "
+                "before constructing SNNTester."
+            )
         self.batch_log   = []
         self.visualize   = visualize
         self.viz_window  = None  # lazily built on first use — see show_frame()
@@ -150,7 +156,7 @@ class SNNTester:
         monitor.enter_phase("testing")
         self.model.eval_mode()
 
-        window_s = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
+        window_s = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION', 15000) / 1e6
 
         # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4.
         # self.test_loader is a PrefetchedLoader — probe_data is already device-resident.
@@ -239,6 +245,7 @@ class SNNTester:
         cv_isi_mean       = cv_isi.get("network_wide", 0.0)
 
         total_spikes             = 0
+        total_possible_spikes    = 0
         total_input_spikes       = 0.0
         total_latency_ms         = 0.0
         total_samples            = 0
@@ -258,7 +265,8 @@ class SNNTester:
             energy_pj       = batch_spikes * ENERGY_PER_SPIKE_PJ
             firing_rate_hz  = spike_rate * T / window_s if window_s > 0 else 0.0
 
-            total_spikes       += batch_spikes
+            total_spikes          += batch_spikes
+            total_possible_spikes += possible_spikes
             total_input_spikes += batch_input_spikes
             total_latency_ms   += latency_ms
             total_samples      += B
@@ -315,7 +323,10 @@ class SNNTester:
         # encoding/neuron dynamics compress more raw input activity into each output
         # spike; lower = the network stays closer to 1:1 with what it was shown.
         framework_ratio        = total_input_spikes / total_spikes if total_spikes > 0 else None
-        avg_spike_rate         = total_spikes / (len(self.batch_log) * timesteps_cfg * self.num_classes) if self.batch_log else 0.0
+        # Sum of per-batch possible-spike counts, not batch-count x T x C — the
+        # test loader has no drop_last, so the final batch's B can differ from
+        # every other batch's, and this must reflect each batch's real size.
+        avg_spike_rate         = total_spikes / total_possible_spikes if total_possible_spikes > 0 else 0.0
         avg_firing_rate_hz     = avg_spike_rate * timesteps_cfg / window_s if window_s > 0 else 0.0
         energy_per_sample_pj   = total_energy_pj / total_samples if total_samples > 0 else 0.0
         synops_energy_per_sample_pj = total_synops_pj / total_samples if total_samples > 0 else 0.0

@@ -148,3 +148,45 @@ For this project specifically, Option 1 is actually the right choice. You're com
 ---
 
 # Found Issue --- Status
+
+## Firing-rate Hz read a config key that doesn't exist — silently ignored `temporal_slice_duration`
+**Status: fixed.** `SNNTrainer.train()` (`learning/training.py`) and `SNNTester.run()`
+(`learning/inference.py`) computed `window_s` from
+`getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000)` — but `Settings` only ever sets
+`cfg.TEMPORAL_SLICE_DURATION` (no `_US` suffix; already in microseconds, the same value
+`data_pipeline.py` divides by 1000 to get ms). The `getattr` fallback (15000) happens to
+match the shipped YAML default, so this was invisible until
+`architecture.temporal_slice_duration` was ever changed away from 15000 — at which point
+every `firing_rate_hz` figure in both the per-epoch training report and the test summary
+would have silently kept using the stale default instead of the real value.
+**Fixed**: both call sites now read `cfg.TEMPORAL_SLICE_DURATION`.
+
+## `avg_spike_rate` denominator omitted batch size
+**Status: fixed.** `SNNTester.run()` (`learning/inference.py`) computed the test-run-wide
+`avg_spike_rate` as `total_spikes / (len(self.batch_log) * timesteps_cfg * self.num_classes)`.
+`total_spikes` sums spikes across every sample in every batch, but that denominator only
+counted one sample's worth of neuron-timestep slots per batch (missing `x B`). Result: the
+summary-level `avg_spike_rate` / `avg_firing_rate_hz` was inflated by roughly the average
+batch size, while the per-batch `spike_rate` printed for each individual batch
+(`possible_spikes = T * B * num_classes`) was already correct — the bug was only in the
+run-wide rollup.
+**Fixed**: a `total_possible_spikes` accumulator now sums each batch's real
+`possible_spikes` inside the loop, and `avg_spike_rate = total_spikes / total_possible_spikes`
+— correct regardless of whether batch size is constant across the run (the test loader has
+no `drop_last`, so the final batch legitimately can differ in size from the rest).
+
+## Dataset-name mismatch silently defaulted to N-MNIST with no log trace
+**Status: fixed.** `resolve_dataset_entry()` (`event_data_workflow/dataset_registry.py`):
+when `cfg.DATASET_NAME` matched nothing in `DATASET_REGISTRY` *and* stdin wasn't a TTY
+(any script/CI/notebook run), it fell straight through to `DATASET_REGISTRY["1"]`
+(N-MNIST) with zero logging — `logger.warning` only fired on the interactive
+invalid-choice path. `SNN_module.yaml` shipped with `dataset_name: MNIST`, which never
+matches `"N-MNIST"` (exact-uppercase match only), so every non-interactive run on the
+default config silently trained N-MNIST with no indication the requested name never
+resolved.
+**Fixed**: the non-interactive fallback now logs a warning naming the exact
+`DATASET_NAME` that failed to match before defaulting. Also removed the now-redundant
+`dataset:` block from `SNN_module.yaml` — `DATASET_REGISTRY` is the single source of
+truth for which datasets exist; the YAML-level name was never anything more than an
+initial lookup key into it, and the registry's own interactive-select/N-MNIST-default
+behavior in `resolve_dataset_entry()` covers the case where no name is configured at all.

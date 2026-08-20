@@ -182,7 +182,7 @@ class SNNTrainer:
         epochs    = self.cfg.EPOCHS
         num_iters = self.cfg.ITERA
         accum     = self.grad_accum_steps
-        window_s  = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
+        window_s  = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION', 15000) / 1e6
 
         autocast_ctx = (torch.autocast(device_type="cuda", dtype=torch.float16) if self.use_amp else nullcontext())
 
