@@ -219,9 +219,7 @@ Full mapping and evidence in the conversation this session, summarized: task
 the most directly and concretely answered by this session's work. Task 1
 (literature research) has real supporting material already in `docs/NN/`,
 `docs/Camera/`, `docs/Hardware/`. Tasks 2 and 5 are the honestly incomplete
-ones: BindsNET was built then deliberately removed in an earlier
-scope-convergence pass (recoverable from git history), Brian2CUDA was never
-attempted; and the real-time-suitability evaluator
+ones: Brian2CUDA was never attempted; and the real-time-suitability evaluator
 (`src/learning/realtime_eval.py`, `docs/frameworks/realtime_nir_evaluation.md`)
 is built and reasoned through against a literature-anchored deadline (105ms,
 from IBM's original DVS128 Gesture paper) but hasn't run against real data

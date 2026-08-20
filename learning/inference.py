@@ -151,11 +151,11 @@ class SNNTester:
         self.model.eval_mode()
 
         window_s = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
-        timesteps_cfg = getattr(self.cfg, 'TIMESTEPS', 25)
 
         # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4.
         # self.test_loader is a PrefetchedLoader — probe_data is already device-resident.
         probe_data, _ = next(iter(self.test_loader))
+        timesteps_cfg = probe_data.shape[0]  # loader yields [T, B, C, H, W] — the real BPTT unroll length, not a config value
         if self.model.tensor_format() == "BT":
             probe_data = probe_data.permute(1, 0, 2, 3, 4).contiguous()
         self.dense_macs_per_layer = measure_dense_macs(self.model, probe_data)

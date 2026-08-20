@@ -188,7 +188,9 @@ Thirteen new configuration keys, all with safe defaults:
 
 Training schedule adjusted: `epochs 10 → 5`, `iterations_per_epoch 100 → 300` (more batches per epoch, fewer epochs total).
 
-In `SNN_module.yaml` the current active config has `trades_enabled: true`, `activity_reg_enabled: true`, and `stdp_enabled: true` — all three objectives are live.
+At the time of this report, `SNN_module.yaml` had `trades_enabled: true`, `activity_reg_enabled: true`, and `stdp_enabled: true` — all three objectives live.
+
+> Since removed: STDP regularization (`stdp_enabled` and its `activity_reg.py` implementation) no longer exists in the codebase — this section is a historical record only.
 
 ---
 

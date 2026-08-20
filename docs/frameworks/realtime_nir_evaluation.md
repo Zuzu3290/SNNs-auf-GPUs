@@ -36,7 +36,7 @@ without hand-translating each framework's own parameterization.
 
 **Framework support, confirmed (not all sources agree — verified against
 primary docs, corrected once already in this project's own research):**
-- snnTorch, Norse, Sinabs, Spyx, Lava, Rockpool, Nengo — supported per the
+- snnTorch, Norse, Sinabs, Lava, Rockpool, Nengo — supported per the
   NIR paper / Open Neuromorphic.
 - **SpikingJelly — also supported**, via its own `nir_exchange` module
   (documented in SpikingJelly's own docs as "Export to and Import from NIR"),
@@ -55,22 +55,18 @@ SpikingJelly's own docs confirm cannot even run on CPU without conversion —
 CuPy is CUDA-only, and TPUs execute via XLA, not CUDA, so there's no path
 for SpikingJelly's kernels there at all.
 
-**Possible:** extracting a trained model's parameters via NIR, then executing
-those parameters on a different, TPU-native backend. Spyx (JAX + Haiku) is
-the one backend already in this project built for that — JAX has first-class
-TPU support, unlike the CUDA-kernel-bound frameworks. This is "SpikingJelly's
-trained parameters, executed by Spyx, on a TPU" — not "SpikingJelly on a TPU."
-
-Also relevant: `torch.compile` reportedly closes much of the raw speed gap
-between Norse and SpikingJelly, and SpikingJelly's backends are documented as
-`torch.compile`-compatible — a same-hardware way to separate "framework
-design difference" from "missing optimization" before reaching for a
-different accelerator.
+None of the four frameworks actually in this project have a TPU-native
+execution path, so cross-hardware portability isn't reachable through NIR
+export alone here. `torch.compile` reportedly closes much of the raw speed
+gap between Norse and SpikingJelly, and SpikingJelly's backends are
+documented as `torch.compile`-compatible — a same-hardware way to separate
+"framework design difference" from "missing optimization" before reaching
+for a different accelerator.
 
 ## Feasibility check, run against the real Norse model (not assumed)
 
 `norse.to_nir(model, sample_data=...)` against the actual `SNN_NORSE` instance
-(`src/learning/frameworks/snn_norse.py`, real `Settings()` config, input shape
+(`frameworks/snn_norse.py`, real `Settings()` config, input shape
 `[T=1, B=1, C=2, H=34, W=34]`) succeeds and returns a real `nir.NIRGraph`.
 `conv1`/`conv2` export as `nir.Conv2d` with the real trained weight tensors,
 `lif1`/`lif2`/`lif_out` export as `nir.CubaLIF` with the real instantiated
@@ -141,9 +137,9 @@ deprioritized in favor of the latency harness (item 3), which doesn't
 depend on it. Built and smoke-tested (synthetic batches, not real DVS128
 Gesture data — see below):
 
-- `src/learning/inference.py` — `SNNTester.run()` now reports p99 latency
+- `learning/inference.py` — `SNNTester.run()` now reports p99 latency
   alongside the existing p50/p90.
-- `src/learning/realtime_eval.py` — new `RealTimeLatencyEvaluator`: runs
+- `learning/realtime_eval.py` — new `RealTimeLatencyEvaluator`: runs
   `SNNTester` across multiple seeds (fresh model per seed via a
   `model_factory` callable), compares each seed's p99 against
   `configuration/data_workflow.yaml`'s `realtime.deadline_ms[dataset]`,
@@ -184,9 +180,6 @@ Gesture data — see below):
    multiple seeds.
 4. Extend to additional datasets already in `DATASET_REGISTRY` beyond
    N-MNIST, since each carries a different realistic real-time meaning.
-5. (Optional, lower priority) NIR-export a trained model into Spyx for a TPU
-   execution comparison — hardware-portability angle, not a SpikingJelly-on-
-   TPU claim.
 
 ## Sources
 
@@ -197,6 +190,5 @@ Gesture data — see below):
 - [SpikingJelly — GitHub](https://github.com/fangwei123456/spikingjelly)
 - [SpikingJelly: An open-source machine learning infrastructure platform for spike-based intelligence — Science Advances](https://www.science.org/doi/10.1126/sciadv.adi1480)
 - [Towards Scalable GPU-Accelerated SNN Training via Temporal Fusion (torch.compile finding)](https://arxiv.org/pdf/2408.00280)
-- [Spyx: A Library for Just-In-Time Compiled Optimization of Spiking Neural Networks](https://arxiv.org/pdf/2402.18994)
 - [A low power, fully event-based gesture recognition system — IBM Research (Amir et al., CVPR 2017)](https://research.ibm.com/publications/a-low-power-fully-event-based-gesture-recognition-system) — source of the 105ms real-time deadline figure
 - [Agreeing to Stop: Reliable Latency-Adaptive Decision Making via Ensembles of Spiking Neural Networks](https://arxiv.org/pdf/2310.16675) — context for the 25ms/225ms alternative framing

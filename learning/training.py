@@ -153,17 +153,6 @@ class SNNTrainer:
             return a.elapsed_time(b)
         return (b - a) * 1000.0
 
-    def save_checkpoint(self, path: str):
-        ckpt = {
-            **self.model.get_state(),
-            "scaler_state_dict": self.scaler.state_dict(),
-            "loss_history":      self.loss_hist,
-            "accuracy_history":  self.acc_hist,
-        }
-        if self.scheduler is not None:
-            ckpt["scheduler_state_dict"] = self.scheduler.state_dict()
-        torch.save(ckpt, path)
-
     def write_csv(self, path: str):
         if not self.epoch_log:
             return
@@ -175,19 +164,17 @@ class SNNTrainer:
             writer.writerows(self.epoch_log)
         print(f"[INFO] Training log saved -> {path}")
 
-    def train(self, checkpoint_dir: str, checkpoint_name: str = "best_model.pt", csv_path: str = "./outputs/data/training_results.csv") -> dict:
+    def train(self, csv_path: str = "./outputs/data/training_results.csv") -> dict:
         """Deferred-sync training loop: every per-batch metric (loss,
         accuracy, spike rate, forward/backward latency, SynOps energy) is
         accumulated as a GPU-resident tensor or an un-synced CUDA event —
-        no `.item()`/`.cpu()` call happens inside the batch loop. The single
-        exception is one small per-epoch scalar sync used purely to decide
-        whether to save the best-so-far checkpoint (a control-flow necessity,
-        not a terminal update — nothing prints there). Everything else,
-        including every epoch's printed report, is read back to host memory
-        in ONE bulk transfer after the very last epoch, right before
-        training hands off to inference. See SNN_GPU_Evaluation_Metrics.md
-        for why (per-batch `.item()` calls force a CUDA stream sync, which
-        stalls the GPU every iteration)."""
+        no `.item()`/`.cpu()` call happens inside the batch loop. Read back
+        to host memory once per epoch, at that epoch's own boundary (not
+        once for the whole run -- holding every epoch's events/tensors
+        until the very end exhausted CUDA resources on a real multi-epoch
+        run). See SNN_GPU_Evaluation_Metrics.md for why per-batch `.item()`
+        calls are avoided (forces a CUDA stream sync, stalling the GPU every
+        iteration)."""
         monitor.enter_phase("training")
         self.pipeline_monitor.start()
         self.pipeline_monitor.measure_idle_baseline()
@@ -195,19 +182,14 @@ class SNNTrainer:
         epochs    = self.cfg.EPOCHS
         num_iters = self.cfg.ITERA
         accum     = self.grad_accum_steps
-        timesteps = getattr(self.cfg, 'TIMESTEPS', 25)
         window_s  = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
 
         autocast_ctx = (torch.autocast(device_type="cuda", dtype=torch.float16) if self.use_amp else nullcontext())
 
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
-
-        best_acc = 0.0
-
         # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4.
         # self.train_loader is a PrefetchedLoader — probe_data is already device-resident.
         probe_data, _ = next(iter(self.train_loader))
+        timesteps = probe_data.shape[0]  # loader yields [T, B, C, H, W] — the real BPTT unroll length, not a config value
         if self.model.tensor_format() == "BT":
             probe_data = probe_data.permute(1, 0, 2, 3, 4).contiguous()
         self.dense_macs_per_layer = measure_dense_macs(self.model, probe_data)
@@ -227,12 +209,12 @@ class SNNTrainer:
 
             self.model.zero_grad()
 
-            fwd_start_idx = len(self.fwd_events)
-            bwd_start_idx = len(self.bwd_events)
-
             # self.train_loader is a PrefetchedLoader (event_data_workflow.data_pipeline) —
             # batches arrive already device-resident, no .to(device) needed below.
             for i, (data, targets) in enumerate(self.train_loader):
+                if i % 20 == 0:
+                    print(f"  [epoch {epoch + 1}/{epochs}] iter {i}/{num_iters}  "
+                          f"({time.perf_counter() - t0:.1f}s elapsed)", flush=True)
                 targets = targets.long()
 
                 if self.cfg.TRADES_ENABLED:
@@ -338,13 +320,28 @@ class SNNTrainer:
                     self.model.optimizer.step()
                 self.model.zero_grad()
 
-            # Exact per-epoch event counts — fwd_events always gains exactly n
-            # entries per epoch, but bwd_events can gain n+1 when the flush
-            # above fires (accum > 1, partial final batch), so slicing by `n`
-            # alone would silently misalign every later epoch's backward
-            # latency. Track real counts instead of inferring them.
-            fwd_count = len(self.fwd_events) - fwd_start_idx
-            bwd_count = len(self.bwd_events) - bwd_start_idx
+            # Read back and discard this epoch's CUDA events now, rather than
+            # holding all epochs' events (a torch.cuda.Event pair per batch)
+            # for the whole run -- on a real multi-epoch run that's thousands
+            # of live event handles never freed until the very end, which
+            # exhausted a CUDA resource and crashed a real 5-epoch/1175-batch
+            # run late in training. elapsed_time() does NOT block until both
+            # events complete -- it raises if they haven't -- so this sync is
+            # required, not optional; it's one sync per epoch boundary, not
+            # the per-batch sync the deferred-accumulation design avoids.
+            torch.cuda.synchronize()
+            fwd_latencies_ms = [self.elapsed_ms(p) for p in self.fwd_events]
+            bwd_latencies_ms = [self.elapsed_ms(p) for p in self.bwd_events]
+            self.fwd_events, self.bwd_events = [], []
+
+            # Same reasoning, same fix, for the per-batch loss/accuracy/spike-rate
+            # scalars: read back and clear each epoch's GPU-resident list here
+            # instead of holding all 5 epochs' worth (1175 tensors each) until
+            # the very end.
+            self.loss_hist.extend(t.item() for t in self.loss_hist_gpu)
+            self.acc_hist.extend(t.item() for t in self.acc_hist_gpu)
+            self.spike_rate_hist.extend(t.item() for t in self.spike_rate_hist_gpu)
+            self.loss_hist_gpu, self.acc_hist_gpu, self.spike_rate_hist_gpu = [], [], []
 
             if self.scheduler is not None:
                 self.scheduler.step()
@@ -359,22 +356,11 @@ class SNNTrainer:
             dynamic_power_w = energy_report["dynamic_power_w"] or 0.0
             gpu_active_s    = epoch_duration * gpu.get("gpu_util_avg_pct", 0.0) / 100.0
 
-            # The one necessary sync of the epoch: a host-visible accuracy
-            # scalar to decide whether this is the new best checkpoint.
-            # Control-flow only — nothing prints here, and every other
-            # accumulator above stays GPU-resident until finalize_epoch_reports.
-            epoch_acc_scalar = (epoch_acc_sum / n).item() if n > 0 else 0.0
-            checkpoint_saved_msg = None
-            if checkpoint_path is not None and epoch_acc_scalar > best_acc:
-                best_acc = epoch_acc_scalar
-                self.save_checkpoint(checkpoint_path)
-                checkpoint_saved_msg = f"Checkpoint saved (best: {best_acc * 100:.2f}%)"
-
             raw_epoch_records.append({
                 "epoch":              epoch + 1,
                 "n":                  n,
-                "fwd_count":          fwd_count,
-                "bwd_count":          bwd_count,
+                "fwd_latencies_ms":   fwd_latencies_ms,
+                "bwd_latencies_ms":   bwd_latencies_ms,
                 "epoch_loss_sum":     epoch_loss_sum,
                 "epoch_acc_sum":      epoch_acc_sum,
                 "epoch_spike_sum":    epoch_spike_sum,
@@ -388,7 +374,6 @@ class SNNTrainer:
                 "dynamic_power_w":    dynamic_power_w,
                 "gpu_active_s":       gpu_active_s,
                 "current_lr":         self.model.get_lr(),
-                "checkpoint_saved_msg": checkpoint_saved_msg,
             })
 
         # ---- Bulk transfer: the single sync point for everything
@@ -403,6 +388,10 @@ class SNNTrainer:
             print(f"  • Peak utilization : {overall['max_gpu_util_pct']}%")
             print(f"  • Peak VRAM used   : {overall['overall_peak_mem_gb']} GB / {overall['total_vram_gb']} GB  ({overall['overall_peak_mem_pct']}%)")
 
+        trend = self.pipeline_monitor.memory_trend()
+        if "ram_trend" in trend:
+            print(f"  • RAM trend        : {trend['ram_trend']}  ({trend['ram_start_gb']}GB -> {trend['ram_end_gb']}GB)")
+
         self.write_csv(csv_path)
 
         return {
@@ -413,27 +402,19 @@ class SNNTrainer:
         }
 
     def finalize_epoch_reports(self, raw_epoch_records: list, epochs: int, timesteps: int, window_s: float) -> None:
-        """The single bulk GPU->CPU sync for the whole run: converts every
-        GPU-resident accumulator and un-synced CUDA event from train() into
-        plain Python values, prints the full per-epoch report (deferred
-        rather than streamed live), and populates self.loss_hist /
-        self.acc_hist / self.spike_rate_hist / self.epoch_log exactly as
-        before."""
-        self.loss_hist       = [t.item() for t in self.loss_hist_gpu]
-        self.acc_hist        = [t.item() for t in self.acc_hist_gpu]
-        self.spike_rate_hist = [t.item() for t in self.spike_rate_hist_gpu]
-
-        fwd_latencies_ms = [self.elapsed_ms(p) for p in self.fwd_events]
-        bwd_latencies_ms = [self.elapsed_ms(p) for p in self.bwd_events]
-
+        """Prints the full per-epoch report (deferred rather than streamed
+        live) from data train() already synced back per-epoch --
+        self.loss_hist/acc_hist/spike_rate_hist and each record's
+        fwd/bwd_latencies_ms are already plain Python values by this point,
+        read back at each epoch's own boundary rather than held GPU-resident
+        for the whole run."""
         credit_assignment = self.model.credit_assignment()
 
-        fwd_idx = bwd_idx = 0
+        best_acc_so_far = 0.0
         for record in raw_epoch_records:
             n = record["n"]
-            fwd_count, bwd_count = record["fwd_count"], record["bwd_count"]
-            epoch_fwd = fwd_latencies_ms[fwd_idx:fwd_idx + fwd_count]; fwd_idx += fwd_count
-            epoch_bwd = bwd_latencies_ms[bwd_idx:bwd_idx + bwd_count]; bwd_idx += bwd_count
+            epoch_fwd = record["fwd_latencies_ms"]
+            epoch_bwd = record["bwd_latencies_ms"]
 
             train_loss  = (record["epoch_loss_sum"]  / n).item() if n else 0.0
             train_acc   = (record["epoch_acc_sum"]   / n).item() if n else 0.0
@@ -452,10 +433,16 @@ class SNNTrainer:
             gpu      = record["gpu"]
             gpu_diag = record["gpu_diag"]
 
+            is_best_epoch = train_acc > best_acc_so_far
+            if is_best_epoch:
+                best_acc_so_far = train_acc
+
             self.epoch_log.append({
                 "epoch":               record["epoch"],
                 "train_loss":          round(train_loss, 4),
                 "train_accuracy":      round(train_acc, 4),
+                "best_accuracy_so_far": round(best_acc_so_far, 4),
+                "is_best_epoch":       is_best_epoch,
                 "spike_rate":          round(train_spike, 4),
                 "firing_rate_hz":      round(firing_rate_hz, 2),
                 "learning_rate":       round(record["current_lr"], 6),
@@ -475,7 +462,7 @@ class SNNTrainer:
 
             print(f"\nEpoch {record['epoch']}/{epochs}")
             print(f"  • Train Loss     : {train_loss:.4f}")
-            print(f"  • Train Accuracy : {train_acc * 100:.2f}%")
+            print(f"  • Train Accuracy : {train_acc * 100:.2f}%" + ("  (best so far)" if is_best_epoch else ""))
             print(f"  • Spike Rate     : {train_spike:.4f}")
             print(f"  • Firing Rate    : {firing_rate_hz:.2f} Hz")
             print(f"  • Spike Buffer   : {buf_report}")
@@ -497,8 +484,6 @@ class SNNTrainer:
             print(f"  • Max Mem Reserved: {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB")
             if "gpu_temp_c" in gpu_diag:
                 print(f"  • GPU Temp/Clock : {gpu_diag['gpu_temp_c']}°C   SM {gpu_diag.get('sm_clock_mhz')} MHz   Mem {gpu_diag.get('mem_clock_mhz')} MHz")
-            if record["checkpoint_saved_msg"]:
-                print(f"  • {record['checkpoint_saved_msg']}")
 
     def plot_training(self, save_dir: str = "./outputs/plots") -> None:
         import matplotlib.pyplot as plt

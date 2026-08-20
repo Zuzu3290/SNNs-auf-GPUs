@@ -6,9 +6,9 @@ for the full design report.
 
 ## Components
 
-- **cache_engine.py** — `AdaptiveCacheController`. Selects between RAM, disk, hybrid, or no-cache strategy based on live system resources. VRAM is never a cache target — the GPU is only ever the training device, never a dataset storage location.
-- **system_monitor.py** — `SystemResourceMonitor` (shared instance: `monitor`). RAM/disk/VRAM probing, gated by an explicit `cuda_enabled` flag so a GPU that isn't requested never influences decisions. Also `PipelineMonitor` — background-thread CPU/GPU utilization/power/memory sampling, used both by the offline diagnostics harness and by `SNNTrainer`/`SNNTester` for per-epoch reporting.
-- **data_pipeline.py** — `NeuromorphicEncoder`. Wires cache and slicing together into a DataLoader-ready pipeline; also holds `dataloader_config()` (worker sizing), `create_sliced_dataset()` (temporal windowing), and `PrefetchedLoader` (background-thread CPU prefetch + CUDA-stream H2D overlap, wrapped around the DataLoaders `create_loaders()` builds).
+- **cache_engine.py** — `AdaptiveCacheController`. Selects between RAM or disk cache strategy based on live system resources. VRAM is never a cache target — the GPU is only ever the training device, never a dataset storage location.
+- **system_monitor.py** — `SystemResourceMonitor` (shared instance: `monitor`). RAM/disk/VRAM probing, gated by an explicit `cuda_enabled` flag so a GPU that isn't requested never influences decisions; also holds `dataloader_config()` (worker sizing, physical-core-based). Also `PipelineMonitor` — background-thread CPU/GPU utilization/power/memory sampling, used both by the offline diagnostics harness and by `SNNTrainer`/`SNNTester` for per-epoch reporting.
+- **data_pipeline.py** — `NeuromorphicEncoder`. Wires cache and slicing together into a DataLoader-ready pipeline; also holds `compute_prefetch_depth()` (live VRAM-based prefetch sizing), `create_sliced_dataset()` (temporal windowing), and `PrefetchedLoader` (background-thread CPU prefetch + CUDA-stream H2D overlap, wrapped around the DataLoaders `create_loaders()` builds).
 
 ## Correct Usage Order
 

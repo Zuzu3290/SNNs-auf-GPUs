@@ -4,6 +4,7 @@ recordings, cache them via AdaptiveCacheController, optionally slice into
 temporal windows, then wrap in DataLoaders.
 """
 from __future__ import annotations
+import os
 import sys
 import logging
 from pathlib import Path
@@ -12,6 +13,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
 logger = logging.getLogger(__name__)
 import numpy as np
+import psutil
 import torch
 from torch.utils.data import DataLoader, Dataset
 import tonic
@@ -189,6 +191,14 @@ class NeuromorphicEncoder:
         cuda_enabled = torch.device(cfg.DEVICE).type == "cuda"
         monitor.configure(cache_path=self.wf.CACHE_PATH, cuda_enabled=cuda_enabled)
 
+        metrics = monitor.snapshot()
+        physical_cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
+        logger.info(
+            f"[PIPELINE] System: {physical_cores} physical cores, "
+            f"{metrics.available_ram_gb:.2f}GB RAM free, "
+            f"{metrics.gpu_available_gb:.2f}GB VRAM free — before any dataset operation"
+        )
+
         self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else self.wf.TEMPORAL_SLICING_ENABLED
         self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)
         self.events_per_slice = events_per_slice if events_per_slice is not None else self.wf.EVENTS_PER_SLICE
@@ -259,6 +269,14 @@ class NeuromorphicEncoder:
         else:
             to_frame = transforms.ToFrame(sensor_size=sensor_size, time_window=self.wf.TIME_WINDOW_US)
         frame_tf = transforms.Compose([transforms.Denoise(filter_time=10000), to_frame])
+
+        # One real transform, paid once here, so create_loaders() can size
+        # DataLoader workers from the actual post-transform frame a batch is
+        # made of — not the pre-transform raw event bytes (which can be
+        # larger or smaller than the dense frame depending on sensor size).
+        first_frame = frame_tf(raw_train[0][0])
+        self.batch_sample_bytes = measure_event_bytes(first_frame)
+
         return raw_train, raw_test, frame_tf
 
     def apply_pipeline(self, raw_train, raw_test, frame_tf):
@@ -267,7 +285,9 @@ class NeuromorphicEncoder:
             cache_path=self.wf.CACHE_PATH,
             memory_safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
             memory_cache_threshold_gb=self.wf.MEMORY_CACHE_THRESHOLD_GB,
-            max_cached_recordings=self.wf.MAX_CACHED_RECORDINGS,
+            gpu_pressure_threshold=self.wf.GPU_PRESSURE_THRESHOLD,
+            memory_tier_headroom_fraction=self.wf.MEMORY_TIER_HEADROOM_FRACTION,
+            disk_tier_headroom_multiple=self.wf.DISK_TIER_HEADROOM_MULTIPLE,
         )
         controller = self.controller
 
@@ -277,9 +297,6 @@ class NeuromorphicEncoder:
         train_tf = transforms.Compose([frame_tf, torch.from_numpy, train_augment])
         test_tf = frame_tf
 
-        num_workers = self.cfg.NUM_WORKERS
-
-       
         dataset_prefix = self.dataset_label.replace(" ", "_")
 
         if self.use_temporal_slicing:
@@ -289,8 +306,8 @@ class NeuromorphicEncoder:
                 logger.info(f"[PIPELINE] Case A calibration: events_per_slice={self.events_per_slice} (from raw_train)")
 
             # Cache raw recordings first — slicing needs the raw timestamps.
-            cached_train = controller.determine_dataset_strategy(raw_train, split=f"{dataset_prefix}/train", num_workers=num_workers)
-            cached_test  = controller.determine_dataset_strategy(raw_test,  split=f"{dataset_prefix}/test",  num_workers=num_workers)
+            cached_train = controller.determine_dataset_strategy(raw_train, split=f"{dataset_prefix}/train")
+            cached_test  = controller.determine_dataset_strategy(raw_test,  split=f"{dataset_prefix}/test")
 
             metadata_dir = str(PROJECT_ROOT / "metadata" / dataset_prefix)
             train_data = create_sliced_dataset(cached_train,
@@ -313,8 +330,8 @@ class NeuromorphicEncoder:
         else:
             # Cache the deterministic frame transform; keep the random
             # augmentation out of the cached value (transform/live_transform split).
-            train_data = controller.determine_dataset_strategy(raw_train, transform=frame_tf, live_transform=train_augment, split=f"{dataset_prefix}/train", num_workers=num_workers)
-            test_data  = controller.determine_dataset_strategy(raw_test,  transform=test_tf,  split=f"{dataset_prefix}/test",  num_workers=num_workers)
+            train_data = controller.determine_dataset_strategy(raw_train, transform=frame_tf, live_transform=train_augment, split=f"{dataset_prefix}/train")
+            test_data  = controller.determine_dataset_strategy(raw_test,  transform=test_tf,  split=f"{dataset_prefix}/test")
 
         # tonic's DiskCachedDataset/MemoryCachedDataset and torch's Subset (from
         # random_split) don't forward attribute access to the wrapped dataset, so a
@@ -334,7 +351,7 @@ class NeuromorphicEncoder:
         wrap them a second time — batches arrive already device-resident."""
         batch_size = self.cfg.BATCH_SIZE
         device = torch.device(self.cfg.DEVICE)
-        base_cfg = monitor.dataloader_config(self.cfg, device)
+        base_cfg = monitor.dataloader_config(device, safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB)
 
         # Regression targets (MVSEC's tuple, TUM-VIE's dict) aren't torch.tensor()-able —
         # tonic's own PadTensors would crash on them. Only classification datasets get it.
@@ -354,9 +371,36 @@ class NeuromorphicEncoder:
         logger.info(f"[PIPELINE] Test batches  : {len(test_loader)}")
         logger.info(f"[PIPELINE] Batch size    : {batch_size}")
 
-        prefetch_depth = getattr(self.cfg, "PREFETCH_DEPTH", 8)
+        prefetch_depth = self.compute_prefetch_depth(batch_size)
+        logger.info(f"[PIPELINE] Prefetch depth: {prefetch_depth}")
         self.train_loader = PrefetchedLoader(train_loader, device, depth=prefetch_depth)
         self.test_loader  = PrefetchedLoader(test_loader,  device, depth=prefetch_depth)
+
+    def compute_prefetch_depth(self, batch_size: int) -> int:
+        """How many batches to keep queued ahead of the GPU, sized from live
+        VRAM and this dataset's real per-sample size — not a fixed constant,
+        so a large-sensor dataset (bigger batches) or a smaller card (less
+        headroom) both get a depth that actually fits, instead of one number
+        tuned for whichever dataset/GPU it happened to be set on.
+
+        This runs after calibrate_batch_size() has already freed its own
+        probe allocations but before real training has claimed anything —
+        a live VRAM snapshot at this point looks more available than it's
+        about to be. Subtracting batch_vram_fraction of total VRAM (the
+        share calibrate_batch_size already earmarked for the real training
+        step) before sizing the queue keeps the two from double-booking the
+        same memory. Fraction/min/max all read from resource_policy in
+        data_workflow.yaml, not fixed here."""
+        if not self.wf.CALIBRATE_PREFETCH_DEPTH:
+            return self.wf.PREFETCH_DEPTH_FALLBACK
+        batch_bytes = self.batch_sample_bytes * batch_size
+        metrics = monitor.snapshot()
+        reserved_for_training_gb = metrics.gpu_memory_gb * self.wf.BATCH_VRAM_FRACTION
+        true_available_gb = max(0.0, metrics.gpu_available_gb - reserved_for_training_gb)
+        if batch_bytes <= 0 or true_available_gb <= 0:
+            return self.wf.PREFETCH_DEPTH_MIN
+        budget_bytes = true_available_gb * self.wf.PREFETCH_VRAM_FRACTION * (1024 ** 3)
+        return max(self.wf.PREFETCH_DEPTH_MIN, min(int(budget_bytes / batch_bytes), self.wf.PREFETCH_DEPTH_MAX))
 
     def loader_kwargs(self, dataset, base_cfg: dict) -> dict:
         """Force single-process loading for a dataset that needs it (see requires_single_process_loading)."""

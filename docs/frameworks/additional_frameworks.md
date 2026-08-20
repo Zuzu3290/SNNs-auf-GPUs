@@ -5,17 +5,13 @@ added to give the GPU benchmarking work a DVS-native framework shape to compare.
 Switch to it the same way as the original three: set `training.framework: sinabs`
 in `configuration/SNN_module.yaml`.
 
-| `sinabs` | `SNN_SINABS` | `src/learning/frameworks/snn_sinabs.py` | Verified end-to-end on GPU |
+| `sinabs` | `SNN_SINABS` | `frameworks/snn_sinabs.py` | Verified end-to-end on GPU |
 
-"Verified end-to-end" means: instantiated through the real `Settings()` config pipeline, ran a real forward pass at production `BATCH_SIZE`/`TIMESTEPS`, confirmed
+"Verified end-to-end" means: instantiated through the real `Settings()` config pipeline, ran a real forward pass at production `BATCH_SIZE`/sequence length, confirmed
 the loss computes, confirmed weights actually change after one training step, and confirmed eval mode works.
 
-BindsNET and Spyx backends were explored (STDP-trained and JAX-based respectively)
-but were removed in a later cleanup as the project converged on its current scope.
-`training.framework` no longer accepts `bindsnet`/`spyx` — `main.py`'s `_MODELS`
-dispatch only wires up `norse`/`torch`/`sj`/`sinabs`. The debugging notes from that
-work (a real BindsNET 0.2.7 broadcast bug, a `torch._six` shim, a Spyx `hk.max_pool`
-axis bug) are preserved in git history if that work resumes.
+`training.framework` accepts `norse`/`torch`/`sj`/`sinabs` — `main.py`'s `MODELS`
+dispatch wires up exactly these four.
 
 ---
 

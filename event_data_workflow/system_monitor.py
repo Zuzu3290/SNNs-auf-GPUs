@@ -118,50 +118,43 @@ class SystemResourceMonitor:
             gpu_available_gb=gpu_available,
         )
 
-    def dataloader_config(self, settings, device: torch.device, safety_margin_gb: float = 2.0,
-                           worker_fraction: float = 0.3, batch_bytes: int = 0) -> dict:
-        """num_workers/prefetch/pin_memory/persistent_workers, sized from live
-        RAM and CPU count. Drops to num_workers=0 when the worker RAM budget
-        is under 500MB — a GPU-only embedded run with no host RAM headroom
-        for multiprocessing workers."""
+    def dataloader_config(self, device: torch.device, safety_margin_gb: float = 2.0) -> dict:
+        """num_workers/prefetch/pin_memory/persistent_workers. Uses every
+        physical core (not logical/hyperthreaded — a CPU-bound worker gets
+        little from a sibling hyperthread, and Windows CUDA pinned-memory
+        handles run out well before the logical-core count is reached),
+        trusting the OS scheduler for contention the way it already handles
+        any other multi-process workload. The one exception: num_workers=0
+        when available RAM is under safety_margin_gb, since a genuinely
+        RAM-starved host can't safely take on worker processes at all."""
         cuda_enabled = device is not None and getattr(device, "type", "") == "cuda"
         metrics = self.snapshot()
-        total_gb = max(1.0, metrics.available_ram_gb - safety_margin_gb)
-        worker_budget_gb = total_gb * worker_fraction
-        gpu_only = cuda_enabled and worker_budget_gb < 0.5
-        cpu_count = os.cpu_count() or 1
+        physical_cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
+        num_workers = physical_cores if metrics.available_ram_gb >= safety_margin_gb else 0
 
-        if gpu_only:
+        logger.info(f"[PIPELINE] Available workers: {physical_cores} physical cores -> using {num_workers}")
+
+        if cuda_enabled and num_workers == 0:
             cfg = {
                 "num_workers":        0,
                 "prefetch_factor":    None,
                 "pin_memory":         False,
                 "persistent_workers": False,
             }
-            logger.info("[PIPELINE] GPU-only mode — num_workers=0, pin_memory=False")
+            logger.info(
+                f"[PIPELINE] GPU-only mode — num_workers=0, pin_memory=False "
+                f"(available RAM {metrics.available_ram_gb:.2f}GB below the "
+                f"{safety_margin_gb:.2f}GB safety margin)"
+            )
         else:
-            worker_bytes = worker_budget_gb * (1024 ** 3)
-            if batch_bytes > 0:
-                max_workers = max(1, int(worker_bytes / (2 * batch_bytes)))
-            else:
-                max_workers = settings.NUM_WORKERS
-            max_workers = min(max_workers, cpu_count)
             cfg = {
-                "num_workers":        max_workers,
-                "prefetch_factor":    2 if max_workers > 0 else None,
+                "num_workers":        num_workers,
+                "prefetch_factor":    2 if num_workers > 0 else None,
                 "pin_memory":         True,
-                "persistent_workers": max_workers > 0,
+                "persistent_workers": num_workers > 0,
             }
 
         logger.info(f"[PIPELINE] DataLoader config: {cfg}")
-
-        workers = cfg.get("num_workers") or 0
-        if workers > 0 and workers < cpu_count // 2:
-            logger.warning(
-                f"[PIPELINE] num_workers={workers} but this machine has {cpu_count} logical "
-                f"CPUs — data loading may be CPU-bound well below GPU capacity. Consider "
-                f"raising training.num_workers in the config."
-            )
         return cfg
 
     def enter_phase(self, phase: str) -> None:
@@ -540,4 +533,23 @@ class PipelineMonitor:
                  "phase": v.phase}
                 for v in self.violations
             ],
+        }
+
+    def memory_trend(self) -> dict:
+        """Host-RAM and peak-VRAM trend across every sample collected since
+        start() — confirms usage stays flat/bounded across a run rather than
+        climbing toward exhaustion. Reuses the same samples summary()/
+        phase_summary() already collect; adds no new measurement."""
+        if not self.samples:
+            return {"n_samples": 0}
+        ram_start = self.samples[0].ram_available_gb
+        ram_end   = self.samples[-1].ram_available_gb
+        ram_drift = ram_end - ram_start
+        return {
+            "n_samples":      len(self.samples),
+            "ram_start_gb":   round(ram_start, 2),
+            "ram_end_gb":     round(ram_end, 2),
+            "ram_drift_gb":   round(ram_drift, 2),
+            "ram_trend":      "stable" if abs(ram_drift) < 0.5 else ("declining" if ram_drift < 0 else "growing"),
+            "gpu_peak_mem_gb": round(max(self.peak_mem_each), 2) if self.peak_mem_each else 0.0,
         }

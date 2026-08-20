@@ -120,7 +120,7 @@ class AdversarialEvaluator:
 
         print("\n[ADVERSARIAL ROBUSTNESS BENCHMARK]")
         print(f"  Clean accuracy : {clean_acc * 100:.2f}%\n")
-        print(f"  {'Attack':<14} {'ε':>6}  {'Accuracy':>10}  {'Drop':>8}")
+        print(f"  {'Attack':<14} {'eps':>6}  {'Accuracy':>10}  {'Drop':>8}")
         print(f"  {'-' * 44}")
 
         for epsilon in epsilons:

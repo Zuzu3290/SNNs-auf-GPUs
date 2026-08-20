@@ -12,9 +12,30 @@ temporal_slicing:
 
 cache:
   path: "./cache"
-  memory_safety_margin_gb: 2.0
-  memory_cache_threshold_gb: 6.0
-  max_cached_recordings: 20000
 
-# batch_size and num_workers live in SNN_module.yaml (training section)
+# Every threshold that governs the pipeline's live-resource judgment calls —
+# cache tier, GPU-pressure detection, batch/VRAM sizing — lives here in one
+# block, instead of scattered hardcoded constants across cache_engine.py /
+# system_monitor.py / utilities.py. Worker count is not here: it's computed
+# live from physical core count with no tunable knob (see dataloader_config()).
+resource_policy:
+  memory_safety_margin_gb: 2.0     # RAM always held back before sizing the cache tier and workers
+  memory_cache_threshold_gb: 6.0   # min free RAM before the "memory" cache tier is even considered
+  gpu_pressure_threshold: 0.75     # VRAM utilization ratio above which cache decisions avoid RAM,
+                                    # to not compete with CUDA's pinned-memory allocator
+  batch_vram_fraction: 0.35        # target VRAM fraction for auto-calibrated batch size (training AND inference --
+                                    # one policy covers both, see docs/functions.md)
+  batch_vram_band_min: 0.30        # reporting band around batch_vram_fraction -- below this, the log flags "outside policy band"
+  batch_vram_band_max: 0.35        # reporting band around batch_vram_fraction -- above this, the log flags "outside policy band"
+  max_batch_size: 256              # learning-quality ceiling on calibrated batch size (see docs/functions.md)
+  calibrate_prefetch_depth: true   # true: live VRAM probe (see compute_prefetch_depth(), docs/functions.md).
+                                    # false: prefetch_depth_fallback below is used exactly as written.
+  prefetch_depth_fallback: 8       # only used when calibrate_prefetch_depth is false
+  prefetch_vram_fraction: 0.10     # share of true-available VRAM the prefetch queue itself may occupy
+  prefetch_depth_min: 1            # floor on calibrated prefetch depth
+  prefetch_depth_max: 32           # ceiling on calibrated prefetch depth
+  memory_tier_headroom_fraction: 0.7   # dataset must fit under this fraction of available RAM to pick the "memory" cache tier
+  disk_tier_headroom_multiple: 1.2     # free disk space must exceed dataset size by this multiple to pick the "disk" cache tier
+
+# batch_size lives in SNN_module.yaml (training section)
 

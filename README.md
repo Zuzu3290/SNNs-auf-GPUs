@@ -17,7 +17,7 @@ sensor data (DVS / DAVIS cameras) with SNN training frameworks.
 
 | Location | Role |
 |----------|------|
-| `src/learning/`, `event_data_workflow/`, `skeleton/` | Training loop, framework wrappers, data pipeline, configuration |
+| `learning/`, `event_data_workflow/`, `skeleton/` | Training loop, framework wrappers, data pipeline, configuration |
 
 `SNNTrainer`/`SNNTester` run the plain per-framework PyTorch path.
 
@@ -26,8 +26,7 @@ sensor data (DVS / DAVIS cameras) with SNN training frameworks.
 ## Project Layout
 
 ```
-src/
-  learning/         SNN framework wrappers — SNNTorch, Norse, SpikingJelly, Sinabs
+learning/           SNN framework wrappers — SNNTorch, Norse, SpikingJelly, Sinabs
 skeleton/           Configuration and settings (SNN_module.yaml)
 event_data_workflow/ Neuromorphic data pipeline — caching, slicing, DataLoader
 docs/               Architecture references and hardware notes
@@ -38,7 +37,7 @@ docs/               Architecture references and hardware notes
 ## Entry Point
 
 ```
-python src/learning/main.py
+python learning/main.py
 ```
 
 Reads `SNN_module.yaml`, loads the neuromorphic dataset via
@@ -62,12 +61,15 @@ pipeline does not care what runs inside.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| SNNTorch | Working | Default |
+| SNNTorch | Working | |
 | Norse | Working | Current default in `main.py` |
 | SpikingJelly | Working | |
-| JAX + Flax/Haiku | Extension point | Trains via XLA; DLPack bridge to PyTorch at boundary |
-| TensorFlow | Extension point | DLPack bridge at boundary |
-| Custom / from scratch | Extension point | Return a PyTorch tensor — everything else is your choice |
+| Sinabs | Working | DVS-first, batch-first tensors |
+
+`ModelInterface` is PyTorch-only — every backend trains via standard PyTorch
+autograd (`loss.backward()` + `optimizer.step()`). Other backends were
+explored and later dropped rather than kept as extension points; see
+[`docs/frameworks/additional_frameworks.md`](docs/frameworks/additional_frameworks.md).
 
 For details on how each backend cooperates with the training loop, backward pass,
 and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
@@ -77,11 +79,11 @@ and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
 ## Current Capabilities
 
 - Four SNN backends: SNNTorch, Norse, SpikingJelly, Sinabs — switchable via config
-- Six event-camera datasets, selectable from the terminal at runtime — see
-  `event_data_workflow/data_pipeline.py`'s `DATASET_REGISTRY`
+- Five event-camera datasets, selectable from the terminal at runtime — see
+  `event_data_workflow/dataset_registry.py`'s `DATASET_REGISTRY`
 - Adaptive data pipeline: selects memory, disk, hybrid, or GPU-VRAM cache
   strategy automatically based on available system resources
-- Activity regularization and STDP as differentiable loss terms alongside BPTT
+- Activity regularization as a differentiable loss term alongside BPTT
 - Adversarial robustness evaluation via TRADES
 
 ---

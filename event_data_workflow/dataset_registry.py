@@ -1,11 +1,9 @@
 """
 Single source of truth for every dataset the pipeline can load: tonic class/
-loader, sensor shape, class count, sample counts, per-dataset training
-hyperparameters (epochs/batch_size/iterations — None means "use the
-SNN_module.yaml global default"; see apply_dataset_hyperparams), and
-storage_size_gb (compressed download size actually pulled by this entry's
-loader, not the extracted/on-disk footprint — None where no figure has been
-measured or documented; see docs/Event-Based_camera.md for sourcing).
+loader, sensor shape, class count, sample counts, and storage_size_gb
+(compressed download size actually pulled by this entry's loader, not the
+extracted/on-disk footprint — None where no figure has been measured or
+documented; see docs/Event-Based_camera.md for sourcing).
 """
 from __future__ import annotations
 import sys
@@ -150,10 +148,6 @@ DATASET_REGISTRY = {
         "num_train_samples": 60_000,
         "num_test_samples": 10_000,
         "storage_size_gb": 1.18,  # train.zip 965MB + test.zip 162MB
-        "epochs": None,
-        "batch_size": None,
-        "iterations": None,
-        "grad_accum_steps": None,
     },
     "2": {
         "name": "N-Caltech101",
@@ -164,18 +158,6 @@ DATASET_REGISTRY = {
         "num_train_samples": 6_967,
         "num_test_samples": 1_742,
         "storage_size_gb": 3.72,  # single zip, Mendeley-hosted
-        "epochs": None,
-        # BPTT holds all T=16 timesteps' activations live at once; at the
-        # global default batch_size=128, Conv1's output alone is ~4GB for
-        # this dataset's 240x180 sensor (vs N-MNIST's 34x34), which OOMs on
-        # an 8GB card -- confirmed empirically in vram_batch_scaling_task.md
-        # (batch_size=128 crashes inside SNN_TORCH.forward(), batch_size=16
-        # completes real forward+backward passes). grad_accum_steps=8 keeps
-        # the effective batch size at 16*8=128, matching the global default,
-        # so training dynamics stay comparable across datasets.
-        "batch_size": 16,
-        "iterations": None,
-        "grad_accum_steps": 8,
     },
     "3": {
         "name": "DAVIS Camera Pose",
@@ -186,10 +168,6 @@ DATASET_REGISTRY = {
         "num_train_samples": None,
         "num_test_samples": None,
         "storage_size_gb": 0.15,  # one sequence ("shapes_rotation") — the only one this loader downloads; full 27-sequence collection is ~7.7GB
-        "epochs": None,
-        "batch_size": None,
-        "iterations": None,
-        "grad_accum_steps": None,
     },
     "4": {
         "name": "DVS128 Gesture",
@@ -200,10 +178,6 @@ DATASET_REGISTRY = {
         "num_train_samples": 1_176,
         "num_test_samples": 288,
         "storage_size_gb": 3.0,  # compressed tar, train+test combined; ~5GB extracted
-        "epochs": None,
-        "batch_size": None,
-        "iterations": None,
-        "grad_accum_steps": None,
     },
     "5": {
         "name": "DSEC",
@@ -214,36 +188,16 @@ DATASET_REGISTRY = {
         "num_train_samples": None,
         "num_test_samples": None,
         "storage_size_gb": None,  # not measured — no confirmed figure documented yet
-        "epochs": None,
-        "batch_size": None,
-        "iterations": None,
-        "grad_accum_steps": None,
     },
 }
 
 
-def apply_dataset_hyperparams(cfg, entry: dict) -> None:
-    """Override cfg.EPOCHS/BATCH_SIZE/ITERA/GRAD_ACCUM_STEPS with this entry's
-    values, for whichever fields aren't None. Must run before NeuromorphicEncoder
-    builds DataLoaders and before SNNTrainer is constructed."""
-    if entry.get("epochs") is not None:
-        cfg.EPOCHS = int(entry["epochs"])
-    if entry.get("batch_size") is not None:
-        cfg.BATCH_SIZE = int(entry["batch_size"])
-    if entry.get("iterations") is not None:
-        cfg.ITERA = int(entry["iterations"])
-    if entry.get("grad_accum_steps") is not None:
-        cfg.GRAD_ACCUM_STEPS = int(entry["grad_accum_steps"])
-
-
 def resolve_dataset_entry(cfg) -> dict:
     """Match cfg.DATASET_NAME against DATASET_REGISTRY, else prompt interactively,
-    else default to N-MNIST. Applies the matched entry's hyperparams onto cfg
-    (see apply_dataset_hyperparams) before returning."""
+    else default to N-MNIST."""
     wanted = (cfg.DATASET_NAME or "").strip().upper()
     for entry in DATASET_REGISTRY.values():
         if entry["name"].upper() == wanted:
-            apply_dataset_hyperparams(cfg, entry)
             return entry
 
     if sys.stdin.isatty():
@@ -256,9 +210,7 @@ def resolve_dataset_entry(cfg) -> dict:
         except EOFError:
             choice = ""
         if choice in DATASET_REGISTRY:
-            apply_dataset_hyperparams(cfg, DATASET_REGISTRY[choice])
             return DATASET_REGISTRY[choice]
         logger.warning(f"[PIPELINE] Invalid selection '{choice}' — defaulting to N-MNIST")
 
-    apply_dataset_hyperparams(cfg, DATASET_REGISTRY["1"])
     return DATASET_REGISTRY["1"]

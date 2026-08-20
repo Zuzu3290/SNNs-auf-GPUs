@@ -15,7 +15,10 @@ import torch
 
 class AsyncGPUPrefetcher:
     """Fetches batches on a background thread, so preparing the next one
-    never makes the training loop wait."""
+    never makes the training loop wait. Load-bearing when num_workers==0
+    (no DataLoader worker process would otherwise overlap fetch with
+    compute); a smaller, still-cheap extra buffering layer when
+    num_workers>0, since the DataLoader's own workers already overlap."""
 
     def __init__(self, loader, queue_size: int = 2):
         self.loader = loader
@@ -115,9 +118,13 @@ class CudaPrefetcher:
                 pending.append(self.to_device(batch))
             return True
 
-        for _ in range(self.depth):
-            if not preload_one():
-                break
+        # Prime exactly one batch so training starts as soon as it's ready —
+        # priming all `depth` batches here would stall the first yield until
+        # `depth` fetches finish, which is invisible at depth=1 but a real
+        # startup delay at higher depth. The buffer fills to `depth` below,
+        # overlapped with training instead of blocking it.
+        if not preload_one():
+            return
 
         while pending:
             torch.cuda.current_stream(self.device).wait_stream(self.stream)
@@ -128,5 +135,7 @@ class CudaPrefetcher:
             # tensor crosses streams like this — see PyTorch's CUDA stream docs).
             data.record_stream(torch.cuda.current_stream(self.device))
             targets.record_stream(torch.cuda.current_stream(self.device))
-            preload_one()
+            while len(pending) < self.depth - 1:
+                if not preload_one():
+                    break
             yield data, targets

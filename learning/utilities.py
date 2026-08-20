@@ -315,12 +315,16 @@ def safe_empty_cache() -> None:
         pass
 
 
-def measure_batch_vram(model_cls, cfg, device, batch_size: int) -> Optional[float]:
+def measure_batch_vram(model_cls, cfg, device, batch_size: int, timesteps: int) -> Optional[float]:
     """One real forward+backward pass at batch_size, on synthetic data at
     the exact target shape, with AMP autocast+GradScaler (cfg.USE_AMP) and
     gradient accumulation (cfg.GRAD_ACCUM_STEPS micro-batches, peak read
     after the last one) -- mirrors SNNTrainer's own use_amp/grad_accum_steps
     setup. Returns peak VRAM in GB, or None on OOM.
+
+    timesteps must be the real per-sample frame count (WorkflowSettings.N_TIME_BINS,
+    from data_workflow.yaml) -- the actual BPTT unroll length, not a separately
+    configured constant.
 
     Catches both torch.cuda.OutOfMemoryError and torch.AcceleratorError --
     sibling exception classes on this PyTorch build, neither a subclass of
@@ -334,7 +338,7 @@ def measure_batch_vram(model_cls, cfg, device, batch_size: int) -> Optional[floa
         grad_accum_steps = max(1, getattr(cfg, "GRAD_ACCUM_STEPS", 1))
         scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
         for _ in range(grad_accum_steps):
-            data = torch.rand(cfg.TIMESTEPS, batch_size, cfg.IN_CHANNELS, cfg.SENSOR_H, cfg.SENSOR_W, device=device)
+            data = torch.rand(timesteps, batch_size, cfg.IN_CHANNELS, cfg.SENSOR_H, cfg.SENSOR_W, device=device)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_amp):
                 spk_rec = model(data)
                 loss = spk_rec.float().sum()
@@ -351,22 +355,23 @@ def measure_batch_vram(model_cls, cfg, device, batch_size: int) -> Optional[floa
         return None
 
 
-# The dataset's batch must never be the constraint on how large the model
-# itself can grow -- so calibration targets a bounded VRAM fraction, not
-# the largest batch size that avoids OOM. One policy, covers both training
-# and inference (inference's actual footprint is smaller, so a size that
-# fits training fits inference too).
+
 BATCH_VRAM_BAND_MIN = 0.30
-BATCH_VRAM_BAND_OPTIMAL = 0.34
+BATCH_VRAM_BAND_OPTIMAL = 0.35
 BATCH_VRAM_BAND_MAX = 0.35
 
 
-def calibrate_batch_size(model_cls, cfg, device, data_vram_fraction: float = BATCH_VRAM_BAND_OPTIMAL,
+def calibrate_batch_size(model_cls, cfg, device, timesteps: int, data_vram_fraction: float = BATCH_VRAM_BAND_OPTIMAL,
+                          band_min: float = BATCH_VRAM_BAND_MIN, band_max: float = BATCH_VRAM_BAND_MAX,
                           max_batch_size: int = 256, min_batch_size: int = 1,
                           baseline_sensor_px: int = 34 * 34, baseline_batch_size: int = 128) -> int:
     """Picks a batch size that fits within data_vram_fraction of total VRAM
     (default: the 30-35% policy band above), instead of the largest one
     that avoids OOM.
+
+    timesteps must be the real per-sample frame count (WorkflowSettings.N_TIME_BINS,
+    from data_workflow.yaml), passed through to measure_batch_vram so the probe
+    matches the actual BPTT unroll length.
 
     Starting guess: baseline_batch_size scaled by sensor pixel-count ratio
     against baseline_sensor_px. One probe at the guess, then one probe at a
@@ -381,28 +386,29 @@ def calibrate_batch_size(model_cls, cfg, device, data_vram_fraction: float = BAT
     guess = max(min_batch_size, int(baseline_batch_size * (baseline_sensor_px / baseline_px)))
     guess = min(guess, max_batch_size)
 
-    peak_gb = measure_batch_vram(model_cls, cfg, device, guess)
+    peak_gb = measure_batch_vram(model_cls, cfg, device, guess, timesteps)
     while peak_gb is None and guess > min_batch_size:
         guess //= 2
-        peak_gb = measure_batch_vram(model_cls, cfg, device, guess)
+        peak_gb = measure_batch_vram(model_cls, cfg, device, guess, timesteps)
     if peak_gb is None:
-        _log_stable_batch_size(cfg, min_batch_size, 0.0, total_vram_gb)
+        _log_stable_batch_size(cfg, min_batch_size, 0.0, total_vram_gb, band_min, band_max)
         return min_batch_size
 
     scaled = max(min_batch_size, min(max_batch_size, int(guess * (vram_budget_gb / peak_gb))))
     if scaled == guess:
-        _log_stable_batch_size(cfg, guess, peak_gb, total_vram_gb)
+        _log_stable_batch_size(cfg, guess, peak_gb, total_vram_gb, band_min, band_max)
         return guess  # already at budget, no second probe needed
 
-    scaled_peak_gb = measure_batch_vram(model_cls, cfg, device, scaled)
+    scaled_peak_gb = measure_batch_vram(model_cls, cfg, device, scaled, timesteps)
     if scaled_peak_gb is not None:
-        _log_stable_batch_size(cfg, scaled, scaled_peak_gb, total_vram_gb)
+        _log_stable_batch_size(cfg, scaled, scaled_peak_gb, total_vram_gb, band_min, band_max)
         return scaled
-    _log_stable_batch_size(cfg, guess, peak_gb, total_vram_gb)
+    _log_stable_batch_size(cfg, guess, peak_gb, total_vram_gb, band_min, band_max)
     return guess  # scaled estimate didn't hold up -- fall back to the already-confirmed value
 
 
-def _log_stable_batch_size(cfg, batch_size: int, peak_gb: float, total_vram_gb: float) -> None:
+def _log_stable_batch_size(cfg, batch_size: int, peak_gb: float, total_vram_gb: float,
+                            band_min: float = BATCH_VRAM_BAND_MIN, band_max: float = BATCH_VRAM_BAND_MAX) -> None:
     """One-line notification: the stable batch size found for this
     dataset, and whether it landed inside the policy band. Uses print(),
     not logger.info() -- logger.info has no attached handler anywhere in
@@ -411,7 +417,7 @@ def _log_stable_batch_size(cfg, batch_size: int, peak_gb: float, total_vram_gb: 
     """
     dataset = getattr(cfg, "DATASET_NAME", None) or "unknown dataset"
     pct = 100 * peak_gb / total_vram_gb if total_vram_gb else 0.0
-    in_band = BATCH_VRAM_BAND_MIN * 100 <= pct <= BATCH_VRAM_BAND_MAX * 100
+    in_band = band_min * 100 <= pct <= band_max * 100
     band_note = "within policy band" if in_band else "OUTSIDE policy band"
     print(f"[CALIBRATE] {dataset}: stable batch_size={batch_size} at {pct:.1f}% VRAM ({band_note})", flush=True)
 

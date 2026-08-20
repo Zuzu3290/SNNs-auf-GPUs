@@ -36,7 +36,7 @@ and temporal slicing (folded in from since-removed `pipeline_coordinator.py`/
 ## Quick Start
 
 ```bash
-python src/learning/main.py
+python learning/main.py
 ```
 
 All hyperparameters are in `SNN_module.yaml` at the project root.
@@ -46,6 +46,5 @@ All hyperparameters are in `SNN_module.yaml` at the project root.
 - **Four framework backends** — Norse, SpikingJelly, SNNTorch, Sinabs, switchable from `main.py`
 - **TRADES robustness training** — adversarial perturbation during training
 - **Activity regularisation** — prevents dead and saturated neurons
-- **STDP loss** — biologically inspired spike-timing correlation term
 - **Adaptive caching** — automatically picks RAM, disk, or hybrid caching based on available resources
 - **GPU stats** — per-epoch VRAM usage tracked during training

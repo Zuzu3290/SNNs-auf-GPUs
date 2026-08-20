@@ -14,7 +14,7 @@ meaningful rather than apples-to-oranges.
 
 | | This project | Haseeb's `Benchmark_SNN_Frameworks` |
 |---|---|---|
-| **Scope** | Full research platform: 6 backends (SNNTorch, Norse, SpikingJelly, Sinabs, BindsNET, Spyx), 6 event-camera datasets, adaptive caching, adversarial (TRADES) training, regression + classification | Single focused experiment: 3 backends (snnTorch, SpikingJelly, Norse), 1 dataset (N-MNIST), no adversarial/regression scope |
+| **Scope** | Full research platform: 4 backends (SNNTorch, Norse, SpikingJelly, Sinabs), 5 event-camera datasets, adaptive caching, adversarial (TRADES) training, regression + classification | Single focused experiment: 3 backends (snnTorch, SpikingJelly, Norse), 1 dataset (N-MNIST), no adversarial/regression scope |
 | **Depth on the 3 shared frameworks** | Norse: real full-scale run now exists (5 epochs, ~51k/60k train samples, full 10k test set, 1 seed — see §4.1). snnTorch/SpikingJelly: still diagnostic-only (1 epoch, 20 batches) | Production-grade — 5 epochs, full dataset, 3 seeds × 3 frameworks = 9 runs, mean ± std |
 | **Neuron equivalence verified before benchmarking?** | No — parameters chosen by design note (`base_line implmentation.md`) but never numerically verified to overlay | **Yes** — membrane traces + spike times checked to agree to `1.19e-07` (float32 limit) before any run counted |
 | **Statistical treatment** | None — single run per framework, no error bars | Full — mean ± std over 3 seeds, explicit noise-floor derivation, paired vs. unpaired reading discipline |
@@ -282,8 +282,8 @@ diagnostic run vs. a seeded, verified, noise-floor-aware one.
 
 To keep this balanced — the comparison isn't one-directional:
 
-- **6 backends vs. 3** — Sinabs, BindsNET, and Spyx are exercised end-to-end
-  here; Haseeb's repo doesn't touch them.
+- **4 backends vs. 3** — Sinabs is exercised end-to-end here in addition to
+  the 3 Haseeb's repo covers.
 - **Adversarial robustness (TRADES/FGSM/PGD)** — no equivalent in Haseeb's
   repo. The 2026-08-11 Norse run's `outputs/data/adversarial_robustness.csv`
   is a real result: 96.28% clean → 92.06% under FGSM (ε=0.01) → collapses to

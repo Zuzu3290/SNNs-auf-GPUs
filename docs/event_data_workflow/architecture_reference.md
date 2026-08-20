@@ -17,13 +17,15 @@ rhythms**, and conflating them is the easiest way to misread how the
 system behaves.
 
 **Decided once, before training starts, then frozen for the entire run:**
-- *Which* cache mechanism holds the data — RAM (`memory`), disk (`disk`),
-  or both (`hybrid`). Chosen by `AdaptiveCacheController.
-  determine_dataset_strategy()`, called exactly once per split (train,
-  test) inside `NeuromorphicEncoder.build()`.
+- *Which* cache mechanism holds the data — RAM (`memory`) or disk
+  (`disk`). Chosen by `AdaptiveCacheController.determine_dataset_strategy()`,
+  called exactly once per split (train, test) inside
+  `NeuromorphicEncoder.build()`.
 - *How many* DataLoader worker processes run, and their pin-memory/
   prefetch settings — `dataloader_config()`, also called once.
-- *How deep* the GPU-side prefetch buffer is (`PREFETCH_DEPTH`).
+- *How deep* the GPU-side prefetch buffer is — `compute_prefetch_depth()`,
+  live-computed from free VRAM and this dataset's real per-sample size
+  (see the calibration section below), not a fixed constant.
 - The device (CPU/GPU) and whether GPU probing is even active
   (`cuda_enabled`).
 
@@ -63,9 +65,9 @@ identical up to the slice boundary, instead of one.
 structured event arrays (t, x, y, polarity) via `tonic`. No transform, no
 caching yet. This step is cheap; nothing expensive has happened.
 
-**2. Cache lookup.** The wrapping cache object (`MemoryCachedDataset`,
-`DiskCachedDataset`, or `BoundedRecordingCache`, whichever tier was
-picked once at startup) checks whether this index has been seen before.
+**2. Cache lookup.** The wrapping cache object (`MemoryCachedDataset` or
+`DiskCachedDataset`, whichever tier was picked once at startup) checks
+whether this index has been seen before.
 
 - **Hit** (already cached): the *already-transformed* result is returned
   directly. No Denoise, no ToFrame, no recomputation — this is the entire
@@ -173,5 +175,41 @@ their sizes differ enough to cross a threshold) and its own cache
 directory (`cache/{split}/`). Within a split, the cache persists for the
 entire run — it is never cleared or reset between epochs. Epoch 2 of
 training sees exactly the same cache state epoch 1 left behind: whatever
-was cached (or evicted, in bounded `hybrid` mode) stays that way until
-the process exits or `clear_cache()` is called explicitly.
+was cached stays that way until the process exits or `clear_cache()` is
+called explicitly.
+
+---
+
+## Batch size, iterations, and epochs — what's calibrated, what's not
+
+Three numbers govern how much data a run actually sees, and only two of
+them are live-calibrated — the split is deliberate, not an oversight.
+
+**Batch size and iterations-per-epoch are resource/coverage facts** —
+they have a correct answer derivable from the hardware and the dataset,
+so calibrating them removes a class of user error (under-using VRAM,
+or training on a partial/oversampled epoch without realizing it):
+
+- `calibrate_batch_size()` (`learning/utilities.py`) probes the real GPU
+  with a real forward+backward pass and picks the batch size that lands
+  in a target VRAM band, capped by `resource_policy.max_batch_size` — a
+  separate, learning-quality ceiling (large-batch training trades
+  gradient-update count for smoother/noisier gradients), independent of
+  how much VRAM is actually free. See `docs/functions.md` for the full
+  two-probe mechanism and why the two constraints can disagree.
+- Once batch size is settled, `learning/main.py` recomputes
+  `cfg.ITERA` (`training.iterations_per_epoch`) as
+  `len(train_loader.loader)` — one epoch becomes (up to `batch_size - 1`
+  samples short of) one real pass over the actual training set, not a
+  fixed iteration count picked independently of batch size or dataset
+  size. `len(DataLoader)` rather than `ceil(N/batch_size)` since the
+  loader's own length already accounts for `drop_last=True`.
+- One toggle gates both: `training.calibrate_batch_size` in
+  `SNN_module.yaml`. `false` uses `batch_size` and
+  `iterations_per_epoch` exactly as written — manual control, no probe.
+
+**Epoch count is a convergence judgment call, not a resource fact** — no
+live measurement tells you "the model has learned enough," only a human
+deciding from loss curves, time budget, or when to stop. So
+`training.epochs` is never calibrated, toggle on or off: it's the one
+number this pipeline always leaves to whoever's running it.

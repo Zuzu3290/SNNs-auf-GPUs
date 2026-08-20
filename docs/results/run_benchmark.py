@@ -169,7 +169,6 @@ def run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, 
 
     t0 = time.perf_counter()
     train_results = trainer.train(
-        checkpoint_dir=str(ROOT / "checkpoints" / name),
         csv_path=str(data_dir / f"{name}_train.csv"),
     )
     train_time_s = time.perf_counter() - t0

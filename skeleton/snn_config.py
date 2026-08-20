@@ -41,7 +41,6 @@ class Settings:
         self.TEMPORAL_SLICE_DURATION = int(architecture.get("temporal_slice_duration", 15000))
         self.TEMPORAL_OVERLAP        = int(architecture.get("temporal_overlap", 0))
         self.TOTAL_TIME_WINDOW       = int(architecture.get("total_time_window", 30000))
-        self.NUM_WORKERS             = int(architecture.get("num_workers", 2))
 
         # Input control (reserved for future use — expose when input_mode is needed)
         # self.INPUT_MODE      = input_cfg.get("input_mode", "2D")
@@ -67,15 +66,15 @@ class Settings:
         # Training parameters
         self.EPOCHS                   = int(training.get("epochs", 10))
         self.ITERA                    = int(training.get("iterations_per_epoch", 100))
-        self.TIMESTEPS                = int(training.get("timesteps", 25))
         self.BATCH_SIZE               = int(training.get("batch_size", 128))
+        # When False, BATCH_SIZE above is used as-is and calibrate_batch_size()
+        # is never called — see docs/functions.md for why this exists.
+        self.CALIBRATE_BATCH_SIZE     = bool(training.get("calibrate_batch_size", True))
         self.NAP_TIMES                = int(training.get("nap_times", 1))
         self.LEARNING_RATE             = float(training.get("learning_rate", 0.001))
         self.WEIGHT_DECAY              = float(training.get("weight_decay", 0.0001))
         self.DEVICE                    = training.get("device", "cuda")
         self.DDP                      = training.get("DDP", "OFF")
-        self.NUM_WORKERS              = int(training.get("num_workers", 4))
-        self.PREFETCH_DEPTH            = int(training.get("prefetch_depth", 8))
         self.USE_AMP                  = bool(training.get("use_amp", True))
         self.GRAD_ACCUM_STEPS         = max(1, int(training.get("grad_accum_steps", 1)))
         self.ENABLE_PIPELINE_MONITOR  = bool(training.get("enable_pipeline_monitor", True))
@@ -188,6 +187,7 @@ class Settings:
         self.IN_CHANNELS = int(in_channels)
         self.NUM_CLASSES = int(num_classes)
         self.FC_IN       = self.compute_fc_in(self.SENSOR_H, self.SENSOR_W)
+        self.network_structure = self.generate_network_structure()
 
     def load_yaml(self, yaml_path):
         with open(yaml_path, "r") as file:
@@ -239,8 +239,9 @@ class Settings:
         # Append hidden layers
         layers.extend(hidden_layers)
 
-        # Append output layer separately
-        layers.append(self.OUTPUT_SIZE)
+        # Append output layer separately — the real per-dataset class count
+        # once apply_dataset_shape() has run, else the legacy YAML default.
+        layers.append(getattr(self, "NUM_CLASSES", self.OUTPUT_SIZE))
 
         return layers
 
@@ -248,7 +249,7 @@ class Settings:
         W      = 76
         fw     = self.FRAMEWORK.upper()
         fw_cfg = self.active_fw_cfg
-        sep    = "─" * (W - 4)
+        sep    = "-" * (W - 4)
 
         def section(title):
             print(f"\n  [{title}]")
@@ -271,7 +272,7 @@ class Settings:
         row("FC input (auto)", str(self.FC_IN))
         num_classes = getattr(self, "NUM_CLASSES", None)
         row("Output classes",  str(num_classes) if num_classes is not None else "N/A (regression target)")
-        row("Network structure", " → ".join(str(n) for n in self.network_structure))
+        row("Network structure", " -> ".join(str(n) for n in self.network_structure))
 
         cfg_key      = FW_TO_CFG_KEY[self.FRAMEWORK]
         neuron_types = self.NEURON_TYPES.get(cfg_key, {})
@@ -287,14 +288,12 @@ class Settings:
         section("TRAINING")
         row("Epochs",             str(self.EPOCHS))
         row("Iterations / epoch", str(self.ITERA))
-        row("Timesteps (T)",      str(self.TIMESTEPS))
         row("Batch size",         str(self.BATCH_SIZE))
         row("Learning rate",      str(self.LEARNING_RATE))
         row("Weight decay",       str(self.WEIGHT_DECAY))
         row("LR scheduler",       self.LR_SCHEDULER)
         row("Grad accum steps",   str(self.GRAD_ACCUM_STEPS))
         row("AMP (mixed prec.)",  "ENABLED" if self.USE_AMP else "DISABLED")
-        row("DataLoader workers", str(self.NUM_WORKERS))
 
         section("REGULARIZATION")
         if self.TRADES_ENABLED:

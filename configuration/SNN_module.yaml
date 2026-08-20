@@ -10,10 +10,15 @@ architecture:
 training:
   framework: sj           # YAML selector: norse | torch | sj | sinabs
   device: cuda
-  epochs: 5
+  epochs: 3              # one epoch = one full pass over the training set; more epochs = more chances to learn.
+                          # not calibrated -- your call how many repeated passes the model needs.
   iterations_per_epoch: 400
-  timesteps: 25
   batch_size: 128
+  calibrate_batch_size: true    # true: live GPU probe overrides batch_size above, and iterations_per_epoch
+                                # below is recomputed so one epoch covers (nearly) the whole training set
+                                # (see docs/functions.md).
+                                # false: batch_size and iterations_per_epoch below are used exactly as
+                                # written, no probe run.
   nap_times: 1
   learning_rate: 0.001
   weight_decay: 0.0001
@@ -36,15 +41,6 @@ training:
   activity_reg_max_rate: 0.50   # Penalize neurons firing more than 50% of timesteps (saturation prevention).
   activity_reg_lambda_low: 0.1  # Penalty weight for dead neurons.
   activity_reg_lambda_high: 0.1 # Penalty weight for saturated neurons.
-
-  num_workers: 6                # CPU DataLoader workers that prefetch batches while the GPU trains.
-                                # More workers reduce GPU starvation between batches (better utilisation).
-                                # Capped by CPU count automatically. Set to 0 to disable multiprocessing
-                                # (needed for non-picklable transforms).
-
-  prefetch_depth: 16             # Batches kept queued (CPU hand-off buffer and GPU-resident buffer
-                                # both use this depth). Raised alongside num_workers so the buffer
-                                # can hold what the extra workers are now capable of producing.
 
   enable_pipeline_monitor: true  # Background CPU/GPU utilization sampler (utilization, power, clock,
                                 # sustained-idle warnings). Diagnostic only — set false to disable.

@@ -7,6 +7,8 @@
 
 This document maps the current project state onto the V-model — a systems engineering framework that pairs every specification level on the left arm with a corresponding verification or validation activity on the right arm. Each level is assessed for what **already exists** in the project and what is **missing or incomplete**.
 
+**Since revised:** every `src/learning/...` and `src/learning/frameworks/...` path below is stale — this document was written when the codebase was laid out under `src/`. That directory no longer exists; the same modules now live at `learning/...` and `frameworks/...` (repo root, no `src/` nesting).
+
 ```
 User Requirements        ◄──────────────────────► Validation
        │                                                ▲
@@ -185,9 +187,11 @@ compute neuron dynamics through their own framework, not a custom kernel.
 **Since revised:** the CUDA LIF kernel (`src/crsc/`) and its build system
 (`CMakeLists.txt`) no longer exist — removed as unused. `temporal_slicer.py` and
 `pipeline_coordinator.py` were split up in a later session (see the refactor
-report); their responsibilities now live in `data_pipeline.py`, `prefetch.py`,
-and `src/learning/frameworks/activity_reg.py`. BindsNET and Spyx backends were
-also explored and later dropped — see `docs/frameworks/additional_frameworks.md`.
+report); their responsibilities now live in `data_pipeline.py` and `prefetch.py`.
+STDP regularization (the
+`activity_reg.py` row above) was also later removed entirely — no `stdp_enabled`
+config or STDP loss term exists in the current codebase; activity regularization
+(dead/saturated-neuron penalty) is unrelated and still live.
 
 ---
 
@@ -208,7 +212,7 @@ also explored and later dropped — see `docs/frameworks/additional_frameworks.m
 | `event_data_workflow/cache_engine.py` | High | FIFO eviction order, GPU budget computation, phase caps, transform/live_transform freshness split |
 | `event_data_workflow/data_pipeline.py` | High | dataloader_config() worker sizing, temporal slicing boundary conditions |
 | `event_data_workflow/prefetch.py` | Medium | AsyncGPUPrefetcher stays N batches ahead, propagates loader exceptions |
-| `src/learning/frameworks/activity_reg.py` | High | Activity penalty values, dead neuron detection, STDP loss gradient |
+| `src/learning/frameworks/activity_reg.py` | High | Activity penalty values, dead neuron detection |
 | `src/learning/training.py` | Medium | Aggregate spike output shape normalization, checkpoint save/load |
 | `src/learning/inference.py` | Medium | Per-class metric computation, confusion matrix |
 | `skeleton/snn_config.py` | Medium | YAML parsing, architecture generation correctness |
@@ -280,7 +284,7 @@ also explored and later dropped — see `docs/frameworks/additional_frameworks.m
 | UR-03: Competitive accuracy | Comparison table against published SNN benchmarks on same dataset | Missing |
 | UR-04: Adversarial robustness for safety | Clean vs. robust accuracy table with epsilon sweep | Partial (implemented, no report template) |
 | UR-05: Energy efficiency | Measured energy per inference vs. GPU baseline (not estimated) | Missing |
-| UR-06: Framework extensibility | Demonstration of adding a 4th backend with no core changes | **Demonstrated** — Sinabs added as a 4th backend; BindsNET/Spyx were also added and later dropped, see `docs/frameworks/additional_frameworks.md` |
+| UR-06: Framework extensibility | Demonstration of adding a 4th backend with no core changes | **Demonstrated** — Sinabs added as a 4th backend |
 
 **Gap:** No Validation Plan or Acceptance Test Procedure (ATP). The adversarial evaluator and inference metrics are implemented but there is no document tying results back to stated user requirements.
 
@@ -306,7 +310,7 @@ also explored and later dropped — see `docs/frameworks/additional_frameworks.m
 
 1. **Integration Tests (IT-01, IT-02, IT-04 to IT-07)** — Zero coverage. The data pipeline → learning module boundary is the highest-risk point and is completely untested at the system boundary level.
 
-2. **Unit Tests for event_data_workflow and learning** — The cache engine (FIFO eviction, transform freshness), activity regularization, and STDP loss have no *automated* tests (the cache engine has a manually-run synthetic-data sample test, not yet checked in). These are complex, stateful components where a regression would be silent.
+2. **Unit Tests for event_data_workflow and learning** — The cache engine (FIFO eviction, transform freshness) and activity regularization have no *automated* tests (the cache engine has a manually-run synthetic-data sample test, not yet checked in). These are complex, stateful components where a regression would be silent.
 
 3. **Formal System Requirements Specification** — All TR entries above exist only as behavior in code. A single SRS document with IDs, measurable pass criteria, and traceability to URs would make verification tractable.
 
@@ -320,7 +324,7 @@ also explored and later dropped — see `docs/frameworks/additional_frameworks.m
 |----------|--------|---------|
 | 1 | Write `tests/integration/test_pipeline_e2e.py` (IT-07 smoke test, CPU-only) | Integration Tests |
 | 2 | Write `tests/unit/test_cache_engine.py` (FIFO eviction, transform freshness — formalize the synthetic sample test from this session) | Unit Tests |
-| 3 | Write `tests/unit/test_activity_reg.py` (dead neuron penalty, STDP gradient) | Unit Tests |
+| 3 | Write `tests/unit/test_activity_reg.py` (dead neuron penalty) | Unit Tests |
 | 4 | Create `docs/requirements/system_requirements.md` with TR IDs and pass criteria | Technical Requirements |
 | 5 | Create `docs/requirements/user_requirements.md` with UR IDs and rationale | User Requirements |
 | 6 | Run on DAVIS dataset and record validation results in `docs/validation/` | Validation |

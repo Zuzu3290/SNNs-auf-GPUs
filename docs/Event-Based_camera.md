@@ -149,7 +149,7 @@ Cache eviction policy — plain FIFO:
 GPU REQUIREMENT
 ---------------
 A CUDA-capable GPU is a hard requirement. The application raises RuntimeError
-immediately on startup (src/learning/main.py) if no GPU is detected. All
+immediately on startup (learning/main.py) if no GPU is detected. All
 torch.cuda.is_available() guards below the entry point have been removed — they
 were dead code given this constraint.
 
