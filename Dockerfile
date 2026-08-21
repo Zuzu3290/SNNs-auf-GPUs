@@ -23,4 +23,5 @@ COPY . .
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+# Docker's default 64MB /dev/shm caps DataLoader workers -- run with e.g. --shm-size=2g for real batch sizes.
 CMD ["/bin/bash"]

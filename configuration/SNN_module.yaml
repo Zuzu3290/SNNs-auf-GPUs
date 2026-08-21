@@ -10,7 +10,7 @@ architecture:
 training:
   framework: sj           # YAML selector: norse | torch | sj | sinabs
   device: cuda
-  epochs: 3              # one epoch = one full pass over the training set; more epochs = more chances to learn.
+  epochs: 2              # one epoch = one full pass over the training set; more epochs = more chances to learn.
                           # not calibrated -- your call how many repeated passes the model needs.
   iterations_per_epoch: 400
   batch_size: 128

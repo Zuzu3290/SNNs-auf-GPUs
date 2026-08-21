@@ -135,16 +135,8 @@ class AdaptiveCacheController:
 
         return (total_bytes / successful_probes * len(dataset)) / (1024 ** 3)
 
-    def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train") -> Dataset:
-        """
-        Pick a cache tier from live resources and wrap dataset in it.
-
-        transform: deterministic preprocessing (same output every time) —
-            safe to bake into whichever cache is chosen.
-        live_transform: stochastic augmentation that must vary every access.
-            Composed after transform, since memory/disk caches already
-            re-run their transform on every read.
-        """
+    def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train", num_workers: int = 1) -> Dataset:
+        """Picks a cache tier from live resources and wraps dataset in it; num_workers prices in that MemoryCachedDataset's per-instance dict gets duplicated once per DataLoader worker process."""
         if hasattr(dataset, "slice_map"):
             raise ValueError(
                 "determine_dataset_strategy() received an already-sliced dataset. "
@@ -165,7 +157,7 @@ class AdaptiveCacheController:
             # for the same physical RAM a memory cache would use —
             # disk sidesteps that contention entirely.
             mode = "disk"
-        elif available_for_cache >= self.memory_threshold and dataset_size_gb < available_for_cache * self.memory_tier_headroom_fraction:
+        elif available_for_cache >= self.memory_threshold and dataset_size_gb * max(1, num_workers) < available_for_cache * self.memory_tier_headroom_fraction:
             mode = "memory"
         elif metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * self.disk_tier_headroom_multiple:
             # Only two tiers exist (memory, disk): a bounded RAM hot layer on
@@ -178,7 +170,7 @@ class AdaptiveCacheController:
                 f"RAM: {available_for_cache:.1f}GB, Disk: {metrics.disk_available_gb:.1f}GB"
             )
 
-        logger.info(f"[CACHE CONTROLLER] {split.upper()} -> {mode.upper()} ({available_for_cache:.1f}GB RAM free, dataset ~{dataset_size_gb:.1f}GB)")
+        logger.info(f"[CACHE CONTROLLER] {split.upper()} -> {mode.upper()} ({available_for_cache:.1f}GB RAM free, dataset ~{dataset_size_gb:.1f}GB, num_workers~{num_workers})")
 
         # Only insert the numpy→tensor bridge ahead of live_transform when
         # there actually is one, to match the exact pipeline used when

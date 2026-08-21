@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import shutil
 import logging
+import multiprocessing as mp
 import threading
 import time
 from dataclasses import dataclass
@@ -18,6 +19,23 @@ import pynvml
 logger = logging.getLogger(__name__)
 
 GPU_PRESSURE_THRESHOLD = 0.75
+
+# Non-fork workers (spawn: Windows always, macOS default; also forkserver) re-import torch/CUDA per worker instead of inheriting the parent's already-loaded copy; measured ~1.6GB committed bytes per worker on Windows.
+SPAWN_WORKER_RELOAD_OVERHEAD_GB = 1.6
+
+
+def worker_start_method() -> str:
+    return mp.get_context().get_start_method()
+
+
+def shared_memory_budget_bytes(available_ram_gb: float, worker_ram_fraction: float) -> float:
+    """Caps the RAM-fraction budget by real /dev/shm free space (small and RAM-independent in a default Docker container); falls back to the RAM budget where /dev/shm doesn't exist (Windows)."""
+    ram_budget = available_ram_gb * worker_ram_fraction * (1024 ** 3)
+    try:
+        shm_free = shutil.disk_usage("/dev/shm").free
+        return min(ram_budget, shm_free)
+    except OSError:
+        return ram_budget
 
 
 @dataclass
@@ -119,16 +137,39 @@ class SystemResourceMonitor:
         )
 
     def dataloader_config(self, device: torch.device, safety_margin_gb: float = 2.0,
-                          bytes_per_batch: float = 0.0, worker_ram_fraction: float = 0.25) -> dict:
-        """num_workers/prefetch/pin_memory/persistent_workers, capped from physical-core count by bytes_per_batch so large-sensor datasets don't overrun Windows' shared-memory commit limit."""
+                          bytes_per_batch: float = 0.0, worker_ram_fraction: float = 0.25, worker_timeout_s: float = 0.0,
+                          worker_fraction: float = 1.0, worker_count_override: int | None = None) -> dict:
+        """num_workers/prefetch/pin_memory/persistent_workers, capped from physical-core count (scaled by worker_fraction) by spawn-reload overhead, /dev/shm, and bytes_per_batch, unless worker_count_override opts out of those RAM-based caps entirely."""
         cuda_enabled = device is not None and getattr(device, "type", "") == "cuda"
         metrics = self.snapshot()
         physical_cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
         prefetch_factor = 2
         num_workers = physical_cores if metrics.available_ram_gb >= safety_margin_gb else 0
+        if num_workers > 0 and worker_fraction < 1.0:
+            num_workers = max(1, int(num_workers * worker_fraction))
 
-        if num_workers > 0 and bytes_per_batch > 0:
-            budget_bytes = metrics.available_ram_gb * worker_ram_fraction * (1024 ** 3)
+        if worker_count_override is not None:
+            num_workers = max(1, min(physical_cores, int(worker_count_override * worker_fraction)))
+            logger.warning(
+                f"[PIPELINE] worker_count_override={worker_count_override} active -> using {num_workers} "
+                f"workers, bypassing the RAM/spawn-reload safety caps (available RAM: {metrics.available_ram_gb:.2f}GB)"
+            )
+        elif num_workers > 0 and worker_start_method() != "fork":
+            headroom_gb = max(0.0, metrics.available_ram_gb - safety_margin_gb)
+            max_workers_by_reload_overhead = int(headroom_gb / SPAWN_WORKER_RELOAD_OVERHEAD_GB)
+            capped = max(0, min(num_workers, max_workers_by_reload_overhead))
+            if capped < num_workers:
+                logger.info(
+                    f"[PIPELINE] Worker count capped by spawn-reload overhead: "
+                    f"{num_workers} workers would each re-import torch+CUDA "
+                    f"(~{SPAWN_WORKER_RELOAD_OVERHEAD_GB:.1f}GB commit) on spawn, over the "
+                    f"{headroom_gb:.2f}GB headroom above the {safety_margin_gb:.2f}GB "
+                    f"safety margin -> using {capped} workers"
+                )
+            num_workers = capped
+
+        if worker_count_override is None and num_workers > 0 and bytes_per_batch > 0:
+            budget_bytes = shared_memory_budget_bytes(metrics.available_ram_gb, worker_ram_fraction)
             max_workers_by_ram = int(budget_bytes / (prefetch_factor * bytes_per_batch))
             capped = max(0, min(num_workers, max_workers_by_ram))
             if capped < num_workers:
@@ -149,6 +190,7 @@ class SystemResourceMonitor:
                 "prefetch_factor":    None,
                 "pin_memory":         False,
                 "persistent_workers": False,
+                "timeout":            0,
             }
             logger.info(
                 f"[PIPELINE] GPU-only mode — num_workers=0, pin_memory=False "
@@ -162,6 +204,7 @@ class SystemResourceMonitor:
                 "prefetch_factor":    prefetch_factor if num_workers > 0 else None,
                 "pin_memory":         True,
                 "persistent_workers": num_workers > 0,
+                "timeout":            worker_timeout_s if num_workers > 0 else 0,  # a stuck worker raises instead of hanging the run forever
             }
 
         logger.info(f"[PIPELINE] DataLoader config: {cfg}")

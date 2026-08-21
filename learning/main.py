@@ -9,7 +9,7 @@ from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder, resolve_dataset_entry
 from learning.robustness import AdversarialEvaluator
-from learning.utilities import calibrate_batch_size, select_inference_mode
+from learning.utilities import calibrate_batch_size, select_inference_mode, safe_empty_cache
 
 # module path, class name -- imported dynamically below, only for cfg.FRAMEWORK.
 # DataLoader worker processes (Windows spawn re-imports this whole file) never
@@ -88,6 +88,12 @@ if __name__ == "__main__":
     print(f"  Final loss      : {results['loss_history'][-1]:.4f}")
     print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}")
     print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
+
+    # train_loader has persistent_workers=True -- its worker processes stay alive
+    # until this DataLoader is garbage-collected, so drop every reference (trainer
+    # holds one too) before test_loader spawns its own workers on top of them.
+    del trainer, train_loader
+    safe_empty_cache()
 
     visualize = select_inference_mode()
     tester       = SNNTester(model, test_loader, cfg, device, visualize=visualize)

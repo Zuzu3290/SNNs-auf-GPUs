@@ -6,7 +6,6 @@ extracted/on-disk footprint — None where no figure has been measured or
 documented; see docs/Event-Based_camera.md for sourcing).
 """
 from __future__ import annotations
-import sys
 import logging
 from pathlib import Path
 
@@ -211,6 +210,7 @@ DATASET_REGISTRY = {
         "loader": load_davis_pose,
         "sensor_size": DAVIS_POSE_SENSOR_SIZE,
         "num_classes": 1,
+        "num_targets": 7,  # (x, y, z, qx, qy, qz, qw) -- real regression output width, for frameworks/regression/
         "num_train_samples": None,  # full DAVIS_POSE_SEQUENCES collection -- not measured until actually run
         "num_test_samples": None,
         "storage_size_gb": 7.7,  # full Event-Camera-Dataset collection (DAVIS_POSE_SEQUENCES, 24 sequences)
@@ -231,6 +231,7 @@ DATASET_REGISTRY = {
         "loader": load_dsec,
         "sensor_size": tonic.datasets.DSEC.sensor_size,
         "num_classes": 1,
+        "num_targets": 2,  # (u, v) flow per pixel -- dense output, needs a decoder architecture, not a resized FC (frameworks/regression/)
         "num_train_samples": None,  # full DSEC_RECORDINGS optical-flow set -- not measured until actually run
         "num_test_samples": None,
         "storage_size_gb": None,  # full 18-recording optical-flow set, likely tens of GB -- not measured until actually run
@@ -241,6 +242,7 @@ DATASET_REGISTRY = {
         "loader": load_eyetracking,
         "sensor_size": EYETRACKING_SENSOR_SIZE,
         "num_classes": 1,
+        "num_targets": 2,  # (x, y) gaze position -- real regression output width, for frameworks/regression/
         "num_train_samples": 1_599,
         "num_test_samples": 400,
         "storage_size_gb": 3.87,  # whole-dataset zip (all subjects/videos); only EYETRACKING_RECORDINGS of them get used
@@ -249,29 +251,23 @@ DATASET_REGISTRY = {
 
 
 def resolve_dataset_entry(cfg) -> dict:
-    """Match cfg.DATASET_NAME against DATASET_REGISTRY, else prompt interactively,
-    else default to N-MNIST."""
+    """Match cfg.DATASET_NAME against DATASET_REGISTRY, else prompt interactively (works in a real terminal and in a live notebook kernel, both accept input() even though neither always reports a tty), else default to N-MNIST."""
     wanted = (cfg.DATASET_NAME or "").strip().upper()
     for entry in DATASET_REGISTRY.values():
         if entry["name"].upper() == wanted:
             return entry
 
-    if sys.stdin.isatty():
-        print("\n[PIPELINE] Select a dataset:")
-        for key, entry in DATASET_REGISTRY.items():
-            output = f"{entry['num_classes']} classes" if entry.get("kind", "classification") == "classification" else "regression target TBD"
-            print(f"  {key}) {entry['name']}  [{output}]")
-        try:
-            choice = input("Enter number: ").strip()
-        except EOFError:
-            choice = ""
-        if choice in DATASET_REGISTRY:
-            return DATASET_REGISTRY[choice]
-        logger.warning(f"[PIPELINE] Invalid selection '{choice}' — defaulting to N-MNIST")
+    print("\n[PIPELINE] Select a dataset:")
+    for key, entry in DATASET_REGISTRY.items():
+        output = f"{entry['num_classes']} classes" if entry.get("kind", "classification") == "classification" else "regression target TBD"
+        print(f"  {key}) {entry['name']}  [{output}]")
+    try:
+        choice = input("Enter number: ").strip()
+    except EOFError:
+        logger.warning("[PIPELINE] No interactive input source attached — defaulting to N-MNIST")
         return DATASET_REGISTRY["1"]
 
-    logger.warning(
-        f"[PIPELINE] DATASET_NAME '{cfg.DATASET_NAME}' matched no entry in DATASET_REGISTRY "
-        "and no interactive terminal is attached — defaulting to N-MNIST"
-    )
+    if choice in DATASET_REGISTRY:
+        return DATASET_REGISTRY[choice]
+    logger.warning(f"[PIPELINE] Invalid selection '{choice}' — defaulting to N-MNIST")
     return DATASET_REGISTRY["1"]

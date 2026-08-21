@@ -6,7 +6,10 @@ temporal windows, then wrap in DataLoaders.
 from __future__ import annotations
 import os
 import sys
+import time
+import socket
 import logging
+import urllib.error
 from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
@@ -59,6 +62,28 @@ class LabelToIndex:
         return self.mapping[label]
 
 
+def load_dataset_with_retry(build_fn, attempts: int = 5, base_delay_s: float = 5.0):
+    """Constructing a tonic dataset can trigger a multi-GB download with no retry or
+    resume of its own -- one dropped connection means starting over from 0%. Retries
+    transient network failures and tonic's own post-download corruption check with
+    backoff, so a momentary drop doesn't force a full manual restart."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return build_fn()
+        except (urllib.error.URLError, ConnectionError, socket.gaierror, TimeoutError) as exc:
+            if attempt == attempts:
+                raise
+            delay = base_delay_s * attempt
+            logger.warning(f"[PIPELINE] Dataset download failed ({exc}) — retrying ({attempt}/{attempts - 1}) in {delay:.0f}s")
+            time.sleep(delay)
+        except RuntimeError as exc:
+            if "File not found or corrupted" not in str(exc) or attempt == attempts:
+                raise
+            delay = base_delay_s * attempt
+            logger.warning(f"[PIPELINE] Dataset download failed ({exc}) — retrying ({attempt}/{attempts - 1}) in {delay:.0f}s")
+            time.sleep(delay)
+
+
 def apply_label_to_index(*datasets: Dataset) -> None:
     """If any given dataset's raw .targets are non-int labels (e.g. NCALTECH101's
     class-folder-name strings), build ONE LabelToIndex mapping from the union of
@@ -89,8 +114,8 @@ def pad_events_passthrough_target(batch):
     max_length = max(s.shape[0] for s in samples)
     padded = []
     for sample in samples:
-        if not isinstance(sample, torch.Tensor):
-            sample = torch.tensor(sample)
+        # ToFrame emits float64 by default; cast to float32 here (not left to AMP autocast, which only downcasts float32) or Conv2d's autocast-halved weights meet a float64 input and crash.
+        sample = (sample if isinstance(sample, torch.Tensor) else torch.tensor(sample)).float()
         sample = torch.cat((
             sample,
             torch.zeros(max_length - sample.shape[0], *sample.shape[1:], device=sample.device),
@@ -243,17 +268,17 @@ class NeuromorphicEncoder:
             # recordings that actually have optical-flow/disparity ground truth),
             # then split across recordings ourselves, same as the other manually-
             # split datasets.
-            full_raw = entry["loader"](str(DATA_DIR), split="train")
+            full_raw = load_dataset_with_retry(lambda: entry["loader"](str(DATA_DIR), split="train"))
             n_train = int(0.8 * len(full_raw))
             raw_train, raw_test = torch.utils.data.random_split(
                 full_raw, [n_train, len(full_raw) - n_train]
             )
         elif entry["has_train_split"]:
-            raw_train = entry["cls"](save_to=str(DATA_DIR), train=True)
-            raw_test  = entry["cls"](save_to=str(DATA_DIR), train=False)
+            raw_train = load_dataset_with_retry(lambda: entry["cls"](save_to=str(DATA_DIR), train=True))
+            raw_test  = load_dataset_with_retry(lambda: entry["cls"](save_to=str(DATA_DIR), train=False))
             apply_label_to_index(raw_train, raw_test)
         else:
-            full_raw = entry["cls"](save_to=str(DATA_DIR))
+            full_raw = load_dataset_with_retry(lambda: entry["cls"](save_to=str(DATA_DIR)))
             apply_label_to_index(full_raw)
             n_train = int(0.8 * len(full_raw))
             raw_train, raw_test = torch.utils.data.random_split(
@@ -306,6 +331,13 @@ class NeuromorphicEncoder:
         )
         controller = self.controller
 
+        # Worst-case worker count (bytes_per_batch unknown yet, so only the RAM/spawn-reload caps apply) -- prices the memory tier's per-worker duplication before workers are actually sized.
+        worker_estimate = max(1, monitor.dataloader_config(
+            torch.device(self.cfg.DEVICE), safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
+            worker_ram_fraction=self.wf.WORKER_RAM_FRACTION, worker_timeout_s=self.wf.DATALOADER_WORKER_TIMEOUT_S,
+            worker_count_override=self.wf.WORKER_COUNT_OVERRIDE,
+        )["num_workers"])
+
         # train_augment is random, so it must run fresh every access rather
         # than get baked into a persistent cache — see determine_dataset_strategy.
         # Toggled via data_workflow.yaml's augmentation.random_rotation_enabled.
@@ -324,8 +356,8 @@ class NeuromorphicEncoder:
                 logger.info(f"[PIPELINE] Case A calibration: events_per_slice={self.events_per_slice} (from raw_train)")
 
             # Cache raw recordings first — slicing needs the raw timestamps.
-            cached_train = controller.determine_dataset_strategy(raw_train, split=f"{dataset_prefix}/train")
-            cached_test  = controller.determine_dataset_strategy(raw_test,  split=f"{dataset_prefix}/test")
+            cached_train = controller.determine_dataset_strategy(raw_train, split=f"{dataset_prefix}/train", num_workers=worker_estimate)
+            cached_test  = controller.determine_dataset_strategy(raw_test,  split=f"{dataset_prefix}/test", num_workers=worker_estimate)
 
             metadata_dir = str(PROJECT_ROOT / "metadata" / dataset_prefix)
             train_data = create_sliced_dataset(cached_train,
@@ -348,8 +380,8 @@ class NeuromorphicEncoder:
         else:
             # Cache the deterministic frame transform; keep the random
             # augmentation out of the cached value (transform/live_transform split).
-            train_data = controller.determine_dataset_strategy(raw_train, transform=frame_tf, live_transform=train_augment, split=f"{dataset_prefix}/train")
-            test_data  = controller.determine_dataset_strategy(raw_test,  transform=test_tf,  split=f"{dataset_prefix}/test")
+            train_data = controller.determine_dataset_strategy(raw_train, transform=frame_tf, live_transform=train_augment, split=f"{dataset_prefix}/train", num_workers=worker_estimate)
+            test_data  = controller.determine_dataset_strategy(raw_test,  transform=test_tf,  split=f"{dataset_prefix}/test", num_workers=worker_estimate)
 
         # tonic's DiskCachedDataset/MemoryCachedDataset and torch's Subset (from
         # random_split) don't forward attribute access to the wrapped dataset, so a
@@ -383,6 +415,17 @@ class NeuromorphicEncoder:
             device, safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
             bytes_per_batch=self.batch_sample_bytes * batch_size,
             worker_ram_fraction=self.wf.WORKER_RAM_FRACTION,
+            worker_timeout_s=self.wf.DATALOADER_WORKER_TIMEOUT_S,
+            worker_count_override=self.wf.WORKER_COUNT_OVERRIDE,
+        )
+        # Fresh, smaller sizing for inference -- its workers spawn after training already spent RAM/VRAM headroom.
+        test_cfg = monitor.dataloader_config(
+            device, safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
+            bytes_per_batch=self.batch_sample_bytes * batch_size,
+            worker_ram_fraction=self.wf.WORKER_RAM_FRACTION,
+            worker_timeout_s=self.wf.DATALOADER_WORKER_TIMEOUT_S,
+            worker_fraction=self.wf.INFERENCE_WORKER_FRACTION,
+            worker_count_override=self.wf.WORKER_COUNT_OVERRIDE,
         )
 
         # Regression targets (MVSEC's tuple, TUM-VIE's dict) aren't torch.tensor()-able —
@@ -396,7 +439,7 @@ class NeuromorphicEncoder:
             **self.loader_kwargs(train_data, base_cfg),
         )
         test_loader = DataLoader(test_data, batch_size=batch_size, collate_fn=pad,
-            **self.loader_kwargs(test_data, base_cfg),
+            **self.loader_kwargs(test_data, test_cfg),
         )
 
         logger.info(f"[PIPELINE] Train batches : {len(train_loader)}")

@@ -56,10 +56,13 @@ class AsyncGPUPrefetcher:
             except Exception as exc:
                 errors.append(exc)
             finally:
-                try:
-                    buf.put_nowait(sentinel)
-                except queue.Full:
-                    pass
+                # put_nowait here could find the queue full and silently drop the sentinel, hanging buf.get() forever.
+                while not stop_event.is_set():
+                    try:
+                        buf.put(sentinel, timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
 
         self.thread = threading.Thread(target=produce, daemon=True)
         self.thread.start()

@@ -71,7 +71,7 @@ class SNNTester:
         start, end = pair
         return start.elapsed_time(end)
 
-    def show_frame(self, data: torch.Tensor, preds: torch.Tensor, tgts: torch.Tensor, batch_idx: int) -> None:
+    def show_frame(self, data: torch.Tensor, preds: torch.Tensor, tgts: torch.Tensor, batch_idx: int, sample_idx: int | None = None) -> None:
         """Live view of one sample from the batch: the input event-frame (summed over
         time and polarity) plus predicted vs ground-truth label. Opens an interactive
         matplotlib window on first call; updates it in place afterward (no new windows
@@ -97,7 +97,8 @@ class SNNTester:
             im.set_data(frame)
             im.set_clim(frame.min(), frame.max())
 
-        ax.set_title(f"Batch {batch_idx} | Pred: {int(preds[0])}  GT: {int(tgts[0])}")
+        label = f"Batch {batch_idx}" + (f" Sample {sample_idx}" if sample_idx is not None else "")
+        ax.set_title(f"{label} | Pred: {int(preds[0])}  GT: {int(tgts[0])}")
         fig.canvas.draw_idle()
         plt.pause(0.001)
 
@@ -105,6 +106,27 @@ class SNNTester:
         if self.viz_window is not None:
             plt.close(self.viz_window[0])
             self.viz_window = None
+
+    def review_samples(self, num_batches: int = 1, pause_s: float = 1.5) -> None:
+        """Human-paced visual spot check: pulls num_batches batches (default 1, not
+        the whole test set) and shows every sample in them one at a time, each held
+        on screen for pause_s seconds. Unlike run()'s visualize=True path — which
+        draws one sample per batch at a 0.001s pause across the entire test set,
+        too fast to actually look at — this computes no metrics and writes nothing,
+        it's purely for looking at what the model predicts, sample by sample."""
+        self.model.eval_mode()
+        with torch.no_grad():
+            for batch_idx, (data, targets) in enumerate(self.test_loader):
+                if batch_idx >= num_batches:
+                    break
+                spk_rec = self.forward_pass(data)
+                preds = aggregate_spike_output(spk_rec.float()).argmax(dim=1)
+                for i in range(targets.size(0)):
+                    self.show_frame(data[:, i:i + 1], preds[i:i + 1], targets[i:i + 1], batch_idx, sample_idx=i)
+                    mark = "correct" if preds[i] == targets[i] else "WRONG"
+                    print(f"  batch {batch_idx} sample {i:>3} | pred={int(preds[i])}  gt={int(targets[i])}  ({mark})")
+                    plt.pause(pause_s)
+        self.close_visualization()
 
     def class_metrics(self, cm: np.ndarray) -> list[dict]:
         total = cm.sum()
