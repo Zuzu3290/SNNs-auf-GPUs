@@ -95,7 +95,3 @@ class ModelInterface(ABC):
     def get_inference(self, test_loader):
         from learning.inference import SNNTester
         return SNNTester(self, test_loader, self.cfg, self.device)
-
-    def get_adversarial_evaluator(self, test_loader):
-        from learning.robustness import AdversarialEvaluator
-        return AdversarialEvaluator(self, test_loader, self.cfg, self.device)

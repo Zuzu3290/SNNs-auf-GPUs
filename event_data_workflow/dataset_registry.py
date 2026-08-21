@@ -129,7 +129,7 @@ class DAVISPoseRecordings(Dataset):
 
 
 def load_davis_pose(save_to: str, split: str) -> WindowedRecordingDataset:
-    """Camera 6-DOF pose (Mueggler et al., Event-Camera Dataset) via DAVISPoseRecordings."""
+    """Camera 6-DOF pose (Mueggler et al., Event-Camera Dataset) via DAVISPoseRecordings. `split` is unused (kept for call-site symmetry)."""
     recordings = DAVISPoseRecordings(save_to, sequences=DAVIS_POSE_SEQUENCES)
     return WindowedRecordingDataset(
         recordings,
@@ -170,7 +170,7 @@ class EyeTrackingRecordings(Dataset):
 
 
 def load_eyetracking(save_to: str, split: str) -> WindowedRecordingDataset:
-    """3ET-Eyetracking gaze-position regression via EyeTrackingRecordings."""
+    """3ET-Eyetracking gaze-position regression via EyeTrackingRecordings. `split` is unused (kept for call-site symmetry)."""
     recordings = EyeTrackingRecordings(save_to, split="train")
     return WindowedRecordingDataset(
         recordings,
