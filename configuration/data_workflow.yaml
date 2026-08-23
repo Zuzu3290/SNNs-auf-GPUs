@@ -44,8 +44,8 @@ resource_policy:
   disk_tier_headroom_multiple: 1.2     # free disk space must exceed dataset size by this multiple to pick the "disk" cache tier
   worker_ram_fraction: 0.25            # share of available RAM DataLoader workers' in-flight buffers may occupy; caps num_workers for large-sensor datasets
   dataloader_worker_timeout_s: 120.0   # a stuck worker (num_workers > 0) raises TimeoutError after this long instead of hanging the run forever; 0 disables (PyTorch default)
-  inference_worker_fraction: 0.5       # test loader's workers spawn after training already spent RAM/VRAM headroom, and inference is lighter-weight than training -- use this share of the training worker count
-  worker_count_override: null          # null: adaptive (recommended). An int here skips the RAM/spawn-reload safety caps and uses exactly that many workers (still clamped to physical core count) -- opt-in only, set it because you know this machine's real free RAM/page file can back it
+  calibrate_workers: false              # true: adaptive, RAM/spawn-reload-safe sizing (recommended, the normal setting). false: worker_count_fallback below is used exactly as written, skipping those safety caps -- opt-in only, for a deliberate one-off test where you know this machine's real free RAM/page file can back it
+  worker_count_fallback: 16            # only used when calibrate_workers is false (still clamped to physical core count)
 
 # batch_size lives in SNN_module.yaml (training section)
 

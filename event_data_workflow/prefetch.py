@@ -42,27 +42,25 @@ class AsyncGPUPrefetcher:
         errors: list[Exception] = []
         stop_event = self.stop_event
 
+        def put_blocking(item) -> None:
+            while not stop_event.is_set():
+                try:
+                    buf.put(item, timeout=0.5)
+                    return
+                except queue.Full:
+                    continue
+
         def produce():
             try:
                 for batch in self.loader:
                     if stop_event.is_set():
                         return
-                    while not stop_event.is_set():
-                        try:
-                            buf.put(batch, timeout=0.5)
-                            break
-                        except queue.Full:
-                            continue
+                    put_blocking(batch)
             except Exception as exc:
                 errors.append(exc)
             finally:
                 # put_nowait here could find the queue full and silently drop the sentinel, hanging buf.get() forever.
-                while not stop_event.is_set():
-                    try:
-                        buf.put(sentinel, timeout=0.5)
-                        break
-                    except queue.Full:
-                        continue
+                put_blocking(sentinel)
 
         self.thread = threading.Thread(target=produce, daemon=True)
         self.thread.start()
@@ -138,7 +136,7 @@ class CudaPrefetcher:
             # tensor crosses streams like this — see PyTorch's CUDA stream docs).
             data.record_stream(torch.cuda.current_stream(self.device))
             targets.record_stream(torch.cuda.current_stream(self.device))
-            while len(pending) < self.depth - 1:
+            while len(pending) < max(1, self.depth - 1):  # depth=1 -> depth-1=0, which would never refill and silently stall after one batch -- always fetch at least the next one
                 if not preload_one():
                     break
             yield data, targets

@@ -50,6 +50,10 @@ class WorkflowSettings:
         self.DISK_TIER_HEADROOM_MULTIPLE   = float(rp.get("disk_tier_headroom_multiple", 1.2))
         self.WORKER_RAM_FRACTION           = float(rp.get("worker_ram_fraction", 0.25))
         self.DATALOADER_WORKER_TIMEOUT_S   = float(rp.get("dataloader_worker_timeout_s", 60.0))
-        self.INFERENCE_WORKER_FRACTION     = float(rp.get("inference_worker_fraction", 0.5))
-        worker_count_override = rp.get("worker_count_override", None)
-        self.WORKER_COUNT_OVERRIDE         = int(worker_count_override) if worker_count_override is not None else None
+        self.CALIBRATE_WORKERS             = bool(rp.get("calibrate_workers", True))
+        self.WORKER_COUNT_FALLBACK         = int(rp.get("worker_count_fallback", 4))
+
+    @property
+    def worker_count_override(self) -> int | None:
+        """None when calibrate_workers is true (adaptive sizing); worker_count_fallback otherwise."""
+        return None if self.CALIBRATE_WORKERS else self.WORKER_COUNT_FALLBACK

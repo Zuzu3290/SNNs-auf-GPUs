@@ -17,11 +17,6 @@ import matplotlib.pyplot as plt
 ENERGY_PER_SPIKE_PJ = 3.5
 SYNOPS_ENERGY_PJ_PER_MAC = 4.6
 
-# Number of early test batches to also probe with a genuine batch_size=1
-# forward pass, timed on its own (see run()'s single_sample_events) — a
-# real single-sample measurement, not batch-latency divided by batch size.
-SINGLE_SAMPLE_LATENCY_PROBES = 10
-
 
 class SNNTester:
 
@@ -30,13 +25,7 @@ class SNNTester:
         self.test_loader = test_loader
         self.cfg         = cfg
         self.device      = device
-        self.num_classes = getattr(cfg, "NUM_CLASSES", None)
-        if self.num_classes is None:
-            raise ValueError(
-                "cfg.NUM_CLASSES is not set — call cfg.apply_dataset_shape() "
-                "(NeuromorphicEncoder.load_raw() does this automatically) "
-                "before constructing SNNTester."
-            )
+        self.num_classes = cfg.NUM_CLASSES
         self.batch_log   = []
         self.visualize   = visualize
         self.viz_window  = None  # lazily built on first use — see show_frame()
@@ -45,7 +34,6 @@ class SNNTester:
         # Deferred-sync accumulation — see run()'s docstring. Nothing here is
         # read back to host memory until the whole test pass finishes.
         self.fwd_events = []  # (start, end) CUDA event pairs
-        self.single_sample_events = []  # (start, end) pairs, batch_size=1 probes only — see SINGLE_SAMPLE_LATENCY_PROBES
         self.dense_macs_per_layer = {}
 
     def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
@@ -70,63 +58,6 @@ class SNNTester:
     def elapsed_ms(pair) -> float:
         start, end = pair
         return start.elapsed_time(end)
-
-    def show_frame(self, data: torch.Tensor, preds: torch.Tensor, tgts: torch.Tensor, batch_idx: int, sample_idx: int | None = None) -> None:
-        """Live view of one sample from the batch: the input event-frame (summed over
-        time and polarity) plus predicted vs ground-truth label. Opens an interactive
-        matplotlib window on first call; updates it in place afterward (no new windows
-        per batch).
-
-        Opt-in (visualize=True) live-view path — inherently synchronous
-        (matplotlib drawing blocks regardless), so the GPU->CPU conversions
-        here are unrelated to the deferred-sync design used for the hot loop."""
-
-        # data: [T, B, C, H, W] (or [B, T, ...] already normalized to T-first by
-        # forward_pass's caller — here it's the raw batch, still whatever tensor_format
-        # the DataLoader produced, which is always time-first per data_pipeline.py).
-        frame = data[:, 0].sum(dim=(0, 1)).detach().cpu().numpy()  # sum T and C -> [H, W]
-
-        if self.viz_window is None:
-            plt.ion()
-            fig, ax = plt.subplots(figsize=(4, 4))
-            im = ax.imshow(frame, cmap="hot")
-            ax.set_axis_off()
-            self.viz_window = (fig, ax, im)
-        else:
-            fig, ax, im = self.viz_window
-            im.set_data(frame)
-            im.set_clim(frame.min(), frame.max())
-
-        label = f"Batch {batch_idx}" + (f" Sample {sample_idx}" if sample_idx is not None else "")
-        ax.set_title(f"{label} | Pred: {int(preds[0])}  GT: {int(tgts[0])}")
-        fig.canvas.draw_idle()
-        plt.pause(0.001)
-
-    def close_visualization(self) -> None:
-        if self.viz_window is not None:
-            plt.close(self.viz_window[0])
-            self.viz_window = None
-
-    def review_samples(self, num_batches: int = 1, pause_s: float = 1.5) -> None:
-        """Human-paced visual spot check: pulls num_batches batches (default 1, not
-        the whole test set) and shows every sample in them one at a time, each held
-        on screen for pause_s seconds. Unlike run()'s visualize=True path — which
-        draws one sample per batch at a 0.001s pause across the entire test set,
-        too fast to actually look at — this computes no metrics and writes nothing,
-        it's purely for looking at what the model predicts, sample by sample."""
-        self.model.eval_mode()
-        with torch.no_grad():
-            for batch_idx, (data, targets) in enumerate(self.test_loader):
-                if batch_idx >= num_batches:
-                    break
-                spk_rec = self.forward_pass(data)
-                preds = aggregate_spike_output(spk_rec.float()).argmax(dim=1)
-                for i in range(targets.size(0)):
-                    self.show_frame(data[:, i:i + 1], preds[i:i + 1], targets[i:i + 1], batch_idx, sample_idx=i)
-                    mark = "correct" if preds[i] == targets[i] else "WRONG"
-                    print(f"  batch {batch_idx} sample {i:>3} | pred={int(preds[i])}  gt={int(targets[i])}  ({mark})")
-                    plt.pause(pause_s)
-        self.close_visualization()
 
     def class_metrics(self, cm: np.ndarray) -> list[dict]:
         total = cm.sum()
@@ -178,12 +109,12 @@ class SNNTester:
         monitor.enter_phase("testing")
         self.model.eval_mode()
 
-        window_s = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION', 15000) / 1e6
+        window_s = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
+        timesteps_cfg = getattr(self.cfg, 'TIMESTEPS', 25)
 
-        # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4.
-        # self.test_loader is a PrefetchedLoader — probe_data is already device-resident.
+        # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4
         probe_data, _ = next(iter(self.test_loader))
-        timesteps_cfg = probe_data.shape[0]  # loader yields [T, B, C, H, W] — the real BPTT unroll length, not a config value
+        probe_data = probe_data.to(self.device)
         if self.model.tensor_format() == "BT":
             probe_data = probe_data.permute(1, 0, 2, 3, 4).contiguous()
         self.dense_macs_per_layer = measure_dense_macs(self.model, probe_data)
@@ -211,10 +142,6 @@ class SNNTester:
                 with self.timed(self.fwd_events):
                     spk_rec = self.forward_pass(data)
 
-                if batch_idx < SINGLE_SAMPLE_LATENCY_PROBES:
-                    with self.timed(self.single_sample_events):
-                        self.forward_pass(data[:, 0:1])
-
                 batch_spikes_gpu       = spk_rec.sum()
                 batch_input_spikes_gpu = data.sum()
 
@@ -232,9 +159,6 @@ class SNNTester:
                 all_preds_gpu.append(preds_gpu)
                 all_targets_gpu.append(targets)
                 last_activity_snapshot = self.model.activity.recordings()
-
-                if self.visualize:
-                    self.show_frame(data, preds_gpu, targets, batch_idx)
 
                 raw_batch_records.append({
                     "batch_idx":           batch_idx,
@@ -262,12 +186,10 @@ class SNNTester:
         np.add.at(cm, (all_targets.numpy(), all_preds.numpy()), 1)
 
         fwd_latencies_ms = [self.elapsed_ms(p) for p in self.fwd_events]
-        single_sample_latencies_ms = [self.elapsed_ms(p) for p in self.single_sample_events]
         cv_isi            = compute_cv_isi(last_activity_snapshot)
         cv_isi_mean       = cv_isi.get("network_wide", 0.0)
 
         total_spikes             = 0
-        total_possible_spikes    = 0
         total_input_spikes       = 0.0
         total_latency_ms         = 0.0
         total_samples            = 0
@@ -287,8 +209,7 @@ class SNNTester:
             energy_pj       = batch_spikes * ENERGY_PER_SPIKE_PJ
             firing_rate_hz  = spike_rate * T / window_s if window_s > 0 else 0.0
 
-            total_spikes          += batch_spikes
-            total_possible_spikes += possible_spikes
+            total_spikes       += batch_spikes
             total_input_spikes += batch_input_spikes
             total_latency_ms   += latency_ms
             total_samples      += B
@@ -328,14 +249,9 @@ class SNNTester:
         overall_acc            = (all_preds == all_targets).float().mean().item() if total_samples > 0 else 0.0
         avg_latency_ms         = total_latency_ms / len(self.batch_log) if self.batch_log else 0.0
         avg_latency_per_sample = total_latency_ms / total_samples if total_samples > 0 else 0.0
-        # True single-sample latency: a genuinely timed batch_size=1 forward pass
-        # (SINGLE_SAMPLE_LATENCY_PROBES of them), not avg_latency_per_sample's
-        # batch-latency-divided-by-batch-size approximation.
-        true_single_sample_latency_ms        = float(np.mean(single_sample_latencies_ms)) if single_sample_latencies_ms else 0.0
-        true_single_sample_latency_median_ms = float(np.median(single_sample_latencies_ms)) if single_sample_latencies_ms else 0.0
         median_latency_per_sample_ms = float(np.percentile(per_sample_latencies_ms, 50)) if per_sample_latencies_ms else 0.0
-        # Tail latency, not just median/p90 — worst-case outliers matter for
-        # latency-sensitive use, not just the typical case.
+        # Tail latency, not just median/p90 — a real-time deadline is missed by
+        # the slow outliers, not the typical case. See RealTimeLatencyEvaluator.
         p90_latency_per_sample_ms    = float(np.percentile(per_sample_latencies_ms, 90)) if per_sample_latencies_ms else 0.0
         p99_latency_per_sample_ms    = float(np.percentile(per_sample_latencies_ms, 99)) if per_sample_latencies_ms else 0.0
         throughput_samples_per_s     = total_samples / t_run_elapsed if t_run_elapsed > 0 else 0.0
@@ -345,10 +261,7 @@ class SNNTester:
         # encoding/neuron dynamics compress more raw input activity into each output
         # spike; lower = the network stays closer to 1:1 with what it was shown.
         framework_ratio        = total_input_spikes / total_spikes if total_spikes > 0 else None
-        # Sum of per-batch possible-spike counts, not batch-count x T x C — the
-        # test loader has no drop_last, so the final batch's B can differ from
-        # every other batch's, and this must reflect each batch's real size.
-        avg_spike_rate         = total_spikes / total_possible_spikes if total_possible_spikes > 0 else 0.0
+        avg_spike_rate         = total_spikes / (len(self.batch_log) * timesteps_cfg * self.num_classes) if self.batch_log else 0.0
         avg_firing_rate_hz     = avg_spike_rate * timesteps_cfg / window_s if window_s > 0 else 0.0
         energy_per_sample_pj   = total_energy_pj / total_samples if total_samples > 0 else 0.0
         synops_energy_per_sample_pj = total_synops_pj / total_samples if total_samples > 0 else 0.0
@@ -370,8 +283,6 @@ class SNNTester:
         print(f"  • CV_ISI (network-wide)   : {cv_isi_mean:.3f}  (last batch)")
         print(f"  • Avg Batch Latency       : {avg_latency_ms:.2f} ms")
         print(f"  • Avg Latency / Sample    : {avg_latency_per_sample:.3f} ms")
-        print(f"  • True Single-Sample Latency : {true_single_sample_latency_ms:.3f} ms  "
-              f"(median {true_single_sample_latency_median_ms:.3f} ms, n={len(single_sample_latencies_ms)}, batch_size=1)")
         print(f"  • Median Latency / Sample : {median_latency_per_sample_ms:.3f} ms  (p50)")
         print(f"  • p90 Latency / Sample    : {p90_latency_per_sample_ms:.3f} ms")
         print(f"  • p99 Latency / Sample    : {p99_latency_per_sample_ms:.3f} ms")
@@ -380,7 +291,6 @@ class SNNTester:
         print(f"  • Energy / Sample         : {energy_per_sample_pj:.2f} pJ")
         print(f"  • SynOps Energy Estimate  : {total_synops_pj:.1f} pJ  (per-layer, dense-MAC-weighted)")
         print(f"  • SynOps Energy / Sample  : {synops_energy_per_sample_pj:.2f} pJ")
-
         print(f"  • GPU Energy (actual)     : {gpu_energy_j * 1e3:.2f} mJ")
         print(f"  • Mean GPU Power (actual) : {avg_power_w:.1f} W")
         print(f"  • Mean Dynamic Power      : {dynamic_power_w:.1f} W  (idle baseline {self.pipeline_monitor.idle_power_w:.1f} W subtracted)")
@@ -405,7 +315,6 @@ class SNNTester:
             print(f"    Class {c:>2} | GT: {gt_dist[c]:>5}  Pred: {pred_dist[c]:>5}")
 
         self.write_csv(csv_path)
-        self.close_visualization()
 
         return {
             "framework":                 self.cfg.FRAMEWORK,
@@ -420,8 +329,6 @@ class SNNTester:
             "cv_isi_mean":               cv_isi_mean,
             "avg_latency_ms":            avg_latency_ms,
             "avg_latency_per_sample_ms": avg_latency_per_sample,
-            "true_single_sample_latency_ms":        true_single_sample_latency_ms,
-            "true_single_sample_latency_median_ms": true_single_sample_latency_median_ms,
             "median_latency_per_sample_ms": median_latency_per_sample_ms,
             "p90_latency_per_sample_ms":    p90_latency_per_sample_ms,
             "p99_latency_per_sample_ms":    p99_latency_per_sample_ms,

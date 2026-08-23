@@ -28,6 +28,20 @@ def worker_start_method() -> str:
     return mp.get_context().get_start_method()
 
 
+def scale_workers_by_fraction(num_workers: int, fraction: float) -> int:
+    if fraction <= 0.0:
+        return 0  # a deliberate 0 must stay 0, not floor to 1
+    return max(1, int(num_workers * fraction)) if fraction < 1.0 else num_workers
+
+
+def apply_worker_cap(num_workers: int, max_workers: int, reason: str) -> int:
+    """Clamps num_workers to max_workers, logging `reason` only when this cap actually bound the result."""
+    capped = max(0, min(num_workers, max_workers))
+    if capped < num_workers:
+        logger.info(f"[PIPELINE] Worker count capped by {reason} -> using {capped} workers")
+    return capped
+
+
 def shared_memory_budget_bytes(available_ram_gb: float, worker_ram_fraction: float) -> float:
     """Caps the RAM-fraction budget by real /dev/shm free space (small and RAM-independent in a default Docker container); falls back to the RAM budget where /dev/shm doesn't exist (Windows)."""
     ram_budget = available_ram_gb * worker_ram_fraction * (1024 ** 3)
@@ -69,12 +83,7 @@ GPU_PHASE_MARGINS: dict[str, float] = {
 
 
 def gpu_total_memory_gb() -> float:
-    """Total VRAM for the GPU, in GB. 0.0 if CUDA isn't available. This
-    project only ever runs single-GPU (training.device in SNN_module.yaml
-    is cpu | cuda | auto — never an indexed cuda:N), so there's no device
-    index to parameterize here — it's always device 0."""
-    if not torch.cuda.is_available():
-        return 0.0
+    """Total VRAM for the GPU"""
     return torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
 
 
@@ -92,7 +101,7 @@ class SystemResourceMonitor:
         # False forces GPU fields to 0 even when CUDA is physically present —
         # set when the run is explicitly CPU-only, so a GPU that exists but
         # isn't requested never affects cache/worker decisions.
-        self.cuda_enabled = cuda_enabled
+        self.cuda_enabled = cuda_enabled and torch.cuda.is_available()
         self.phase = "training"  # see enter_phase()
 
     def configure(self, cache_path: str = "./cache", cuda_enabled: bool = True) -> None:
@@ -100,7 +109,7 @@ class SystemResourceMonitor:
         (NeuromorphicEncoder.__init__). Unconfigured, the constructor
         defaults above apply."""
         self.cache_path = Path(cache_path)
-        self.cuda_enabled = cuda_enabled
+        self.cuda_enabled = cuda_enabled and torch.cuda.is_available()
 
     def snapshot(self) -> CacheMetrics:
         vm = psutil.virtual_memory()
@@ -113,7 +122,7 @@ class SystemResourceMonitor:
             disk_available = 0.0
             disk_exists = False
 
-        if self.cuda_enabled and torch.cuda.is_available():
+        if self.cuda_enabled:
             gpu_total = gpu_total_memory_gb()
 
             # Most conservative available-VRAM estimate: driver-reported free
@@ -136,20 +145,17 @@ class SystemResourceMonitor:
             gpu_available_gb=gpu_available,
         )
 
-    def dataloader_config(self, device: torch.device, safety_margin_gb: float = 2.0,
-                          bytes_per_batch: float = 0.0, worker_ram_fraction: float = 0.25, worker_timeout_s: float = 0.0,
-                          worker_fraction: float = 1.0, worker_count_override: int | None = None) -> dict:
-        """num_workers/prefetch/pin_memory/persistent_workers, capped from physical-core count (scaled by worker_fraction) by spawn-reload overhead, /dev/shm, and bytes_per_batch, unless worker_count_override opts out of those RAM-based caps entirely."""
-        cuda_enabled = device is not None and getattr(device, "type", "") == "cuda"
-        metrics = self.snapshot()
+    def worker_count(self, device: torch.device, safety_margin_gb: float = 2.0, worker_fraction: float = 1.0,
+                     worker_count_override: int | None = None, metrics: CacheMetrics | None = None) -> tuple[int, CacheMetrics, int]:
+        """The bytes_per_batch-independent subset of dataloader_config()'s sizing (physical-core baseline, worker_fraction, spawn-reload cap, override) -- reusable wherever num_workers is needed before the real batch size is known, without building/logging a full DataLoader kwargs dict for it."""
+        metrics = metrics or self.snapshot()
         physical_cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
-        prefetch_factor = 2
         num_workers = physical_cores if metrics.available_ram_gb >= safety_margin_gb else 0
-        if num_workers > 0 and worker_fraction < 1.0:
-            num_workers = max(1, int(num_workers * worker_fraction))
+        if num_workers > 0:
+            num_workers = scale_workers_by_fraction(num_workers, worker_fraction)
 
         if worker_count_override is not None:
-            num_workers = max(1, min(physical_cores, int(worker_count_override * worker_fraction)))
+            num_workers = max(0, min(physical_cores, scale_workers_by_fraction(worker_count_override, worker_fraction)))
             logger.warning(
                 f"[PIPELINE] worker_count_override={worker_count_override} active -> using {num_workers} "
                 f"workers, bypassing the RAM/spawn-reload safety caps (available RAM: {metrics.available_ram_gb:.2f}GB)"
@@ -157,30 +163,29 @@ class SystemResourceMonitor:
         elif num_workers > 0 and worker_start_method() != "fork":
             headroom_gb = max(0.0, metrics.available_ram_gb - safety_margin_gb)
             max_workers_by_reload_overhead = int(headroom_gb / SPAWN_WORKER_RELOAD_OVERHEAD_GB)
-            capped = max(0, min(num_workers, max_workers_by_reload_overhead))
-            if capped < num_workers:
-                logger.info(
-                    f"[PIPELINE] Worker count capped by spawn-reload overhead: "
-                    f"{num_workers} workers would each re-import torch+CUDA "
-                    f"(~{SPAWN_WORKER_RELOAD_OVERHEAD_GB:.1f}GB commit) on spawn, over the "
-                    f"{headroom_gb:.2f}GB headroom above the {safety_margin_gb:.2f}GB "
-                    f"safety margin -> using {capped} workers"
-                )
-            num_workers = capped
+            num_workers = apply_worker_cap(num_workers, max_workers_by_reload_overhead,
+                f"spawn-reload overhead: {num_workers} workers would each re-import torch+CUDA "
+                f"(~{SPAWN_WORKER_RELOAD_OVERHEAD_GB:.1f}GB commit) on spawn, over the {headroom_gb:.2f}GB "
+                f"headroom above the {safety_margin_gb:.2f}GB safety margin")
+
+        return num_workers, metrics, physical_cores
+
+    def dataloader_config(self, device: torch.device, safety_margin_gb: float = 2.0,
+                          bytes_per_batch: float = 0.0, worker_ram_fraction: float = 0.25, worker_timeout_s: float = 0.0,
+                          worker_fraction: float = 1.0, worker_count_override: int | None = None,
+                          metrics: CacheMetrics | None = None) -> dict:
+        """num_workers/prefetch/pin_memory/persistent_workers, capped from physical-core count (scaled by worker_fraction) by spawn-reload overhead, /dev/shm, and bytes_per_batch, unless worker_count_override opts out of those RAM-based caps entirely."""
+        cuda_enabled = device is not None and getattr(device, "type", "") == "cuda"
+        num_workers, metrics, physical_cores = self.worker_count(device, safety_margin_gb, worker_fraction, worker_count_override, metrics)
+        prefetch_factor = 2
 
         if worker_count_override is None and num_workers > 0 and bytes_per_batch > 0:
             budget_bytes = shared_memory_budget_bytes(metrics.available_ram_gb, worker_ram_fraction)
             max_workers_by_ram = int(budget_bytes / (prefetch_factor * bytes_per_batch))
-            capped = max(0, min(num_workers, max_workers_by_ram))
-            if capped < num_workers:
-                logger.info(
-                    f"[PIPELINE] Worker count capped by RAM budget: {physical_cores} physical cores "
-                    f"would need ~{physical_cores * prefetch_factor * bytes_per_batch / (1024**3):.2f}GB "
-                    f"of in-flight worker shared memory ({bytes_per_batch / (1024**2):.1f}MB/batch x "
-                    f"prefetch_factor={prefetch_factor}), over the {worker_ram_fraction:.0%} of "
-                    f"{metrics.available_ram_gb:.2f}GB available RAM this policy allows -> using {capped} workers"
-                )
-            num_workers = capped
+            num_workers = apply_worker_cap(num_workers, max_workers_by_ram,
+                f"RAM budget: {physical_cores} physical cores would need ~{physical_cores * prefetch_factor * bytes_per_batch / (1024**3):.2f}GB "
+                f"of in-flight worker shared memory ({bytes_per_batch / (1024**2):.1f}MB/batch x prefetch_factor={prefetch_factor}), "
+                f"over the {worker_ram_fraction:.0%} of {metrics.available_ram_gb:.2f}GB available RAM this policy allows")
 
         logger.info(f"[PIPELINE] Available workers: {physical_cores} physical cores -> using {num_workers}")
 
@@ -337,7 +342,7 @@ class PipelineMonitor:
         self.interval_s    = interval_s
         self.thresholds    = thresholds or BoundThresholds()
 
-        self.total_memory_gb = gpu_total_memory_gb()
+        self.total_memory_gb = gpu_total_memory_gb() if self.cuda_enabled else 0.0
         self.peak_mem_each: list[float] = []  # one entry per phase_summary() call
         self.idle_power_w: float | None = None
 
@@ -457,7 +462,7 @@ class PipelineMonitor:
         safe to call once per epoch/test-run."""
         diag: dict = {
             "max_memory_reserved_gb": (
-                torch.cuda.max_memory_reserved(0) / (1024 ** 3) if torch.cuda.is_available() else 0.0
+                torch.cuda.max_memory_reserved(0) / (1024 ** 3) if self.cuda_enabled else 0.0
             ),
         }
         if self.nvml_handle is not None:

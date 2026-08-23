@@ -89,6 +89,10 @@ if __name__ == "__main__":
     print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}")
     print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
 
+    trainer.plot_training()
+    trainer.plot_iteration_metrics()
+    trainer.plot_raster()
+
     # train_loader has persistent_workers=True -- its worker processes stay alive
     # until this DataLoader is garbage-collected, so drop every reference (trainer
     # holds one too) before test_loader spawns its own workers on top of them.

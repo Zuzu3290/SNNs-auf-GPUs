@@ -148,6 +148,7 @@ class AdaptiveCacheController:
         metrics             = monitor.snapshot()
         dataset_size_gb     = self.estimate_dataset_memory_footprint(dataset, transform=transform)
         available_for_cache = metrics.available_ram_gb - self.memory_safety_margin
+        effective_size_gb   = dataset_size_gb * max(1, num_workers)  # MemoryCachedDataset's per-instance dict gets duplicated once per DataLoader worker process
 
         cache_dir = self.cache_path / split
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -157,7 +158,7 @@ class AdaptiveCacheController:
             # for the same physical RAM a memory cache would use —
             # disk sidesteps that contention entirely.
             mode = "disk"
-        elif available_for_cache >= self.memory_threshold and dataset_size_gb * max(1, num_workers) < available_for_cache * self.memory_tier_headroom_fraction:
+        elif available_for_cache >= self.memory_threshold and effective_size_gb < available_for_cache * self.memory_tier_headroom_fraction:
             mode = "memory"
         elif metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * self.disk_tier_headroom_multiple:
             # Only two tiers exist (memory, disk): a bounded RAM hot layer on
@@ -170,7 +171,7 @@ class AdaptiveCacheController:
                 f"RAM: {available_for_cache:.1f}GB, Disk: {metrics.disk_available_gb:.1f}GB"
             )
 
-        logger.info(f"[CACHE CONTROLLER] {split.upper()} -> {mode.upper()} ({available_for_cache:.1f}GB RAM free, dataset ~{dataset_size_gb:.1f}GB, num_workers~{num_workers})")
+        logger.info(f"[CACHE CONTROLLER] {split.upper()} -> {mode.upper()} ({available_for_cache:.1f}GB RAM free, dataset ~{dataset_size_gb:.1f}GB x {num_workers} workers = {effective_size_gb:.1f}GB effective)")
 
         # Only insert the numpy→tensor bridge ahead of live_transform when
         # there actually is one, to match the exact pipeline used when

@@ -10,15 +10,16 @@
 #   PyTorch CUDA: https://pytorch.org/get-started/locally/
 
 # Core scientific stack
-numpy>=2.0
+# numpy<=2.4, not a bare >=2.0 : numba (below) refuses to import against numpy>=2.5 (raises
+# ImportError at import time, not a warning) -- confirmed against numba 0.66.0. Bump the
+# ceiling only alongside a numba release that raises its own numpy support window.
+numpy>=2.0,<=2.4
 scipy>=1.10
-# Pinned, not >= : sinabs>=3.1.3 (below) requires nir<=1.0.4 on its own end, and
-# every nirtorch release >=2.0.3 requires nir>=1.0.6 -- those two floors/ceilings
-# can never both be satisfied, so a bare >= here lets pip's resolver wander into
-# an unresolvable combination. nir==1.0.4 + nirtorch==2.0.2 is the last pairing
-# confirmed actually working against sinabs in this project (see
-# docs/frameworks/realtime_nir_evaluation.md's feasibility checks, run against
-# exactly these versions).
+# JIT for event_data_workflow/fast_denoise.py -- replaces tonic's pure-Python Denoise loop
+# (~93% of N-Caltech101 preprocessing cost), ~72x faster, verified byte-identical output.
+numba>=0.66.0
+# Pinned, not >= : sinabs>=3.1.3 requires nir<=1.0.4, but nirtorch>=2.0.3 requires nir>=1.0.6 --
+# unresolvable together, so pin the last confirmed-working pairing exactly.
 nir==1.0.4
 nirtorch==2.0.2
 matplotlib>=3.7
@@ -28,17 +29,8 @@ psutil>=5.9
 torch>=2.1.0         # install via https://pytorch.org
 torchvision>=0.16.0  # install the matching CUDA build alongside torch, same page
 
-# torch.compile's inductor backend needs Triton for CUDA kernel codegen.
-# Linux: the official `triton` package — pip's own manylinux wheels, Python
-# 3.10-3.14, no Windows build exists for it at all (verified against PyPI's
-# published wheel list). It normally rides in as a transitive dependency of
-# the CUDA torch wheel anyway; listed explicitly here so it's a visible,
-# pinned requirement rather than an implicit side effect of installing torch.
-# Windows: `triton` has no wheel to install there full stop, at any Python
-# version — triton-windows is the actively-maintained fork with real
-# prebuilt Windows wheels (confirmed working here: Python 3.14, triton-windows
-# 3.7.1.post27). The two markers are mutually exclusive, so exactly one of
-# these two lines ever actually installs on a given machine.
+# torch.compile's inductor backend needs Triton for CUDA kernel codegen. `triton` has no
+# Windows wheel at all -- triton-windows is the maintained fork that does; exactly one line installs per platform.
 triton; sys_platform != "win32"
 triton-windows; sys_platform == "win32"
 
@@ -48,11 +40,8 @@ norse>=0.0.7             # Norse SNN framework
 spikingjelly>=0.0.0.0.14 # SpikingJelly SNN framework
 sinabs>=3.1.3            # DVS-first SNN framework, exports to SynSense Speck chip
 
-# tensorboard upgraded for protobuf 7.x compatibility (sinabs/bindsnet pull a newer
-# protobuf than the legacy tensorboard 2.10.1 that shipped here supported). The old
-# `tensorflow` package was removed — nothing in this codebase imports it; it was only
-# ever a transitive/incidental install, and its generated protobuf code is incompatible
-# with protobuf 7.x anyway.
+# Upgraded for protobuf 7.x compatibility (sinabs/bindsnet pull a newer protobuf than
+# the legacy tensorboard 2.10.1 that shipped here supported).
 tensorboard>=2.20.0
 
 # Event camera drivers (uncomment the one matching your hardware)
@@ -77,10 +66,6 @@ h5py>=3.0               # reads DSEC's .h5 event files
 hdf5plugin>=4.0         # codec plugin h5py needs for DSEC's compressed .h5 files
 imageio>=2.31           # decodes DSEC's optical-flow PNG targets
 
-# GPU/NVML stats (event_data_workflow/gpu_stats.py, system_monitor.py).
-# nvidia-ml-py, not pynvml: the PyPI `pynvml` package is deprecated (folded
-# back into nvidia-ml-py, NVIDIA's own maintained package) and prints a
-# FutureWarning telling you to install nvidia-ml-py instead every run.
-# nvidia-ml-py still installs the same `pynvml` importable module, so no
-# code changes needed anywhere that does `import pynvml`.
+# GPU/NVML stats. nvidia-ml-py, not pynvml: pynvml is deprecated in favor of this,
+# NVIDIA's maintained package -- still installs the same importable `pynvml` module.
 nvidia-ml-py

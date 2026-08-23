@@ -26,7 +26,8 @@ import tqdm as t
 from typing import Optional, Protocol
 from skeleton import WorkflowSettings
 from .system_monitor import monitor
-from .cache_engine import AdaptiveCacheController, ComposedTransform, FixedToFrame, measure_event_bytes
+from .cache_engine import AdaptiveCacheController, ComposedTransform, FixedToFrame, PreTransformedDataset, measure_event_bytes
+from .fast_denoise import FastDenoise
 from .dataset_registry import resolve_dataset_entry
 from .prefetch import AsyncGPUPrefetcher, CudaPrefetcher
 
@@ -70,14 +71,10 @@ def load_dataset_with_retry(build_fn, attempts: int = 5, base_delay_s: float = 5
     for attempt in range(1, attempts + 1):
         try:
             return build_fn()
-        except (urllib.error.URLError, ConnectionError, socket.gaierror, TimeoutError) as exc:
-            if attempt == attempts:
-                raise
-            delay = base_delay_s * attempt
-            logger.warning(f"[PIPELINE] Dataset download failed ({exc}) — retrying ({attempt}/{attempts - 1}) in {delay:.0f}s")
-            time.sleep(delay)
-        except RuntimeError as exc:
-            if "File not found or corrupted" not in str(exc) or attempt == attempts:
+        except Exception as exc:
+            retryable = isinstance(exc, (urllib.error.URLError, ConnectionError, socket.gaierror, TimeoutError)) or \
+                (isinstance(exc, RuntimeError) and "File not found or corrupted" in str(exc))
+            if not retryable or attempt == attempts:
                 raise
             delay = base_delay_s * attempt
             logger.warning(f"[PIPELINE] Dataset download failed ({exc}) — retrying ({attempt}/{attempts - 1}) in {delay:.0f}s")
@@ -308,7 +305,10 @@ class NeuromorphicEncoder:
         else:
             to_frame = transforms.ToFrame(sensor_size=sensor_size, time_window=self.wf.TIME_WINDOW_US)
         # ComposedTransform, not tonic's own Compose -- Compose breaks out early once events go empty, skipping ToFrame's zero-fill.
-        frame_tf = ComposedTransform([transforms.Denoise(filter_time=10000), FixedToFrame(to_frame)])
+        # FastDenoise, not tonic's own Denoise -- verified byte-identical output (diagnostics/validate_fast_denoise.py),
+        # ~72x faster on real N-Caltech101 samples (diagnostics/benchmark_fast_denoise.py): tonic's Denoise loops over
+        # every raw event in pure Python; FastDenoise runs the same unchanged algorithm compiled by numba instead.
+        frame_tf = ComposedTransform([FastDenoise(filter_time=10000), FixedToFrame(to_frame)])
 
         # One real transform, paid once here, so create_loaders() can size
         # DataLoader workers from the actual post-transform frame a batch is
@@ -332,11 +332,11 @@ class NeuromorphicEncoder:
         controller = self.controller
 
         # Worst-case worker count (bytes_per_batch unknown yet, so only the RAM/spawn-reload caps apply) -- prices the memory tier's per-worker duplication before workers are actually sized.
-        worker_estimate = max(1, monitor.dataloader_config(
+        worker_estimate, _, _ = monitor.worker_count(
             torch.device(self.cfg.DEVICE), safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
-            worker_ram_fraction=self.wf.WORKER_RAM_FRACTION, worker_timeout_s=self.wf.DATALOADER_WORKER_TIMEOUT_S,
-            worker_count_override=self.wf.WORKER_COUNT_OVERRIDE,
-        )["num_workers"])
+            worker_count_override=self.wf.worker_count_override,
+        )
+        worker_estimate = max(1, worker_estimate)
 
         # train_augment is random, so it must run fresh every access rather
         # than get baked into a persistent cache — see determine_dataset_strategy.
@@ -381,7 +381,11 @@ class NeuromorphicEncoder:
             # Cache the deterministic frame transform; keep the random
             # augmentation out of the cached value (transform/live_transform split).
             train_data = controller.determine_dataset_strategy(raw_train, transform=frame_tf, live_transform=train_augment, split=f"{dataset_prefix}/train", num_workers=worker_estimate)
-            test_data  = controller.determine_dataset_strategy(raw_test,  transform=test_tf,  split=f"{dataset_prefix}/test", num_workers=worker_estimate)
+            # Inference gets no cache and no adaptive sizing, deliberately -- caching earns its cost
+            # across many repeated epochs (training); a single pass over the test set doesn't have
+            # that access pattern, so caching it only adds disk writes and RAM/worker complexity
+            # inference doesn't need. See create_loaders() for the matching fixed, non-adaptive test_cfg.
+            test_data = PreTransformedDataset(raw_test, test_tf)
 
         # tonic's DiskCachedDataset/MemoryCachedDataset and torch's Subset (from
         # random_split) don't forward attribute access to the wrapped dataset, so a
@@ -411,22 +415,21 @@ class NeuromorphicEncoder:
             logger.info(f"[PIPELINE] Batch size {batch_size} > {len(train_data)} train samples -> clamping to {len(train_data)} so drop_last=True still yields a batch")
             batch_size = max(1, len(train_data))
         device = torch.device(self.cfg.DEVICE)
-        base_cfg = monitor.dataloader_config(
-            device, safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
+        # One shared snapshot for both configs below -- train and test are sized for the same instant, no reason to re-probe RAM/GPU/disk twice.
+        loader_cfg_kwargs = dict(
+            safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
             bytes_per_batch=self.batch_sample_bytes * batch_size,
             worker_ram_fraction=self.wf.WORKER_RAM_FRACTION,
             worker_timeout_s=self.wf.DATALOADER_WORKER_TIMEOUT_S,
-            worker_count_override=self.wf.WORKER_COUNT_OVERRIDE,
+            worker_count_override=self.wf.worker_count_override,
+            metrics=monitor.snapshot(),
         )
-        # Fresh, smaller sizing for inference -- its workers spawn after training already spent RAM/VRAM headroom.
-        test_cfg = monitor.dataloader_config(
-            device, safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
-            bytes_per_batch=self.batch_sample_bytes * batch_size,
-            worker_ram_fraction=self.wf.WORKER_RAM_FRACTION,
-            worker_timeout_s=self.wf.DATALOADER_WORKER_TIMEOUT_S,
-            worker_fraction=self.wf.INFERENCE_WORKER_FRACTION,
-            worker_count_override=self.wf.WORKER_COUNT_OVERRIDE,
-        )
+        base_cfg = monitor.dataloader_config(device, **loader_cfg_kwargs)
+        # Fixed, non-adaptive -- deliberately not RAM-probed or worker-sized like training's base_cfg.
+        # Inference is a single, un-cached pass (see apply_pipeline()'s test_data); num_workers=0 is
+        # PyTorch's own common inference idiom, and it means this config never varies with machine
+        # RAM state, unlike training's.
+        test_cfg = {"num_workers": 0, "prefetch_factor": None, "pin_memory": True, "persistent_workers": False, "timeout": 0}
 
         # Regression targets (MVSEC's tuple, TUM-VIE's dict) aren't torch.tensor()-able —
         # tonic's own PadTensors would crash on them. Only classification datasets get it.
@@ -480,7 +483,7 @@ class NeuromorphicEncoder:
     def loader_kwargs(self, dataset, base_cfg: dict) -> dict:
         """Force single-process loading for a dataset that needs it (see requires_single_process_loading)."""
         if getattr(dataset, "requires_single_process_loading", False):
-            cfg = {"num_workers": 0, "prefetch_factor": None, "pin_memory": False, "persistent_workers": False}
+            cfg = {"num_workers": 0, "prefetch_factor": None, "pin_memory": False, "persistent_workers": False, "timeout": 0}
             logger.info("[PIPELINE] Single-process-only cache detected — forcing num_workers=0")
         else:
             cfg = base_cfg
