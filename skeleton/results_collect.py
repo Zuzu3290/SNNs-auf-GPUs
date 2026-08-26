@@ -118,8 +118,14 @@ def build_run_row(
     num_workers: int | None = None,
     notes: str = "",
     run_id: str | None = None,
+    latency: dict | None = None,
 ) -> dict:
-    """One row summarising the whole run."""
+    """One row summarising the whole run.
+
+    `latency` is utilities.measure_latency()'s dict -- REAL batch-size-1 timings. None
+    leaves those three columns empty rather than filling them with the amortised
+    per-sample figure, which is a different measurement (see below).
+    """
     framework = cfg.FRAMEWORK
     seed = getattr(cfg, "SEED", None)
 
@@ -164,9 +170,18 @@ def build_run_row(
         "train_time_s": train_time,
         "train_time_per_epoch_s": (train_time / len(epoch_log)) if train_time and epoch_log else None,
         "inference_throughput_samples_per_s": test_results.get("throughput_samples_per_s"),
-        "inference_latency_bs1_ms": test_results.get("median_latency_per_sample_ms"),
-        "inference_latency_bs1_mean_ms": test_results.get("avg_latency_per_sample_ms"),
-        "inference_latency_bs1_p90_ms": test_results.get("p90_latency_per_sample_ms"),
+        # REAL batch-size-1 measurements, from utilities.measure_latency -- one sample at
+        # a time with a synchronise around each, the MLPerf Single-Stream convention.
+        #
+        # These used to be filled from the test pass's per-sample figures, which are a
+        # BATCH time divided by the batch size: throughput under batching, not latency.
+        # It is systematically optimistic (a single arriving event cannot use that
+        # parallelism) and its p90 describes batch-to-batch variation, since every sample
+        # in a batch carries the same divided value. Same column names as SNNs_2, and now
+        # the same measurement behind them.
+        "inference_latency_bs1_ms": (latency or {}).get("latency_ms"),
+        "inference_latency_bs1_mean_ms": (latency or {}).get("latency_mean_ms"),
+        "inference_latency_bs1_p90_ms": (latency or {}).get("latency_p90_ms"),
 
         "spike_rate_pct": _pct(_last(train_results.get("spike_rate_history") or [])),
 

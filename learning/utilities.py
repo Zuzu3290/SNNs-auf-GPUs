@@ -8,6 +8,7 @@ Import pattern in each framework file:
 import gc
 import logging
 import threading
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -108,6 +109,80 @@ def spikes_per_neuron_per_inference(spike_rate: float, timesteps: int) -> float:
     therefore cannot be wrong -- see firing_window_seconds() for why Hz can be.
     """
     return spike_rate * timesteps
+
+
+def collect_single_samples(loader, device, count: int) -> list:
+    """`count` individual samples, on-device, each shaped [T, 1, C, H, W].
+
+    Pre-loaded so the latency measurement below times the NETWORK, not the data
+    pipeline. The host-to-device copy is excluded for the same reason, and it is
+    identical for all four frameworks anyway.
+    """
+    samples: list = []
+    for frames, _ in loader:
+        frames = frames.to(device)
+        for index in range(frames.shape[1]):          # dim 1 = batch
+            samples.append(frames[:, index: index + 1].contiguous())
+            if len(samples) >= count:
+                return samples
+    return samples
+
+
+def measure_latency(model, samples: list, device: torch.device, warmup: int = 5) -> dict:
+    """Single-stream latency: batch size 1, synchronised around EACH sample.
+
+    This is the MLPerf Single-Stream convention and the question a deployment actually
+    asks -- "one event arrives, how long until the answer is ready?"
+
+    It is NOT the same measurement as dividing a batch's wall-clock by the batch size.
+    That figure is throughput under batching: it benefits from parallelism a single
+    arriving event cannot use, so it is systematically optimistic, and percentiles built
+    from it describe batch-to-batch variation rather than sample-to-sample -- every
+    sample in a batch is assigned the same divided value. Both are recorded, under
+    names that say which is which (see SNN_GPU_Evaluation_Metrics.md 2.3).
+
+    Per-sample synchronisation IS the point here, unlike in bulk timing: latency is
+    defined as when the output is genuinely ready, not when the work was queued.
+    """
+    import statistics
+
+    if not samples:
+        raise ValueError("measure_latency needs at least one sample")
+
+    model.eval_mode()
+    tensor_format = model.tensor_format() if hasattr(model, "tensor_format") else "TB"
+
+    def forward(sample):
+        data = sample.permute(1, 0, 2, 3, 4).contiguous() if tensor_format == "BT" else sample
+        return model(data)
+
+    def sync():
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+    with torch.no_grad():
+        for _ in range(warmup):          # kernels compiled before the clock starts
+            forward(samples[0])
+        sync()
+
+        durations_ms: list[float] = []
+        for sample in samples:
+            sync()
+            start = time.perf_counter()
+            forward(sample)
+            sync()
+            durations_ms.append(1000.0 * (time.perf_counter() - start))
+
+    ordered = sorted(durations_ms)
+    p90_index = min(len(ordered) - 1, int(round(0.90 * (len(ordered) - 1))))
+    return {
+        "latency_ms": statistics.median(durations_ms),      # headline
+        "latency_mean_ms": statistics.fmean(durations_ms),
+        "latency_p90_ms": ordered[p90_index],               # MLPerf convention
+        "latency_min_ms": ordered[0],
+        "latency_max_ms": ordered[-1],
+        "latency_samples": len(durations_ms),
+    }
 
 
 def warm_up(model, sample_batch: torch.Tensor, iterations: int) -> dict:

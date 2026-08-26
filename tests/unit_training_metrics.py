@@ -388,8 +388,95 @@ def test_training_runs_on_cpu_at_all() -> None:
         suite.check("a two-epoch CPU run completes", False, str(error))
 
 
+# ---------------------------------------------------------------------------
+# 6. single-stream (batch-size-1) latency
+# ---------------------------------------------------------------------------
+class _OneBatchLoader:
+    def __init__(self, cfg, batches=3, timesteps=6, batch=8):
+        self.cfg, self.n, self.T, self.B = cfg, batches, timesteps, batch
+
+    def __iter__(self):
+        for _ in range(self.n):
+            yield (spike_input(self.cfg, self.T, self.B),
+                   torch.zeros(self.B, dtype=torch.long))
+
+
+def test_collect_single_samples_gives_batch_of_one() -> None:
+    from learning.utilities import collect_single_samples
+
+    _, cfg = build_model("torch")
+    samples = collect_single_samples(_OneBatchLoader(cfg), torch.device("cpu"), 20)
+    suite.check("collects the requested count", len(samples) == 20, str(len(samples)))
+    suite.check("each sample has batch dimension 1", all(s.shape[1] == 1 for s in samples),
+                str(tuple(samples[0].shape)))
+    suite.check("time dimension preserved", samples[0].shape[0] == 6,
+                str(tuple(samples[0].shape)))
+
+
+def test_measure_latency_is_a_real_per_sample_measurement() -> None:
+    """The distinction that matters: dividing a batch time by B gives every sample in
+    that batch the SAME number, so its percentiles describe batch-to-batch variation.
+    A real bs1 pass produces genuinely different values per sample."""
+    from learning.utilities import collect_single_samples, measure_latency
+
+    model, cfg = build_model("torch")
+    samples = collect_single_samples(_OneBatchLoader(cfg), torch.device("cpu"), 15)
+    result = measure_latency(model, samples, torch.device("cpu"), warmup=2)
+
+    for key in ["latency_ms", "latency_mean_ms", "latency_p90_ms",
+                "latency_min_ms", "latency_max_ms", "latency_samples"]:
+        suite.check(f"reports {key}", key in result)
+    suite.check("one timing per sample", result["latency_samples"] == 15,
+                str(result["latency_samples"]))
+    suite.check("timings are positive", result["latency_ms"] > 0)
+    suite.check("min <= median <= p90 <= max",
+                result["latency_min_ms"] <= result["latency_ms"] <= result["latency_p90_ms"]
+                <= result["latency_max_ms"])
+    suite.check("the samples are not all identical -- a real spread was measured",
+                result["latency_max_ms"] > result["latency_min_ms"])
+
+
+def test_measure_latency_refuses_an_empty_sample_list() -> None:
+    from learning.utilities import measure_latency
+
+    model, _ = build_model("torch")
+    suite.expect_raises("empty sample list raises", ValueError,
+                        lambda: measure_latency(model, [], torch.device("cpu")))
+
+
+def test_run_row_bs1_columns_come_from_the_real_measurement() -> None:
+    """Same column names as SNNs_2, and now the same measurement behind them."""
+    import inspect
+
+    from skeleton import results_collect
+
+    source = inspect.getsource(results_collect.build_run_row)
+    suite.check("bs1 columns read the latency dict",
+                '(latency or {}).get("latency_ms")' in source)
+    suite.check("they no longer read the amortised per-sample figure",
+                "median_latency_per_sample_ms" not in source)
+    suite.check("build_run_row accepts a latency argument",
+                "latency" in inspect.signature(results_collect.build_run_row).parameters)
+
+
+def test_latency_samples_is_configurable() -> None:
+    cfg = Settings()
+    suite.check("latency_samples is in the shipped config",
+                "latency_samples" in load_base()["training"])
+    suite.check("Settings exposes it", hasattr(cfg, "LATENCY_SAMPLES"))
+    suite.check("it defaults to a usable count", cfg.LATENCY_SAMPLES >= 20,
+                str(cfg.LATENCY_SAMPLES))
+    cfg2, _ = settings_pair({"training": {"latency_samples": 0}})
+    suite.check("0 disables the pass", cfg2.LATENCY_SAMPLES == 0)
+
+
 def main() -> int:
     return suite.run([
+        test_collect_single_samples_gives_batch_of_one,
+        test_measure_latency_is_a_real_per_sample_measurement,
+        test_measure_latency_refuses_an_empty_sample_list,
+        test_run_row_bs1_columns_come_from_the_real_measurement,
+        test_latency_samples_is_configurable,
         test_window_is_none_when_not_knowable,
         test_window_from_a_stated_sample_duration,
         test_window_derived_from_time_window_framing,

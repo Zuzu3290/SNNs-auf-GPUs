@@ -89,6 +89,8 @@ class Settings:
         self.CALIBRATE_BATCH_SIZE     = bool(training.get("calibrate_batch_size", True))
         # Untimed forward+backward passes before the timed epochs -- see the YAML comment.
         self.WARMUP_ITERATIONS        = int(training.get("warmup_iterations", 5))
+        # Samples for the batch-size-1 latency pass; 0 skips it entirely.
+        self.LATENCY_SAMPLES          = int(training.get("latency_samples", 100))
 
         # Fixes weight init AND batch order. Without it, any measured difference
         # between two frameworks is confounded with initialisation noise -- there was

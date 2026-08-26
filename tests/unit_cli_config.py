@@ -179,22 +179,56 @@ def test_missing_overlay_file_raises() -> None:
 
 
 def test_shipped_ex2_overlay_is_valid() -> None:
-    path = REPO_ROOT / "config" / "ex2.yaml"
+    # Each experiment's config lives IN its experiment folder, beside the README that
+    # describes it -- not in a separate config/ tree that would drift away from it.
+    path = REPO_ROOT / "experiments" / "ex2" / "config.yaml"
     if not path.is_file():
-        suite.check("config/ex2.yaml exists", False, "missing")
+        suite.check("experiments/ex2/config.yaml exists", False, "missing")
         return
     merged = load_config(path)
     cfg = Settings(config=merged)
     suite.check("ex2 names its dataset", cfg.DATASET_NAME == "N-MNIST", str(cfg.DATASET_NAME))
     suite.check("ex2 makes sinabs leak-free", cfg.NEURON["sinabs"]["tau_mem"] == float("inf"),
                 str(cfg.NEURON["sinabs"]["tau_mem"]))
-    suite.check("ex2 leaves the other neurons alone",
-                cfg.NEURON["snntorch"]["beta"] == load_base()["neuron"]["snntorch"]["beta"])
+    # ex2 is "each framework OUT OF THE BOX", so it varies all four neurons, not just
+    # sinabs -- that is the experiment. Asserted rather than assumed, because an ex2
+    # that only moved one framework would silently be measuring something else.
+    base_neuron = load_base()["neuron"]
+    varied = [fw for fw in base_neuron if cfg.NEURON[fw] != base_neuron[fw]]
+    suite.check("ex2 varies every framework's neuron, not just one",
+                len(varied) == len(base_neuron), f"varied: {sorted(varied)}")
 
 
 # ---------------------------------------------------------------------------
 # 4. Settings / WorkflowSettings construction
 # ---------------------------------------------------------------------------
+def test_experiment_configs_live_in_their_experiment_folder() -> None:
+    """The layout rule: config.yaml sits beside the README of the experiment it
+    describes, so the two cannot drift apart and a folder is self-contained. There is
+    no separate config/ tree."""
+    experiments = REPO_ROOT / "experiments"
+    suite.check("no separate config/ directory at the repo root",
+                not (REPO_ROOT / "config").exists())
+    if not experiments.is_dir():
+        suite.check("experiments/ exists", False, "missing")
+        return
+    for folder in sorted(p for p in experiments.iterdir() if p.is_dir()):
+        config = folder / "config.yaml"
+        if config.is_file():
+            suite.check(f"{folder.name}/config.yaml parses", isinstance(load_config(config), dict))
+
+
+def test_generated_experiment_output_is_ignored() -> None:
+    """Runs and equivalence output are generated, not source. A Colab run and a laptop
+    run must not fight over the same files, and config.yaml/README.md must stay tracked
+    -- they describe the experiment."""
+    rules = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    for pattern in ["experiments/*/results/runs/", "experiments/*/equivalence/"]:
+        suite.check(f".gitignore covers {pattern}", pattern in rules)
+    suite.check("config.yaml is NOT ignored", "experiments/*/config.yaml" not in rules)
+    suite.check("README.md is NOT ignored", "experiments/*/README.md" not in rules)
+
+
 def test_no_argument_construction_still_works() -> None:
     """The colleague's `python learning/main.py` path."""
     cfg, wf = Settings(), WorkflowSettings()
@@ -295,7 +329,7 @@ def test_optional_argument_groups() -> None:
     args = parse(["--config", "x"], framework=False, seed=False)
     suite.check("framework can be omitted from a parser", not hasattr(args, "framework"))
     suite.check("seed can be omitted from a parser", not hasattr(args, "seed"))
-    args = parse([], roots=False)
+    args = parse([], results_root=False, cache_root=False)
     suite.check("roots can be omitted from a parser", not hasattr(args, "results_root"))
 
 
@@ -424,6 +458,8 @@ def main() -> int:
         test_typo_in_an_overlay_section_raises,
         test_missing_overlay_file_raises,
         test_shipped_ex2_overlay_is_valid,
+        test_experiment_configs_live_in_their_experiment_folder,
+        test_generated_experiment_output_is_ignored,
         test_no_argument_construction_still_works,
         test_config_and_overlay_are_mutually_exclusive,
         test_defaults_reproduce_the_original_behaviour,

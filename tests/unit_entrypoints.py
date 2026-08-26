@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import io
+import pathlib
 import sys
 import tempfile
 from pathlib import Path
@@ -113,9 +114,9 @@ def test_check_network_single_framework_shows_shapes() -> None:
 
 def test_check_network_honours_the_overlay() -> None:
     code, out = run_script("check_network",
-                           ["--config", "config/ex2.yaml", "--framework", "sinabs"])
+                           ["--config", "experiments/ex2/config.yaml", "--framework", "sinabs"])
     suite.check("overlay run exits 0", code == 0, f"exit {code}")
-    suite.check("the banner names the overlay", "config/ex2.yaml" in out)
+    suite.check("the banner names the overlay", "experiments/ex2/config.yaml" in out)
     suite.check("the dataset came from the overlay, not a prompt", "N-MNIST" in out)
     suite.check("ex2's leak-free sinabs is reported", "inf" in out)
 
@@ -208,10 +209,16 @@ def test_equivalence_measures_but_does_not_judge() -> None:
     error. ex2 deliberately gives sinabs no leak, multi-spike and a subtract reset, so
     a large deviation IS the experiment's finding. It must be reported, and must not
     fail the run."""
-    code, out = run_script("equivalence_check", ["--config", "config/ex2.yaml"])
+    code, out = run_script("equivalence_check", ["--config", "experiments/ex2/config.yaml"])
     suite.check("a deliberately divergent config still exits 0", code == 0, f"exit {code}")
     suite.check("sinabs is reported as differing", "sinabs" in out and "differing" in out)
-    suite.check("the other three still agree", "6/8 framework-patterns" in out, out[-400:])
+    # ex2 moves ALL FOUR neurons to their own defaults, so only the reference agrees
+    # with itself -- 2 of 8 framework-patterns (torch, in both patterns). A wholesale
+    # divergence IS the result here, which is exactly why this script does not gate.
+    suite.check("every non-reference framework is reported as differing",
+                "2/8 framework-patterns" in out, out[-400:])
+    for framework in ("norse", "sj", "sinabs"):
+        suite.check(f"{framework} differs under ex2", f"{framework} (" in out)
     suite.check("it says the deviation may be the intended result",
                 "this IS the" in out or "deliberately varies" in out)
     suite.check("no PASS/FAIL verdict is issued", "GATE A3" not in out)
@@ -247,14 +254,14 @@ def test_main_parses_the_full_flag_set() -> None:
     from learning.main import parse_args
 
     saved = sys.argv
-    sys.argv = ["main.py", "--config", "config/ex2.yaml", "--experiment", "ex2",
+    sys.argv = ["main.py", "--config", "experiments/ex2/config.yaml", "--experiment", "ex2",
                 "--framework", "sinabs", "--seed", "3",
                 "--results-root", "/drive/runs", "--cache-root", "/content/cache"]
     try:
         args = parse_args()
     finally:
         sys.argv = saved
-    suite.check("--config parsed", args.config == "config/ex2.yaml")
+    suite.check("--config parsed", args.config == "experiments/ex2/config.yaml")
     suite.check("--experiment parsed", args.experiment == "ex2")
     suite.check("--framework parsed", args.framework == "sinabs")
     suite.check("--seed parsed as an int", args.seed == 3 and isinstance(args.seed, int))
@@ -305,9 +312,10 @@ def test_each_script_advertises_exactly_the_flags_it_can_act_on() -> None:
                           "results_root", "cache_root"},
         "check_network": {"config", "framework", "seed", "experiment",
                           "all", "batch", "timesteps"},
-        # writes no files, so no results_root / cache_root; builds all four, so no
-        # framework; the poisson pattern carries its own seed, so no seed.
-        "equivalence_check": {"config", "experiment"},
+        # Writes FIGURES, so it takes results_root (they must be able to land on
+        # mounted Drive on Colab) and formats. No cache_root -- it touches no dataset.
+        # Builds all four, so no framework; the poisson pattern carries its own seed.
+        "equivalence_check": {"config", "experiment", "results_root", "formats"},
     }
     for module_name, flags in expected.items():
         module = importlib.import_module(module_name)
@@ -322,14 +330,40 @@ def test_each_script_advertises_exactly_the_flags_it_can_act_on() -> None:
                     f"extra {sorted(actual - flags)}, missing {sorted(flags - actual)}")
 
 
-def test_equivalence_check_has_no_output_roots() -> None:
-    """It writes nothing, so offering --results-root would be a flag that does nothing."""
-    for flag in ["--results-root", "--cache-root"]:
-        code, _ = run_script("equivalence_check", [flag, "/tmp/x"])
-        suite.check(f"equivalence_check rejects {flag}", code != 0, f"exit {code}")
+def test_equivalence_check_roots() -> None:
+    """It writes figures, so --results-root must work (Colab Drive). It reads no
+    dataset, so --cache-root must NOT exist."""
+    code, _ = run_script("equivalence_check", ["--cache-root", "/tmp/x"])
+    suite.check("equivalence_check rejects --cache-root", code != 0, f"exit {code}")
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        code, out = run_script("equivalence_check",
+                               ["--experiment", "extest", "--results-root", tmp])
+        suite.check("equivalence_check accepts --results-root with --experiment",
+                    code == 0, f"exit {code}")
+        written = list(pathlib.Path(tmp).rglob("EQ_*.png"))
+        suite.check("figures land under the given results root", len(written) == 2,
+                    f"{len(written)} figures: {[p.name for p in written]}")
+
+
+def test_equivalence_check_formats() -> None:
+    """PDF is vector, which a written report needs."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        code, _ = run_script("equivalence_check",
+                             ["--experiment", "extest", "--results-root", tmp,
+                              "--formats", "png,pdf"])
+        suite.check("a multi-format run succeeds", code == 0, f"exit {code}")
+        root = pathlib.Path(tmp)
+        suite.check("PNG written", len(list(root.rglob("EQ_*.png"))) == 2)
+        suite.check("PDF written", len(list(root.rglob("EQ_*.pdf"))) == 2)
 
 
 def test_check_network_has_no_output_roots() -> None:
+    """It writes nothing at all, so neither root should exist."""
     for flag in ["--results-root", "--cache-root"]:
         code, _ = run_script("check_network", [flag, "/tmp/x"])
         suite.check(f"check_network rejects {flag}", code != 0, f"exit {code}")
@@ -338,7 +372,8 @@ def test_check_network_has_no_output_roots() -> None:
 def main() -> int:
     return suite.run([
         test_each_script_advertises_exactly_the_flags_it_can_act_on,
-        test_equivalence_check_has_no_output_roots,
+        test_equivalence_check_roots,
+        test_equivalence_check_formats,
         test_check_network_has_no_output_roots,
         test_shape_without_download_from_the_registry,
         test_shape_falls_back_to_the_convolution_block,

@@ -10,7 +10,7 @@ TWO WAYS TO RUN, BOTH SUPPORTED
 2. One overlay file per experiment, stating ONLY what differs. Everything it does not
    mention is inherited from the three base files:
 
-       python learning/main.py --config config/ex2.yaml --experiment ex2
+       python learning/main.py --config experiments/ex2/config.yaml --experiment ex2
 
 WHY A FLAT OVERLAY WORKS
 ------------------------

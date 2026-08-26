@@ -7,7 +7,8 @@ implementation can differ. Experiment 2 asks the opposite question:
 > event-camera data, what neuron do you actually **get** — and what does that do to
 > accuracy, speed, spiking activity and memory?
 
-Config: `config/ex2.yaml`. Translated from `SNNs_2/config/config_ex2.yaml`.
+Config: `experiments/ex2/config.yaml` (lives beside this README, in the experiment it
+describes). Translated from `SNNs_2/config/config_ex2.yaml`.
 
 ## What "out of the box" means
 
@@ -82,17 +83,17 @@ accumulate into one comparable table. Seed counts do **not** have to match acros
 frameworks — one seed each is a valid experiment.
 
 ```bash
-python learning/main.py --config config/ex2.yaml --experiment ex2 --framework torch  --seed 0
-python learning/main.py --config config/ex2.yaml --experiment ex2 --framework sj     --seed 0
-python learning/main.py --config config/ex2.yaml --experiment ex2 --framework norse  --seed 0
-python learning/main.py --config config/ex2.yaml --experiment ex2 --framework sinabs --seed 0
+python learning/main.py --config experiments/ex2/config.yaml --experiment ex2 --framework torch  --seed 0
+python learning/main.py --config experiments/ex2/config.yaml --experiment ex2 --framework sj     --seed 0
+python learning/main.py --config experiments/ex2/config.yaml --experiment ex2 --framework norse  --seed 0
+python learning/main.py --config experiments/ex2/config.yaml --experiment ex2 --framework sinabs --seed 0
 ```
 
 Repeat with `--seed 1`, `--seed 2` for replicates. On Colab, `--results-root` can point at
 Drive so results survive the session:
 
 ```bash
-python learning/main.py --config config/ex2.yaml --experiment ex2 \
+python learning/main.py --config experiments/ex2/config.yaml --experiment ex2 \
     --framework sinabs --seed 0 --results-root /content/drive/MyDrive/runs
 ```
 

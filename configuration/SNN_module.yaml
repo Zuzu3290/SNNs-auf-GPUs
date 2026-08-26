@@ -56,6 +56,14 @@ training:
   # vs 41-80 ms). No optimizer step is taken. 0 disables.
   warmup_iterations: 5
 
+  # Samples used for the batch-size-1 latency measurement (MLPerf Single-Stream).
+  # 100 is enough for a stable median and p90. This is a SEPARATE, small pass run
+  # outside any timed region -- it does not disturb the batched test numbers, and it
+  # answers a different question: "one event arrives, how long until the answer is
+  # ready" rather than "how much wall-clock does each sample cost at this batch size".
+  # 0 skips it, and the three inference_latency_bs1_* columns are then left empty.
+  latency_samples: 100
+
   # ONE optimizer and ONE loss for every framework -- these are plain torch, so giving a
   # framework its own would compare training recipes instead of frameworks.
   optimizer:

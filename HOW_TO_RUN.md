@@ -46,7 +46,7 @@ This is exactly what it always did. The additions below are all opt-in.
 
 ```bash
 python learning/main.py \
-    --config config/ex2.yaml \
+    --config experiments/ex2/config.yaml \
     --framework sinabs \
     --seed 3 \
     --experiment ex2 \
@@ -80,7 +80,7 @@ No dataset, no download, no GPU — it runs on any laptop.
 
 ```bash
 python check_network.py \
-    --config config/ex2.yaml \
+    --config experiments/ex2/config.yaml \
     --framework sinabs \
     --seed 1 \
     --experiment ex2 \
@@ -117,22 +117,35 @@ neuron, and nothing else enforces it.
 serve both uses — ex1 forces the neurons to agree, ex2 deliberately varies one, so a
 large deviation is a bug in the first case and the result in the second.
 
+It also **draws** three stacked panels per input pattern — input current, membrane
+trajectory, spike raster — so the divergence can be read as well as counted.
+
 ### The same command, with every flag it accepts
 
 ```bash
-python equivalence_check.py --config config/ex2.yaml --experiment ex2
+python equivalence_check.py \
+    --config experiments/ex2/config.yaml \
+    --experiment ex2 \
+    --results-root /content/drive/MyDrive/snn_runs \
+    --formats png,pdf
 ```
 
 | arg | possible values | default | what it does |
 |---|---|---|---|
 | `--config` | path to a `.yaml` | *none* | overlay, as above |
-| `--experiment` | any name | *none* | **label only** — this script writes no files |
+| `--experiment` | any name, e.g. `ex2` | *none* → `outputs/plots` | figures go to `<results-root>/<name>/plots` |
+| `--results-root` | any path | `experiments` | where that tree lives. **Requires `--experiment`.** Point at Drive on Colab. |
+| `--formats` | `png`, `pdf`, `svg`, comma-separated | `png` | `png,pdf` gives a vector copy for a report |
 | `-h`, `--help` | — | — | print this list |
 
 No `--framework` (it builds all four — picking one would defeat the point), no `--seed`
-(the poisson pattern carries its own, so every framework gets identical input), and no
-`--device` (CPU is hardcoded: one neuron for 90 steps gains nothing from a GPU, and
-float non-determinism would undermine an exact comparison).
+(the poisson pattern carries its own, so every framework gets identical input), no
+`--cache-root` (no dataset is touched), and no `--device` (CPU is hardcoded: one neuron
+for 90 steps gains nothing from a GPU, and float non-determinism would undermine an
+exact comparison).
+
+Matplotlib runs on the `Agg` backend, so it works headless — a Colab cell or an SSH
+session needs no display.
 
 ## A4. Run the unit tests
 
@@ -166,7 +179,7 @@ One YAML per experiment, stating **only what differs**. Everything else is inher
 from the three base files.
 
 ```yaml
-# config/ex2.yaml
+# experiments/ex2/config.yaml
 dataset:
   name: N-MNIST          # names the dataset, so nothing ever waits at a prompt
 
@@ -210,8 +223,8 @@ otherwise leave the run on base values and the experiment quietly would not happ
 Run these two first, in this order. Both are CPU-only and take seconds.
 
 ```bash
-python check_network.py --config config/ex2.yaml --all
-python equivalence_check.py --config config/ex2.yaml --experiment ex2
+python check_network.py --config experiments/ex2/config.yaml --all
+python equivalence_check.py --config experiments/ex2/config.yaml --experiment ex2
 ```
 
 The first confirms all four frameworks start from **byte-identical weights** under one
@@ -222,7 +235,7 @@ reports how far apart the four neurons actually are.
 
 ```bash
 python learning/main.py \
-    --config config/ex2.yaml \
+    --config experiments/ex2/config.yaml \
     --experiment ex2 \
     --framework sinabs \
     --seed 0
@@ -246,7 +259,7 @@ Two things differ on Colab, and both are command-line flags — the config never
 
 ```bash
 python learning/main.py \
-    --config config/ex1.yaml \
+    --config experiments/ex1/config.yaml \
     --experiment ex1 \
     --framework norse \
     --seed 0 \
@@ -263,11 +276,11 @@ set, you can launch several cells at once — each with its own `--framework` an
 
 ```bash
 # cell 1
-python learning/main.py --config config/ex1.yaml --experiment ex1 --framework norse  --seed 0 --results-root /content/drive/MyDrive/snn_runs
+python learning/main.py --config experiments/ex1/config.yaml --experiment ex1 --framework norse  --seed 0 --results-root /content/drive/MyDrive/snn_runs
 # cell 2
-python learning/main.py --config config/ex1.yaml --experiment ex1 --framework sj     --seed 0 --results-root /content/drive/MyDrive/snn_runs
+python learning/main.py --config experiments/ex1/config.yaml --experiment ex1 --framework sj     --seed 0 --results-root /content/drive/MyDrive/snn_runs
 # cell 3
-python learning/main.py --config config/ex1.yaml --experiment ex1 --framework sinabs --seed 0 --results-root /content/drive/MyDrive/snn_runs
+python learning/main.py --config experiments/ex1/config.yaml --experiment ex1 --framework sinabs --seed 0 --results-root /content/drive/MyDrive/snn_runs
 ```
 
 Add `--cache-root` if the default cache location is short of space.
@@ -316,7 +329,7 @@ config produced what follows:
 ```
 ==========================================================================
 learning/main.py
-  config        config/ex2.yaml   hash 4be0992923e9
+  config        experiments/ex2/config.yaml   hash 4be0992923e9
   experiment    ex2
   framework     sinabs
   seed          3

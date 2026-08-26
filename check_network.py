@@ -1,7 +1,7 @@
 """Build the network and report what it actually is, without touching a dataset.
 
     python check_network.py
-    python check_network.py --config config/ex2.yaml --framework sinabs --seed 1
+    python check_network.py --config experiments/ex2/config.yaml --framework sinabs --seed 1
     python check_network.py --all
 
 Feeds a dummy tensor of the right shape, so it needs no download, no GPU and no cache.
@@ -160,13 +160,14 @@ def compare_all(cfg, batch: int) -> bool:
 
 
 def parse_args():
-    """roots=False: this script writes no files and reads no cache, so --results-root
-    and --cache-root would be flags that do nothing. --experiment stays as a label for
-    the banner, saying which experiment's config is being checked."""
+    """Neither root: this script writes NO files at all and reads no cache, so both
+    would be flags that do nothing. (Contrast equivalence_check.py, which writes figures
+    and therefore does take --results-root.) --experiment stays as a label for the
+    banner, saying which experiment's config is being checked."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    add_common_args(parser, roots=False)
+    add_common_args(parser, results_root=False, cache_root=False)
     parser.add_argument("--all", action="store_true",
                         help="compare every framework instead of inspecting one")
     parser.add_argument("--batch", type=int, default=4, help="dummy batch size")

@@ -14,7 +14,10 @@ from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder, resolve_dataset_entry
 from learning.robustness import AdversarialEvaluator
-from learning.utilities import calibrate_batch_size, select_inference_mode, safe_empty_cache
+from learning.utilities import (
+    calibrate_batch_size, collect_single_samples, measure_latency,
+    safe_empty_cache, select_inference_mode,
+)
 
 # module path, class name -- imported dynamically below, only for cfg.FRAMEWORK.
 # DataLoader worker processes (Windows spawn re-imports this whole file) never
@@ -41,7 +44,7 @@ def parse_args():
         description="Train and evaluate one SNN framework on one event dataset.",
         epilog="examples:\n"
                "  python learning/main.py\n"
-               "  python learning/main.py --config config/ex2.yaml --experiment ex2 "
+               "  python learning/main.py --config experiments/ex2/config.yaml --experiment ex2 "
                "--framework sinabs --seed 1\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -168,6 +171,22 @@ if __name__ == "__main__":
     # again with a different seed -- accumulates into a single comparable table. The
     # number of seeds per framework does not have to match.
     # ------------------------------------------------------------------------------
+    # ---- batch-size-1 latency, its own untimed pass -------------------------------
+    # Separate from the batched test above because it answers a different question:
+    # "one event arrives, how long until the answer is ready" (MLPerf Single-Stream),
+    # not "how much wall-clock does each sample cost at this batch size". Dividing a
+    # batch time by the batch size gives the second and is often mistaken for the first.
+    latency = None
+    if cfg.LATENCY_SAMPLES > 0:
+        try:
+            singles = collect_single_samples(test_loader, device, cfg.LATENCY_SAMPLES)
+            latency = measure_latency(model, singles, device)
+            print(f"\n  latency (bs=1)  : median {latency['latency_ms']:.2f} ms   "
+                  f"p90 {latency['latency_p90_ms']:.2f} ms   "
+                  f"({latency['latency_samples']} samples)")
+        except Exception as exc:  # a diagnostic must not cost a finished run
+            print(f"\n  !! latency (bs=1) not measured: {type(exc).__name__}: {exc}")
+
     try:
         run_row = build_run_row(
             cfg, wf, model, run_info,
@@ -175,6 +194,7 @@ if __name__ == "__main__":
             epoch_log=epoch_log,
             params=params,
             timesteps=test_results.get("timesteps"), num_workers=num_workers,
+            latency=latency,
             notes=" ".join(f"{k}={v}" for k, v in (run_info.get("overrides") or {}).items()),
         )
         paths = write_results(

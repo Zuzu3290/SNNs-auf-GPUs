@@ -61,3 +61,10 @@ notes.txt
 scalability.md
 frameworks/regression/
 
+
+# Experiment outputs -- generated, not source. The config.yaml and README.md in each
+# experiment folder ARE tracked: they describe the experiment. What a run produces is
+# not, so a Colab run and a laptop run do not fight over the same files.
+experiments/*/runs/
+experiments/*/results/runs/
+experiments/*/equivalence/

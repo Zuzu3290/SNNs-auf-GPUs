@@ -7,7 +7,7 @@ TWO WAYS TO RUN, BOTH SUPPORTED
         is chosen at the prompt, and output goes to ./outputs -- exactly as this
         pipeline has always worked.
 
-    python learning/main.py --config config/ex2.yaml --experiment ex2 --framework sinabs
+    python learning/main.py --config experiments/ex2/config.yaml --experiment ex2 --framework sinabs
         One overlay config per experiment, output routed into experiments/ex2/.
 
 THE DIVIDING LINE
@@ -56,11 +56,18 @@ def add_common_args(
     framework: bool = True,
     seed: bool = True,
     experiment: bool = True,
-    roots: bool = True,
+    results_root: bool = True,
+    cache_root: bool = True,
 ) -> argparse.ArgumentParser:
-    """Attach the shared flags. Each script asks only for the ones it can act on --
-    equivalence_check has no framework or seed of its own, for instance, because it
-    builds all four neurons and does no training."""
+    """Attach the shared flags. Each script asks only for the ones it can act on.
+
+    The two roots are separate switches, not one, because a script can legitimately
+    need one and not the other. `equivalence_check.py` writes FIGURES but reads no
+    dataset: it needs `--results-root` (so those figures can land on mounted Drive
+    instead of a Colab runtime that is about to disappear) and has no use for
+    `--cache-root`. Collapsing both into a single `roots` flag is what previously left
+    it unable to write anywhere durable.
+    """
     parser.add_argument(
         "--config", default=None, metavar="PATH",
         help="experiment overlay merged over the three files in configuration/. "
@@ -85,13 +92,14 @@ def add_common_args(
                  "Without it, output goes to the output: paths in SNN_module.yaml, "
                  "as it always has.",
         )
-    if roots:
+    if results_root:
         parser.add_argument(
             "--results-root", default=None, metavar="PATH",
             help=f"where the experiment tree lives (default {DEFAULT_RESULTS_ROOT}). "
-                 "Point it at mounted Drive on Colab so results survive the runtime. "
+                 "Point it at mounted Drive on Colab so output survives the runtime. "
                  "Requires --experiment.",
         )
+    if cache_root:
         parser.add_argument(
             "--cache-root", default=None, metavar="PATH",
             help="overrides cache.path for the frame cache. Useful where the default "
