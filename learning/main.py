@@ -5,7 +5,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))  # project root → skelet
 import torch
 from skeleton import Settings, WorkflowSettings
 from skeleton.snn_logging import configure_logging
-from skeleton.seeding import seed_everything, seed_model_init, shared_weight_fingerprint
+from skeleton.seeding import (
+    param_report, seed_everything, seed_model_init, shared_weight_fingerprint,
+)
+from skeleton.results import write_results
+from skeleton.results_collect import build_epoch_rows, build_layer_rows, build_run_row
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder, resolve_dataset_entry
@@ -112,7 +116,9 @@ if __name__ == "__main__":
     # calibration). This is what makes all four frameworks start from identical weights.
     seed_model_init(cfg.SEED)
     model = ModelClass(cfg)
-    print(f"  weight fingerprint : {shared_weight_fingerprint(model)}")
+    params = param_report(model)
+    print(f"  weight fingerprint : {params['shared_fingerprint']}   "
+          f"({params['total_trainable']} trainable params)")
     print(f"\n  Model backend  : {cfg.FRAMEWORK.upper()}")
     cfg.display()
 
@@ -129,6 +135,13 @@ if __name__ == "__main__":
     trainer.plot_training(save_dir=str(plots_dir))
     trainer.plot_iteration_metrics(save_dir=str(plots_dir))
     trainer.plot_raster(save_dir=str(plots_dir))
+
+    # Copied out BEFORE the trainer is dropped below: epoch_log is the source for
+    # epochs.csv, and the last activity snapshot is the free per-layer spike record
+    # (hooked layers only) that layers.csv falls back to when spike counting was off.
+    epoch_log = list(trainer.epoch_log)
+    activity_snapshot = getattr(trainer, "last_activity_snapshot", None) or {}
+    num_workers = getattr(getattr(train_loader, "loader", None), "num_workers", None)
 
     # train_loader has persistent_workers=True -- its worker processes stay alive
     # until this DataLoader is garbage-collected, so drop every reference (trainer
@@ -147,6 +160,40 @@ if __name__ == "__main__":
         print(f"  Avg Firing Rate : {test_results['avg_firing_rate_hz']:.2f} Hz")
     else:
         print("  Avg Firing Rate : n/a -- set framing.sample_duration_us for Hz")
+
+    # ------------------------------------------------------------------------------
+    # Results, in the schema the SNNs_2 plotting layer reads (runs/epochs/layers.csv).
+    # ADDITIVE: training_results.csv and test.csv above are untouched. runs.csv is
+    # APPEND-ONLY, so running one framework per invocation -- one Colab cell each, then
+    # again with a different seed -- accumulates into a single comparable table. The
+    # number of seeds per framework does not have to match.
+    # ------------------------------------------------------------------------------
+    try:
+        run_row = build_run_row(
+            cfg, wf, model, run_info,
+            train_results=results, test_results=test_results,
+            epoch_log=epoch_log,
+            params=params,
+            timesteps=test_results.get("timesteps"), num_workers=num_workers,
+            notes=" ".join(f"{k}={v}" for k, v in (run_info.get("overrides") or {}).items()),
+        )
+        paths = write_results(
+            results_dir,
+            run_row=run_row,
+            epoch_rows=build_epoch_rows(epoch_log),
+            layer_rows=build_layer_rows(model, activity_snapshot),
+            json_payload={"run": run_row, "config_path": run_info.get("config_path"),
+                          "neuron": model.describe_neuron(),
+                          "test": {k: v for k, v in test_results.items()
+                                   if k not in ("confusion_matrix", "class_metrics")}},
+        )
+        print()
+        print(f"results  : {paths['runs']}  (run_id {run_row['run_id']})")
+        print(f"  epochs   : {paths['epochs']}")
+        print(f"  layers   : {paths['layers']}")
+    except Exception as exc:  # never lose a finished run to a bookkeeping error
+        print()
+        print(f"!! results not written: {type(exc).__name__}: {exc}")
 
     RUN_ADVERSARIAL_EVAL = False
 

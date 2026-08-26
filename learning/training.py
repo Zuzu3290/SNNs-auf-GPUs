@@ -99,6 +99,7 @@ class SNNTrainer:
         self.spike_rate_hist = []
         self.vram_current_hist = []  # per-iteration current allocated VRAM (GB) -- host-side counter, appended every iteration, no sync
         self.last_spk_rec    = None
+        self.last_activity_snapshot: dict = {}
         self.epoch_log       = []
         self.timesteps: int | None = None  # set once in train(), reused to derive per-iteration firing rate at plot time
         self.window_s: float | None = None
@@ -618,6 +619,11 @@ class SNNTrainer:
             # None when the real per-sample duration is not knowable -- reported as
             # unavailable rather than computed against a guessed window.
             firing_rate_hz = (spikes_per_inference / window_s) if window_s else None
+
+            # Kept on the trainer so a caller can build per-layer rows (layers.csv)
+            # from the measurement this epoch already took, instead of paying for an
+            # extra pass. Hooked layers only -- lif_out is not hooked.
+            self.last_activity_snapshot = record["activity_snapshot"]
 
             cv_isi      = compute_cv_isi(record["activity_snapshot"])
             cv_isi_mean = cv_isi.get("network_wide", 0.0)
