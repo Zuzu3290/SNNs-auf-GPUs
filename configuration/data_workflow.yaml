@@ -37,6 +37,13 @@ framing:
   # Tonic-based examples normally feed. It applies identically to every framework either
   # way, so it cannot bias a comparison -- but it changes accuracy and spike-rate figures,
   # so record which was used. Applied AFTER the cache read, so flipping it needs no rebuild.
+  #
+  # ⚠ It CLAMPS -- min(x, 1) -- rather than thresholding. On integer counts that is a real
+  # binarize (0,1,5,8 -> 0,1,1,1). But random_rotation_enabled below INTERPOLATES, which
+  # makes the values fractional, and clamping a fraction leaves it fractional (0.37 stays
+  # 0.37). With both true the TRAIN input is not a spike train while the TEST input is,
+  # because test gets no augmentation -- so the two splits stop meaning the same thing.
+  # For a genuine 0/1 input: binarize true AND random_rotation_enabled false.
   binarize: false
 
 temporal_slicing:

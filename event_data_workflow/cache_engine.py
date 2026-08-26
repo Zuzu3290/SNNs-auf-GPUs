@@ -64,9 +64,26 @@ class FixedToFrame:
 class ClampToBinary:
     """Turn event COUNTS into 0/1 spikes.
 
-    ToFrame sums every event landing in the same pixel, polarity and time bin, so raw
-    frame values exceed 1 (measured max on N-MNIST at T=20: 8). Clamping makes the
-    network's input actual spikes rather than counts.
+    ToFrame SUMS every event landing in the same pixel, polarity and time bin, so raw
+    frame values exceed 1 (measured max on N-MNIST at T=20: 8). This makes the network's
+    input actual spikes rather than counts.
+
+    ---------------------------------------------------------------------------
+    IT IS A CLAMP, NOT A THRESHOLD.  min(x, 1)
+    ---------------------------------------------------------------------------
+    That distinction only matters once the values stop being integers:
+
+        INTEGER counts (no augmentation) -- clamping IS binarising:
+            0 -> 0    1 -> 1    5 -> 1    8 -> 1        every value ends up 0 or 1
+
+        FRACTIONAL values (rotation interpolates) -- clamping is NOT binarising:
+            0.0 -> 0.0    0.37 -> 0.37    1.4 -> 1.0    only >1 is touched
+
+    So with `augmentation.random_rotation_enabled: true` the frames reaching this are
+    already fractional and it merely bounds them: the result is NOT a spike train. If you
+    want a genuine 0/1 input, set binarize true AND rotation false. A real threshold
+    (x > 0) would binarise either way, but it is not what this class does, and changing
+    that would silently alter what every past run's input meant.
 
     Applied on the way OUT of the cache, so switching it on or off never invalidates the
     cache. Handles both an ndarray and a tensor because it may sit either side of the

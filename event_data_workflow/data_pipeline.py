@@ -363,10 +363,17 @@ class NeuromorphicEncoder:
         binarize = ClampToBinary() if self.wf.BINARIZE else None
         train_augment = torchvision.transforms.RandomRotation([-10, 10]) if self.wf.RANDOM_ROTATION_ENABLED else None
         logger.info(f"[PIPELINE] Random rotation augmentation: {'ENABLED' if train_augment is not None else 'DISABLED'}")
-        # binarize goes LAST, so it caps whatever the chain produced. Note it clamps
-        # rather than thresholds: on the integer counts ToFrame emits that IS a binarize,
-        # but rotation interpolates, so with augmentation on the values are fractional and
-        # this only bounds them. Do not rely on both together for a clean spike input.
+        # binarize goes LAST, so it caps whatever the chain produced.
+        #
+        # CAVEAT, and it matters here specifically: ClampToBinary applies min(x, 1) -- a
+        # CLAMP, not a threshold. On the integer counts ToFrame emits that IS a binarize
+        # (0,1,5,8 -> 0,1,1,1). But rotation INTERPOLATES, so once train_augment is in the
+        # chain the values are already fractional and clamping leaves them fractional
+        # (0.37 stays 0.37); only values above 1 are touched. With both enabled the train
+        # input is therefore NOT a spike train, while the test split -- which gets no
+        # augmentation -- IS. That asymmetry between train and test is the real hazard.
+        #
+        # For a genuine 0/1 input: binarize true AND random_rotation_enabled false.
         train_tf_steps = ([frame_tf, torch.from_numpy]
                           + ([train_augment] if train_augment is not None else [])
                           + ([binarize] if binarize is not None else []))
