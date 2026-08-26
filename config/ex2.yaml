@@ -1,16 +1,98 @@
-# Experiment 2 -- sinabs out-of-box behaviour.
+# Experiment 2 -- each framework OUT OF THE BOX.
 #
-# Overlays the three files in configuration/. States ONLY what differs; conv dims,
-# framing, cache policy and the other three neurons are inherited untouched.
+# Experiment 1 forces all four frameworks to compute ONE neuron, so only the
+# implementation can differ. Experiment 2 asks the opposite question:
+#
+#     If you follow each framework's own defaults and its own documented example for
+#     event-camera data, what neuron do you actually GET -- and what does that do to
+#     accuracy, speed, spiking activity and memory?
+#
+# SCOPE: only the neuron block moves. Data pipeline, architecture, optimiser, learning
+# rate, loss, timesteps, batch size and seed stay identical to Experiment 1. Adopting
+# each framework's whole recipe instead would make every metric incomparable -- their
+# examples differ in dataset, batch size, architecture and loss all at once, so you
+# would be comparing training recipes rather than frameworks.
+#
+# WHAT "OUT OF THE BOX" MEANS HERE -- two sources, and they sometimes disagree:
+#
+#   (D)  constructor default: what you get from Neuron() with no arguments
+#   (E)  the framework's own EVENT-DATA example passes it explicitly
+#
+# Where they disagree the EXAMPLE wins, because that is what a developer following the
+# framework's own documentation would actually run. Each value below says which it is.
+#
+# Overlays the three files in configuration/. States ONLY what differs.
+# Translated from SNNs_2 config/config_ex2.yaml; see experiments/ex2/README.md for the
+# parameter-by-parameter diff and the source of each value.
+
 dataset:
   name: N-MNIST
 
-neuron:
-  sinabs:
-    tau_mem: .inf         # alpha = exp(-1/inf) = 1 -> no leak, i.e. integrate-and-fire
-    spike_fn: multi       # sinabs' own default: 2, 3, ... spikes in one timestep
-    reset_mechanism: subtract
-    min_v_mem: -1.0
+# ---------------------------------------------------------------------------
+# Framing and recipe: pinned to match SNNs_2 Experiment 1, NOT part of ex2's
+# question. This pipeline's base files differ from that reference run, so they are
+# stated here to keep ex2's numbers comparable with ex1's.
+# ---------------------------------------------------------------------------
+framing:
+  n_time_bins: 20               # base is 16; ex1 ran at 20. Changing T rebuilds the cache.
 
 training:
-  epochs: 1
+  epochs: 5                     # base is 2; ex1 ran 5
+  lr_scheduler: none            # base is cosine; ex1 used a constant learning rate
+
+# ---------------------------------------------------------------------------
+# The neuron, per framework, at its own out-of-the-box values.
+# Only keys that DIFFER from the ex1 target are listed; everything else is inherited.
+# ---------------------------------------------------------------------------
+neuron:
+
+  snntorch:
+    # snn.Leaky's own defaults, and snnTorch Tutorial 7's values for N-MNIST.
+    beta: 0.5                   # ex1: 0.9. (D)+(E): snn.Leaky's default and Tutorial 7.
+                                # At a constant 0.6 against threshold 1.0 this fires
+                                # repeatedly while SpikingJelly and Norse never reach it.
+    reset_mechanism: subtract   # ex1: zero. snnTorch's own default is a SOFT reset.
+    reset_delay: true           # ex1: false. The default applies a spike's reset on the
+                                # FOLLOWING timestep, so the membrane reads a different
+                                # value than the other three after every spike.
+    # threshold 1.0 and surrogate atan(2.0) are already snnTorch's defaults -- inherited.
+
+  spikingjelly:
+    tau: 2.0                    # ex1: 10.0. LIFNode's own default.
+    decay_input: true           # ex1: false. The default DIVIDES the input by tau, so the
+                                # input gain becomes 1/tau = 0.5 rather than 1.0.
+    detach_reset: true          # ex1: false. Stops gradient flowing through the reset.
+    # v_threshold 1.0, v_reset 0.0, step_mode s, backend torch, surrogate atan(2.0)
+    # are inherited.
+    #
+    # The surrogate is where (D) and (E) DISAGREE: LIFNode's constructor default is
+    # Sigmoid(alpha=4.0), but SpikingJelly's own DVS example (classify_dvsg.py) passes
+    # ATan(). The example wins, so atan(2.0) is inherited unchanged -- the one parameter
+    # in this file where ex2 and ex1 coincide by choice rather than by accident.
+
+  norse:
+    input_scale: 1.0            # ex1: 10.0. Out of the box there is no compensation, so
+                                # the decay/gain lock stands: decay 0.9 => input gain 0.1.
+    surrogate:
+      type: super               # ex1: circ. SuperSpike is norse's own default...
+      alpha: 100.0              # ...and 100.0 is its default alpha. MEASURED: norse
+                                # 1.1.0's SuperSpike backward never reads alpha, so this
+                                # behaves as alpha=1 whatever is written here. The adapter
+                                # logs a warning. That IS the out-of-box behaviour.
+    # dt, tau_mem_inv, v_th, v_reset, v_leak, reset_method are already norse's own
+    # defaults and are inherited unchanged.
+
+  sinabs:
+    tau_mem: .inf               # ex1: 9.4912. alpha = exp(-1/inf) = 1 -> NO leak, i.e.
+                                # integrate-and-fire, which is what sinabs is built around.
+    spike_fn: multi             # ex1: single. sinabs' own default: ONE neuron may emit
+                                # 2, 3 or more spikes in a SINGLE timestep.
+    reset_mechanism: subtract   # ex1: zero. sinabs' own default is a soft subtract.
+    min_v_mem: -1.0             # ex1: null (no clamp). A lower bound on the membrane.
+    surrogate:
+      type: periodic_exponential  # ex1: single_exponential
+      grad_width: 0.5
+      grad_scale: 1.0
+    # norm_input false is inherited: no-leak + multi-spike + subtract-reset is the
+    # combination that makes firing rate exactly ReLU, which is the ANN-to-SNN
+    # conversion guarantee sinabs exists to provide. That is the point of this arm.
