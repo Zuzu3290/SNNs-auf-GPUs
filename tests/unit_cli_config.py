@@ -69,7 +69,11 @@ def test_deep_merge() -> None:
 # ---------------------------------------------------------------------------
 def test_base_loads_and_covers_every_section() -> None:
     base = load_base()
-    for section in ["architecture", "training", "output", "dataset",
+    # No "architecture": that block held the legacy MLP params (input_size,
+    # hidden_size, hidden_layers, leak, override, network_struct, simulator), which
+    # described a network this pipeline no longer builds. Its one live key, the slice
+    # duration, moved to temporal_slicing in data_workflow.yaml.
+    for section in ["training", "output", "dataset",
                     "convolution", "neuron_types", "neuron",
                     "framing", "temporal_slicing", "augmentation", "cache",
                     "resource_policy"]:

@@ -25,8 +25,12 @@ import torchvision
 import tqdm as t
 from typing import Optional, Protocol
 from skeleton import WorkflowSettings
+from skeleton.seeding import split_generator
 from .system_monitor import monitor
-from .cache_engine import AdaptiveCacheController, ComposedTransform, FixedToFrame, PreTransformedDataset, measure_event_bytes
+from .cache_engine import (
+    AdaptiveCacheController, ClampToBinary, ComposedTransform, FixedToFrame,
+    PreTransformedDataset, cache_identity, compose_transforms, measure_event_bytes,
+)
 from .fast_denoise import FastDenoise
 from .dataset_registry import resolve_dataset_entry
 from .prefetch import AsyncGPUPrefetcher, CudaPrefetcher
@@ -266,8 +270,13 @@ class NeuromorphicEncoder:
             # split datasets.
             full_raw = load_dataset_with_retry(lambda: entry["loader"](str(DATA_DIR), split="train"))
             n_train = int(0.8 * len(full_raw))
+            # Seeded: without a generator this 80/20 division changes every run, so a
+            # model can be tested on what it trained on last time and no two runs are
+            # comparable. Applies to every dataset with no predefined split --
+            # N-Caltech101 and the three regression sets.
             raw_train, raw_test = torch.utils.data.random_split(
-                full_raw, [n_train, len(full_raw) - n_train]
+                full_raw, [n_train, len(full_raw) - n_train],
+                generator=split_generator(getattr(self.cfg, "SEED", 0)),
             )
         elif entry["has_train_split"]:
             raw_train = load_dataset_with_retry(lambda: entry["cls"](save_to=str(DATA_DIR), train=True))
@@ -277,8 +286,13 @@ class NeuromorphicEncoder:
             full_raw = load_dataset_with_retry(lambda: entry["cls"](save_to=str(DATA_DIR)))
             apply_label_to_index(full_raw)
             n_train = int(0.8 * len(full_raw))
+            # Seeded: without a generator this 80/20 division changes every run, so a
+            # model can be tested on what it trained on last time and no two runs are
+            # comparable. Applies to every dataset with no predefined split --
+            # N-Caltech101 and the three regression sets.
             raw_train, raw_test = torch.utils.data.random_split(
-                full_raw, [n_train, len(full_raw) - n_train]
+                full_raw, [n_train, len(full_raw) - n_train],
+                generator=split_generator(getattr(self.cfg, "SEED", 0)),
             )
         self.dataset_label = entry["name"]
         self.task_type = entry.get("kind", "classification")
@@ -307,7 +321,11 @@ class NeuromorphicEncoder:
         # FastDenoise, not tonic's own Denoise -- verified byte-identical output (diagnostics/validate_fast_denoise.py),
         # ~72x faster on real N-Caltech101 samples (diagnostics/benchmark_fast_denoise.py): tonic's Denoise loops over
         # every raw event in pure Python; FastDenoise runs the same unchanged algorithm compiled by numba instead.
-        frame_tf = ComposedTransform([FastDenoise(filter_time=10000), FixedToFrame(to_frame)])
+        # Drops events with no neighbour within 1 pixel and this many microseconds.
+        # It changes WHICH EVENTS EXIST, so it is part of the cache identity.
+        self.denoise_filter_time_us = self.wf.DENOISE_FILTER_TIME_US
+        frame_tf = ComposedTransform([FastDenoise(filter_time=self.denoise_filter_time_us),
+                                      FixedToFrame(to_frame)])
 
         # One real transform, paid once here, so create_loaders() can size
         # DataLoader workers from the actual post-transform frame a batch is
@@ -340,13 +358,29 @@ class NeuromorphicEncoder:
         # train_augment is random, so it must run fresh every access rather
         # than get baked into a persistent cache — see determine_dataset_strategy.
         # Toggled via data_workflow.yaml's augmentation.random_rotation_enabled.
+        # binarize rides out of the cache with the augmentation, so toggling it needs no
+        # rebuild. Applied to BOTH splits -- test-time input must mean the same thing.
+        binarize = ClampToBinary() if self.wf.BINARIZE else None
         train_augment = torchvision.transforms.RandomRotation([-10, 10]) if self.wf.RANDOM_ROTATION_ENABLED else None
         logger.info(f"[PIPELINE] Random rotation augmentation: {'ENABLED' if train_augment is not None else 'DISABLED'}")
-        train_tf_steps = [frame_tf, torch.from_numpy] + ([train_augment] if train_augment is not None else [])
+        # binarize goes LAST, so it caps whatever the chain produced. Note it clamps
+        # rather than thresholds: on the integer counts ToFrame emits that IS a binarize,
+        # but rotation interpolates, so with augmentation on the values are fractional and
+        # this only bounds them. Do not rely on both together for a clean spike input.
+        train_tf_steps = ([frame_tf, torch.from_numpy]
+                          + ([train_augment] if train_augment is not None else [])
+                          + ([binarize] if binarize is not None else []))
         train_tf = transforms.Compose(train_tf_steps)
-        test_tf = frame_tf
+        # The test split is not cached (see below), so binarize joins its transform chain
+        # directly. Applied to BOTH splits: test-time input must mean the same thing.
+        test_tf = ComposedTransform([frame_tf, binarize]) if binarize is not None else frame_tf
 
-        dataset_prefix = self.dataset_label.replace(" ", "_")
+        # Framing and denoising decide the cached BYTES, so they belong in the path.
+        # Previously it was just <dataset>/<split>, so changing n_time_bins silently
+        # reused frames built under the old setting.
+        identity_dir, self.cache_manifest = cache_identity(self.wf, self.denoise_filter_time_us)
+        dataset_prefix = f'{self.dataset_label.replace(" ", "_")}/{identity_dir}'
+        logger.info(f"[PIPELINE] Cache identity: {dataset_prefix}")
 
         if self.use_temporal_slicing:
 
@@ -355,8 +389,8 @@ class NeuromorphicEncoder:
                 logger.info(f"[PIPELINE] Case A calibration: events_per_slice={self.events_per_slice} (from raw_train)")
 
             # Cache raw recordings first — slicing needs the raw timestamps.
-            cached_train = controller.determine_dataset_strategy(raw_train, split=f"{dataset_prefix}/train", num_workers=worker_estimate)
-            cached_test  = controller.determine_dataset_strategy(raw_test,  split=f"{dataset_prefix}/test", num_workers=worker_estimate)
+            cached_train = controller.determine_dataset_strategy(raw_train, split=f"{dataset_prefix}/train", num_workers=worker_estimate, manifest=self.cache_manifest)
+            cached_test  = controller.determine_dataset_strategy(raw_test,  split=f"{dataset_prefix}/test", num_workers=worker_estimate, manifest=self.cache_manifest)
 
             metadata_dir = str(PROJECT_ROOT / "metadata" / dataset_prefix)
             train_data = create_sliced_dataset(cached_train,
@@ -379,7 +413,11 @@ class NeuromorphicEncoder:
         else:
             # Cache the deterministic frame transform; keep the random
             # augmentation out of the cached value (transform/live_transform split).
-            train_data = controller.determine_dataset_strategy(raw_train, transform=frame_tf, live_transform=train_augment, split=f"{dataset_prefix}/train", num_workers=worker_estimate)
+            train_data = controller.determine_dataset_strategy(
+                raw_train, transform=frame_tf,
+                live_transform=compose_transforms(train_augment, binarize),
+                split=f"{dataset_prefix}/train", num_workers=worker_estimate,
+                manifest=self.cache_manifest)
             # Inference gets no cache and no adaptive sizing, deliberately -- caching earns its cost
             # across many repeated epochs (training); a single pass over the test set doesn't have
             # that access pattern, so caching it only adds disk writes and RAM/worker complexity

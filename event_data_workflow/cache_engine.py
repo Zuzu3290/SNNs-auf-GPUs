@@ -13,9 +13,12 @@ activations, and gradients during training.
 from __future__ import annotations
 import sys
 import logging
+import hashlib
+import json
 import shutil
 from pathlib import Path
 from typing import Optional
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 from tonic import DiskCachedDataset, MemoryCachedDataset
@@ -58,6 +61,24 @@ class FixedToFrame:
         return frame.swapaxes(-1, -2) if frame.shape[-2:] != (h, w) else frame
 
 
+class ClampToBinary:
+    """Turn event COUNTS into 0/1 spikes.
+
+    ToFrame sums every event landing in the same pixel, polarity and time bin, so raw
+    frame values exceed 1 (measured max on N-MNIST at T=20: 8). Clamping makes the
+    network's input actual spikes rather than counts.
+
+    Applied on the way OUT of the cache, so switching it on or off never invalidates the
+    cache. Handles both an ndarray and a tensor because it may sit either side of the
+    numpy->tensor bridge. Module-level class so DataLoader workers can pickle it.
+    """
+
+    def __call__(self, frame):
+        if isinstance(frame, torch.Tensor):
+            return frame.clamp(max=1)
+        return np.minimum(frame, 1)
+
+
 class PreTransformedDataset(Dataset):
     """Applies a deterministic transform once, inside __getitem__, so that a
     wrapping MemoryCachedDataset/DiskCachedDataset caches the POST-transform
@@ -87,6 +108,80 @@ def compose_transforms(*fns):
     if len(fns) == 1:
         return fns[0]
     return ComposedTransform(fns)
+
+
+def cache_identity(wf, denoise_filter_time_us) -> tuple[str, dict]:
+    """(directory name, manifest) for everything that changes the CACHED BYTES.
+
+    Returns a readable hint plus a short hash, e.g. `bins20_dn10000_9f3a2b`. The name
+    only has to be unique and recognisable; what actually guarantees you never read
+    16-bin frames when you asked for 20 is the manifest, checked on load.
+
+    Framing and denoising were previously absent from the cache path entirely -- it was
+    just <dataset>/<split> -- so changing n_time_bins reused frames built under the old
+    setting. Measured on an earlier branch: after 16 -> 20 the cache still served
+    (16, 2, 34, 34) samples while the config said 20. A stale-cache bug produces
+    plausible-looking results from the wrong data, which is worse than a crash.
+    """
+    if wf.FRAME_MODE == "n_time_bins":
+        framing = {"mode": "n_time_bins", "n_time_bins": wf.N_TIME_BINS}
+        hint = f"bins{wf.N_TIME_BINS}"
+    else:
+        framing = {"mode": "time_window", "time_window_us": wf.TIME_WINDOW_US}
+        hint = f"win{wf.TIME_WINDOW_US}"
+
+    identity = {"framing": framing, "denoise_filter_time_us": denoise_filter_time_us}
+    if wf.TEMPORAL_SLICING_ENABLED:
+        identity["slicing"] = {
+            "events_per_slice": wf.EVENTS_PER_SLICE,
+            "calibrate_events_per_slice": wf.CALIBRATE_EVENTS_PER_SLICE,
+            "slice_duration_us": (None if wf.EVENTS_PER_SLICE else wf.SLICE_DURATION_US),
+        }
+        hint += "_sliced"
+
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:6]
+    return f"{hint}_dn{denoise_filter_time_us}_{digest}", identity
+
+
+class CacheMismatch(Exception):
+    """A cache directory holds samples built with different settings than requested."""
+
+
+def check_manifest(cache_dir: Path, expected: dict) -> bool:
+    """True if a matching cache already exists; False if the directory is fresh.
+
+    RAISES if samples are present but the settings differ, or are present with no
+    manifest at all -- both mean the bytes on disk are not what the config asked for, and
+    using them silently would corrupt the run.
+    """
+    manifest_path = cache_dir / "manifest.json"
+    if not manifest_path.is_file():
+        has_samples = cache_dir.is_dir() and any(cache_dir.rglob("*.hdf5"))
+        if has_samples:
+            raise CacheMismatch(
+                f"{cache_dir} holds cached samples but no manifest.json, so the settings "
+                "that produced them are unknown. Delete the directory to rebuild."
+            )
+        return False
+
+    recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if recorded != expected:
+        raise CacheMismatch(
+            f"cache at {cache_dir} was built with different settings.\n"
+            f"  on disk: {recorded}\n"
+            f"  config : {expected}\n"
+            "Delete the directory to rebuild it, or point cache.path elsewhere."
+        )
+    return True
+
+
+def write_manifest(cache_dir: Path, settings: dict) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "manifest.json").write_text(
+        json.dumps(settings, indent=2), encoding="utf-8"
+    )
 
 
 class AdaptiveCacheController:
@@ -135,7 +230,7 @@ class AdaptiveCacheController:
 
         return (total_bytes / successful_probes * len(dataset)) / (1024 ** 3)
 
-    def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train", num_workers: int = 1) -> Dataset:
+    def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train", num_workers: int = 1, manifest: dict | None = None) -> Dataset:
         """Picks a cache tier from live resources and wraps dataset in it; num_workers prices in that MemoryCachedDataset's per-instance dict gets duplicated once per DataLoader worker process."""
         if hasattr(dataset, "slice_map"):
             raise ValueError(
@@ -152,6 +247,13 @@ class AdaptiveCacheController:
 
         cache_dir = self.cache_path / split
         cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Verified BEFORE a tier is chosen, so a mismatch fails immediately rather than
+        # after the footprint probe has already read samples built under other settings.
+        if manifest is not None:
+            reused = check_manifest(cache_dir, manifest)
+            logger.info(f"[CACHE CONTROLLER] {split} manifest: "
+                        + ("matches, reusing" if reused else "fresh, will be built"))
 
         if is_gpu_under_pressure(metrics, threshold=self.gpu_pressure_threshold) and metrics.disk_exists:
             # A busy GPU means CUDA's pinned-memory allocator is competing
@@ -186,6 +288,10 @@ class AdaptiveCacheController:
         # "disk": the already-transformed dense frame, cached permanently —
         # the expensive part (measured ~136ms/sample: fetch + Denoise +
         # ToFrame) paid once per sample, ever, not once per epoch.
+        # Written for the disk tier only: a memory cache leaves nothing on disk that a
+        # later run could mistake for another setting's frames.
+        if manifest is not None:
+            write_manifest(cache_dir, manifest)
         return DiskCachedDataset(pre_transformed, transform=compose_transforms(numpy_bridge, live_transform), cache_path=str(cache_dir / "disk"), compress=False)
 
     def clear_cache(self, split: Optional[str] = None):

@@ -21,6 +21,24 @@ framing:
   # Set it only if you know your dataset's real per-sample duration and want Hz.
   sample_duration_us: null
 
+  # Denoising: drop events with no neighbouring event within 1 pixel and this many
+  # MICROSECONDS. Event cameras emit a lot of isolated noise events and removing them is
+  # standard practice; the snnTorch/Tonic N-MNIST tutorial this architecture comes from
+  # uses 10000. Lower filters more aggressively. null disables it.
+  # Runs BEFORE framing and changes which events exist, so it is part of the cache
+  # identity -- changing it builds a separate, reusable cache.
+  denoise_filter_time_us: 10000
+
+  # ToFrame ADDS UP every event landing in the same pixel, polarity and time bin, so
+  # frame values are event COUNTS, not spikes (measured range on N-MNIST at T=20: 0 to 8).
+  # true clamps them to 0/1, making the network's input real spikes.
+  #
+  # false (the default) keeps counts, which carry more information and is what
+  # Tonic-based examples normally feed. It applies identically to every framework either
+  # way, so it cannot bias a comparison -- but it changes accuracy and spike-rate figures,
+  # so record which was used. Applied AFTER the cache read, so flipping it needs no rebuild.
+  binarize: false
+
 temporal_slicing:
   enabled: false                # true | false
 

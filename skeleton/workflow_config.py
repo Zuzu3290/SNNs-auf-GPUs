@@ -28,6 +28,12 @@ class WorkflowSettings:
         self.TIME_WINDOW_US = int(framing.get("time_window_ms", 15.0) * 1000)
         # null = "not known"; Hz is then reported as unavailable rather than guessed.
         sample_duration = framing.get("sample_duration_us", None)
+        # Part of the cache identity: it changes which events exist. null disables.
+        _denoise = framing.get("denoise_filter_time_us", 10000)
+        self.DENOISE_FILTER_TIME_US = None if _denoise is None else int(_denoise)
+        # Applied AFTER the cache, so toggling it needs no rebuild and it is NOT part of
+        # the cache identity.
+        self.BINARIZE               = bool(framing.get("binarize", False))
         self.SAMPLE_DURATION_US = int(sample_duration) if sample_duration is not None else None
 
         slicing = config.get("temporal_slicing", {})
