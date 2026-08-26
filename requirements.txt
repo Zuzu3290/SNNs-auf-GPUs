@@ -10,32 +10,38 @@
 #   PyTorch CUDA: https://pytorch.org/get-started/locally/
 
 # Core scientific stack
-numpy>=2.0
+# numpy<=2.4, not a bare >=2.0 : numba (below) refuses to import against numpy>=2.5 (raises
+# ImportError at import time, not a warning) -- confirmed against numba 0.66.0. Bump the
+# ceiling only alongside a numba release that raises its own numpy support window.
+numpy>=2.0,<=2.4
 scipy>=1.10
-nir>=1.0.6
-nirtorch>=2.0.5
+# JIT for event_data_workflow/fast_denoise.py -- replaces tonic's pure-Python Denoise loop
+# (~93% of N-Caltech101 preprocessing cost), ~72x faster, verified byte-identical output.
+numba>=0.66.0
+# Pinned, not >= : sinabs>=3.1.3 requires nir<=1.0.4, but nirtorch>=2.0.3 requires nir>=1.0.6 --
+# unresolvable together, so pin the last confirmed-working pairing exactly.
+nir==1.0.4
+nirtorch==2.0.2
 matplotlib>=3.7
 PyYAML>=6.0
 psutil>=5.9
 # Deep learning (CPU or CUDA — install the correct wheel for your GPU)
-# torch>=2.1.0   # install via https://pytorch.org
+torch>=2.1.0         # install via https://pytorch.org
+torchvision>=0.16.0  # install the matching CUDA build alongside torch, same page
+
+# torch.compile's inductor backend needs Triton for CUDA kernel codegen. `triton` has no
+# Windows wheel at all -- triton-windows is the maintained fork that does; exactly one line installs per platform.
+triton; sys_platform != "win32"
+triton-windows; sys_platform == "win32"
 
 # Spiking Neural Network frameworks (choose one or both)
 snntorch>=0.9.1          # primary SNN library
 norse>=0.0.7             # Norse SNN framework
 spikingjelly>=0.0.0.0.14 # SpikingJelly SNN framework
 sinabs>=3.1.3            # DVS-first SNN framework, exports to SynSense Speck chip
-bindsnet>=0.2.7          # STDP-trained SNNs (not backprop). Needs the torch._six shim
-                         # at the top of snn_bindsnet.py — see that file's docstring.
-jax>=0.6.2               # required by spyx. No Windows CUDA wheels — CPU-only outside
-jaxlib>=0.6.2            # the `container` branch's Linux Docker image (pip install
-spyx>=0.1.20             # jax[cuda12] there for real GPU execution).
 
-# tensorboard upgraded for protobuf 7.x compatibility (sinabs/bindsnet pull a newer
-# protobuf than the legacy tensorboard 2.10.1 that shipped here supported). The old
-# `tensorflow` package was removed — nothing in this codebase imports it; it was only
-# ever a transitive/incidental install, and its generated protobuf code is incompatible
-# with protobuf 7.x anyway.
+# Upgraded for protobuf 7.x compatibility (sinabs/bindsnet pull a newer protobuf than
+# the legacy tensorboard 2.10.1 that shipped here supported).
 tensorboard>=2.20.0
 
 # Event camera drivers (uncomment the one matching your hardware)
@@ -55,5 +61,11 @@ tonic>=0.3.0           # for event data handling and visualization
 # Utilities
 tqdm>=4.65
 
-#gpu rrequirements
-nvidia-ml-py==0.1.0
+# Phase B regression dataset — DSEC (event_data_workflow/regression_datasets.py, dataset_registry.py)
+h5py>=3.0               # reads DSEC's .h5 event files
+hdf5plugin>=4.0         # codec plugin h5py needs for DSEC's compressed .h5 files
+imageio>=2.31           # decodes DSEC's optical-flow PNG targets
+
+# GPU/NVML stats. nvidia-ml-py, not pynvml: pynvml is deprecated in favor of this,
+# NVIDIA's maintained package -- still installs the same importable `pynvml` module.
+nvidia-ml-py

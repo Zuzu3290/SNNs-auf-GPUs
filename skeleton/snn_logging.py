@@ -1,6 +1,5 @@
 import logging
 import sys
-from typing import Optional
 
 # Default log format: includes timestamp, level, module, and message
 DEFAULT_FORMAT = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
@@ -8,7 +7,6 @@ DEFAULT_FORMAT = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
 # SNN-specific log levels (optional extensions beyond standard levels)
 # You can use these for custom filtering, e.g., log only SNN metrics
 SNN_DEBUG = 5  # Below DEBUG, for very detailed SNN internals (e.g., per-neuron states)
-SNN_INFO = logging.INFO  # Standard INFO
 logging.addLevelName(SNN_DEBUG, "SNN_DEBUG")
 
 
@@ -40,27 +38,14 @@ def configure_logging(level=logging.INFO):
     return logger
 
 
-def get_logger(name):
-    """
-    Get a logger instance for the given module name.
-    
-    Args:
-        name: Module name (typically __name__)
-    
-    Returns:
-        Logger instance
-    """
-    return logging.getLogger(name)
-
-
 # Example usage
 if __name__ == "__main__":
     # Setup logging (console only)
     configure_logging(level=logging.DEBUG)
-    
+
     # Get a logger
-    logger = get_logger(__name__)
-    
+    logger = logging.getLogger(__name__)
+
     # Log messages with timestamp
     logger.info("SNN logging initialized")
     logger.debug("Debug message example")

@@ -1,0 +1,46 @@
+# Version control
+.git
+.gitignore
+
+# Editor/IDE
+.vscode
+.claude
+*.swp
+*.swo
+*~
+
+# Python bytecode / envs
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Local data & results — regenerated inside the container at runtime;
+# copying these in would just bake stale/oversized local state into the
+# build context.
+cache/
+checkpoints/
+checkpoints_torch/
+outputs/
+tmp/
+
+# Docs / non-runtime reference material — not imported by any of
+# learning/, event_data_workflow/, skeleton/, configuration/
+docs/
+review.md
+base_line implmentation.md
+SNN_GPU_Evaluation_Metrics.md
+*.pdf
+
+# Diagnostics tooling — dev-time investigation scripts/reports, not part of
+# the training/inference runtime this image serves
+diagnostics/
+
+# Frontend (separate concern from this image, see Dockerfile's header note)
+viewer/node_modules/
+viewer/dist/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,40 +1,34 @@
 # SNNs-auf-GPUs
 
 A research platform for running Spiking Neural Networks on GPU hardware.
-The system moves from Python-based SNN frameworks toward a GPU-native runtime
-where a custom CUDA kernel owns the full execution path — event ingestion,
-neuron dynamics, weight updates, and memory management.
+Trains and compares SNN framework backends on real event-camera datasets,
+measuring runtime, scalability, and accuracy.
+
+The output layer for any application that includes supervised classification come swith a preset number regaridng the number of classes that model will classify which is the ideal number of output neurons the output layers requires.
+
+number of classes in a dataset = number of output neurons 
 
 ---
 
 ## What This Is
 
 Neuromorphic computing on commodity GPUs. The project bridges event-based
-sensor data (DVS / DAVIS cameras) with SNN training frameworks, while
-progressively replacing Python operations with compiled CUDA kernels.
+sensor data (DVS / DAVIS cameras) with SNN training frameworks.
 
-The codebase is structured in two planes that will converge over time:
+| Location | Role |
+|----------|------|
+| `learning/`, `event_data_workflow/`, `skeleton/` | Training loop, framework wrappers, data pipeline, configuration |
 
-| Plane | Location | Role |
-|-------|----------|------|
-| Python | `src/learning/`, `event_data_workflow/`, `skeleton/` | Configuration, framework wrappers, fallback path |
-| CUDA | `src/crsc/`, `acceleration/` | Kernel execution — LIF dynamics, spike ops, memory |
-
-The compiler layer (`src/compiler/`) bridges them, dispatching operations to
-the kernel when available and falling back to Python otherwise.
+`SNNTrainer`/`SNNTester` run the plain per-framework PyTorch path.
 
 ---
 
 ## Project Layout
 
 ```
-src/
-  learning/         SNN framework wrappers — SNNTorch, Norse, SpikingJelly
-  compiler/         JIT compiler, kernel loader, dispatch bridge
-  crsc/             CUDA kernels — membrane, spike, threshold, reset, decode
+learning/           SNN framework wrappers — SNNTorch, Norse, SpikingJelly, Sinabs
 skeleton/           Configuration and settings (SNN_module.yaml)
 event_data_workflow/ Neuromorphic data pipeline — caching, slicing, DataLoader
-acceleration/       GPU hardware attributes, PTX loader, SNN hardware mapping
 docs/               Architecture references and hardware notes
 ```
 
@@ -43,7 +37,7 @@ docs/               Architecture references and hardware notes
 ## Entry Point
 
 ```
-python src/learning/main.py
+python learning/main.py
 ```
 
 Reads `SNN_module.yaml`, loads the neuromorphic dataset via
@@ -54,8 +48,8 @@ Reads `SNN_module.yaml`, loads the neuromorphic dataset via
 ## Configuration
 
 All runtime parameters live in `SNN_module.yaml` at the project root:
-architecture, training schedule, dataset path, device, compiler flags, and
-data pipeline settings. No hardcoded values in source files.
+architecture, training schedule, dataset path, device, and data pipeline
+settings. No hardcoded values in source files.
 
 ---
 
@@ -67,12 +61,15 @@ pipeline does not care what runs inside.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| SNNTorch | Working | Default |
+| SNNTorch | Working | |
 | Norse | Working | Current default in `main.py` |
 | SpikingJelly | Working | |
-| JAX + Flax/Haiku | Extension point | Trains via XLA; DLPack bridge to PyTorch at boundary |
-| TensorFlow | Extension point | DLPack bridge at boundary |
-| Custom / from scratch | Extension point | Return a PyTorch tensor — everything else is your choice |
+| Sinabs | Working | DVS-first, batch-first tensors |
+
+`ModelInterface` is PyTorch-only — every backend trains via standard PyTorch
+autograd (`loss.backward()` + `optimizer.step()`). Other backends were
+explored and later dropped rather than kept as extension points; see
+[`docs/frameworks/additional_frameworks.md`](docs/frameworks/additional_frameworks.md).
 
 For details on how each backend cooperates with the training loop, backward pass,
 and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
@@ -81,41 +78,70 @@ and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
 
 ## Current Capabilities
 
-- Three SNN backends: SNNTorch, Norse, SpikingJelly — switchable via config
+- Four SNN backends: SNNTorch, Norse, SpikingJelly, Sinabs — switchable via config
+- Five event-camera datasets, selectable from the terminal at runtime — see
+  `event_data_workflow/dataset_registry.py`'s `DATASET_REGISTRY`
 - Adaptive data pipeline: selects memory, disk, hybrid, or GPU-VRAM cache
   strategy automatically based on available system resources
-- Activity regularization and STDP as differentiable loss terms alongside BPTT
-- Fused LIF CUDA kernel with surrogate gradient for BPTT
-- JIT compiler pipeline that lowers SNN models to an IR and schedules
-  device-aware execution
+- Activity regularization as a differentiable loss term alongside BPTT
 - Adversarial robustness evaluation via TRADES
 
+---
+
+## Adding a New Dataset
+
+If your dataset is already available as events encoded in the standard
+`(x, y, t, p)` format, wiring it in only takes one edit — no other file
+needs to change.
+
+**What `(x, y, t, p)` means** — one row per event, four fields:
+
+| Field | Meaning |
+|-------|---------|
+| `x` | Horizontal pixel position (column) that triggered the event, `0` to `sensor_width - 1` |
+| `y` | Vertical pixel position (row) that triggered the event, `0` to `sensor_height - 1` |
+| `t` | Timestamp of the event (when it happened), typically in microseconds since the recording started |
+| `p` | Polarity — the direction of the brightness change that triggered the event: `1` (ON) if the pixel got brighter, `0` (OFF) if it got darker |
+
+**The template**: open `event_data_workflow/data_pipeline.py` and add an
+entry to `DATASET_REGISTRY` (a plain Python dict, currently entries `"1"`
+through `"5"`):
+
+```python
+"6": {
+    "name": "YourDatasetName",
+    "category": "classification",             # or "regression"
+    "cls": your_tonic_or_custom_dataset_class, # must yield (events, target) per sample
+    "has_train_split": True,                   # False if the dataset needs an 80/20 split done for you
+    "sensor_size": (width, height, 2),         # 2 = polarity channels (ON/OFF)
+    "num_classes": <int>,                      # how many classes this dataset labels
+},
+```
+
+That's the whole integration point: `num_classes` here is automatically wired to the model's output layer for every framework. the number of output neurons always matches the
+number of classes, with nothing else to configure by hand. If your dataset
+doesn't fit the plain `cls(save_to=..., train=...)` constructor pattern
+(e.g. it needs a custom loader function), see the `"5"` (DSEC) entry for
+the `"loader"` alternative.
+
+if you dont have a neuromorphic dataset than review the working mechnaism of the tonic library and its wrapper. A discussion with Claude will be more convienent. 
 ---
 
 ## Growing Analytics
 
 Diagnostic benchmark runs across framework backends are ongoing, with results
-and plots accumulating in [`docs/results/`](docs/results/). Latest snapshot:
+and plots accumulating per-dataset in [`docs/results/`](docs/results/)
+(`docs/results/plots/<dataset>/`). Latest snapshot (N-MNIST):
 
 | Training Accuracy | Actual GPU Energy (Training) |
 |---|---|
-| ![accuracy curves](docs/results/plots/accuracy_curves.png) | ![training energy](docs/results/plots/train_energy.png) |
+| ![accuracy curves](docs/results/plots/n_mnist/accuracy_curves.png) | ![training energy](docs/results/plots/n_mnist/train_energy.png) |
 
 | Spike Rate | Inference Latency per Sample |
 |---|---|
-| ![spike rate curves](docs/results/plots/spike_rate_curves.png) | ![test latency](docs/results/plots/test_latency.png) |
+| ![spike rate curves](docs/results/plots/n_mnist/spike_rate_curves.png) | ![test latency](docs/results/plots/n_mnist/test_latency.png) |
 
 See [`docs/results/README.md`](docs/results/README.md) for the full results
 table, all plots, caveats on what this run does and doesn't measure, and the
 real bugs this benchmarking work has already found and fixed.
 
----
-
-## Roadmap
-
-The kernel dispatch layer (`src/compiler/runtime.py`) is the next build target.
-When complete, GPU detection at startup routes all operations — event decoding,
-tensor caching, neuron dynamics, weight updates — through `src/crsc/` kernels.
-Python implementations remain as the CPU fallback and correctness reference.
-
-See `docs/kernel_dispatch_architecture.md` for the full plan.

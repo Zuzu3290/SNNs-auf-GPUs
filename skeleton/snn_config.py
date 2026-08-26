@@ -10,8 +10,6 @@ FW_TO_CFG_KEY = {
     "norse":    "norse",
     "sj":       "spikingjelly",
     "sinabs":   "sinabs",
-    "bindsnet": "bindsnet",
-    "spyx":     "spyx",
 }
 
 
@@ -23,9 +21,7 @@ class Settings:
         architecture = self.config.get("architecture", {})
         training     = self.config.get("training", {})
         dataset      = self.config.get("dataset", {})
-        input_cfg    = self.config.get("input", {})
         output       = self.config.get("output", {})
-        compiler     = self.config.get("compiler", {})
         frameworks   = self.config.get("frameworks", {})
 
         # Load conv-SNN architecture from network_architecture.yaml
@@ -44,13 +40,6 @@ class Settings:
         self.TEMPORAL_SLICE_DURATION = int(architecture.get("temporal_slice_duration", 15000))
         self.TEMPORAL_OVERLAP        = int(architecture.get("temporal_overlap", 0))
         self.TOTAL_TIME_WINDOW       = int(architecture.get("total_time_window", 30000))
-        self.NUM_WORKERS             = int(architecture.get("num_workers", 2))
-
-        # Input control (reserved for future use — expose when input_mode is needed)
-        # self.INPUT_MODE      = input_cfg.get("input_mode", "2D")
-        # self.IMAGE_CHANNELS  = int(input_cfg.get("image_channels", 1))
-        # self.IMAGE_HEIGHT    = int(input_cfg.get("image_height", 28))
-        # self.IMAGE_WIDTH     = int(input_cfg.get("image_width", 28))
 
         # Conv-SNN architecture (from network_architecture.yaml)
         self.SENSOR_H     = int(conv.get("sensor_h",     34))
@@ -63,27 +52,25 @@ class Settings:
         self.POOL_KERNEL  = int(conv.get("pool_kernel",  2))
 
         # Auto-compute flattened size after both conv+pool stages
-        h = (self.SENSOR_H - self.CONV1_KERNEL + 1) // self.POOL_KERNEL
-        h = (h - self.CONV2_KERNEL + 1) // self.POOL_KERNEL
-        self.FC_IN = self.CONV2_OUT * h * h
+        self.FC_IN = self.compute_fc_in(self.SENSOR_H, self.SENSOR_W)
 
         self.NEURON_TYPES = network_arch.get("neuron_types", {})
 
         # Training parameters
         self.EPOCHS                   = int(training.get("epochs", 10))
         self.ITERA                    = int(training.get("iterations_per_epoch", 100))
-        self.TIMESTEPS                = int(training.get("timesteps", 25))
         self.BATCH_SIZE               = int(training.get("batch_size", 128))
+        # When False, BATCH_SIZE above is used as-is and calibrate_batch_size()
+        # is never called — see docs/functions.md for why this exists.
+        self.CALIBRATE_BATCH_SIZE     = bool(training.get("calibrate_batch_size", True))
         self.NAP_TIMES                = int(training.get("nap_times", 1))
-        self.LEARNING_RATE            = float(training.get("learning_rate", 0.001))
-        self.WEIGHT_DECAY             = float(training.get("weight_decay", 0.0001))
-        self.NUM_CLASSES              = int(training.get("num_classes", self.OUTPUT_SIZE))
-        self.DEVICE                   = training.get("device", "cuda")
-        self.KERNEL                   = training.get("kernel", "OFF")
+        self.LEARNING_RATE             = float(training.get("learning_rate", 0.001))
+        self.WEIGHT_DECAY              = float(training.get("weight_decay", 0.0001))
+        self.DEVICE                    = training.get("device", "cuda")
         self.DDP                      = training.get("DDP", "OFF")
-        self.NUM_WORKERS              = int(training.get("num_workers", 4))
         self.USE_AMP                  = bool(training.get("use_amp", True))
         self.GRAD_ACCUM_STEPS         = max(1, int(training.get("grad_accum_steps", 1)))
+        self.ENABLE_PIPELINE_MONITOR  = bool(training.get("enable_pipeline_monitor", True))
         self.LR_SCHEDULER             = training.get("lr_scheduler", "cosine")
 
         self.TRADES_ENABLED           = bool(training.get("trades_enabled", False))
@@ -96,11 +83,6 @@ class Settings:
         self.ACTIVITY_REG_MAX_RATE    = float(training.get("activity_reg_max_rate", 0.50))
         self.ACTIVITY_REG_LAMBDA_LOW  = float(training.get("activity_reg_lambda_low", 0.1))
         self.ACTIVITY_REG_LAMBDA_HIGH = float(training.get("activity_reg_lambda_high", 0.1))
-
-        self.STDP_ENABLED             = bool(training.get("stdp_enabled", False))
-        self.STDP_TAU                 = float(training.get("stdp_tau", 20.0))
-        self.STDP_A_PLUS              = float(training.get("stdp_a_plus", 0.01))
-        self.STDP_A_MINUS             = float(training.get("stdp_a_minus", 0.01))
 
         # Framework selector
         self.FRAMEWORK = training.get("framework", "norse")
@@ -159,12 +141,9 @@ class Settings:
         self.TAU_MEM_INV = self.FRAMEWORK_CFG["norse"]["tau_mem_inv"]
         self.TAU         = self.FRAMEWORK_CFG["spikingjelly"]["tau"]
 
-        # Compiler
-        self.TORCH_COMPILE = bool(compiler.get("torch_compile", False))
-
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
-        self.DATA_PATH    = dataset.get("data_path", "./data")
+        self.TASK_TYPE    = "classification"  # overwritten by NeuromorphicEncoder.load_raw() once a dataset is picked
 
         # Output control
         self.OUTPUT_DIR = output.get("output_dir", "./outputs")
@@ -178,7 +157,35 @@ class Settings:
     @property
     def active_fw_cfg(self) -> dict:
         """Config dict for whichever framework is currently selected."""
+        if self.FRAMEWORK not in FW_TO_CFG_KEY:
+            raise ValueError(
+                f"training.framework='{self.FRAMEWORK}' has no FW_TO_CFG_KEY mapping. "
+                f"Available: {sorted(FW_TO_CFG_KEY)}."
+            )
         return self.FRAMEWORK_CFG[FW_TO_CFG_KEY[self.FRAMEWORK]]
+
+    def compute_fc_in(self, sensor_h: int, sensor_w: int) -> int:
+        """Flattened size after both conv+pool stages — independent H/W so non-square sensors work."""
+        h = (sensor_h - self.CONV1_KERNEL + 1) // self.POOL_KERNEL
+        h = (h - self.CONV2_KERNEL + 1) // self.POOL_KERNEL
+        w = (sensor_w - self.CONV1_KERNEL + 1) // self.POOL_KERNEL
+        w = (w - self.CONV2_KERNEL + 1) // self.POOL_KERNEL
+        return self.CONV2_OUT * h * w
+
+    def apply_dataset_shape(self, sensor_h: int, sensor_w: int, in_channels: int, num_classes: int):
+        """Override conv-input shape and output classes with the selected dataset's actual
+        sensor size / class count (from DATASET_REGISTRY), and recompute the dependent
+        flattened FC input size. Must run before the model is constructed.
+
+        Regression datasets (DAVIS Camera Pose, DSEC) carry a placeholder num_classes=1
+        here — not a real class count. Their actual output shaping is a documented
+        follow-up (see docs/Haseeb-open-items.md), not built yet."""
+        self.SENSOR_H    = int(sensor_h)
+        self.SENSOR_W    = int(sensor_w)
+        self.IN_CHANNELS = int(in_channels)
+        self.NUM_CLASSES = int(num_classes)
+        self.FC_IN       = self.compute_fc_in(self.SENSOR_H, self.SENSOR_W)
+        self.network_structure = self.generate_network_structure()
 
     def load_yaml(self, yaml_path):
         with open(yaml_path, "r") as file:
@@ -230,8 +237,9 @@ class Settings:
         # Append hidden layers
         layers.extend(hidden_layers)
 
-        # Append output layer separately
-        layers.append(self.OUTPUT_SIZE)
+        # Append output layer separately — the real per-dataset class count
+        # once apply_dataset_shape() has run, else the legacy YAML default.
+        layers.append(getattr(self, "NUM_CLASSES", self.OUTPUT_SIZE))
 
         return layers
 
@@ -239,7 +247,7 @@ class Settings:
         W      = 76
         fw     = self.FRAMEWORK.upper()
         fw_cfg = self.active_fw_cfg
-        sep    = "─" * (W - 4)
+        sep    = "-" * (W - 4)
 
         def section(title):
             print(f"\n  [{title}]")
@@ -260,7 +268,9 @@ class Settings:
         row("Conv2",           f"{self.CONV2_OUT} filters   {self.CONV2_KERNEL}×{self.CONV2_KERNEL} kernel")
         row("Pool",            f"{self.POOL_KERNEL}×{self.POOL_KERNEL} MaxPool   (applied twice)")
         row("FC input (auto)", str(self.FC_IN))
-        row("Output classes",  str(self.NUM_CLASSES))
+        num_classes = getattr(self, "NUM_CLASSES", None)
+        row("Output classes",  str(num_classes) if num_classes is not None else "N/A (regression target)")
+        row("Network structure", " -> ".join(str(n) for n in self.network_structure))
 
         cfg_key      = FW_TO_CFG_KEY[self.FRAMEWORK]
         neuron_types = self.NEURON_TYPES.get(cfg_key, {})
@@ -276,14 +286,12 @@ class Settings:
         section("TRAINING")
         row("Epochs",             str(self.EPOCHS))
         row("Iterations / epoch", str(self.ITERA))
-        row("Timesteps (T)",      str(self.TIMESTEPS))
         row("Batch size",         str(self.BATCH_SIZE))
         row("Learning rate",      str(self.LEARNING_RATE))
         row("Weight decay",       str(self.WEIGHT_DECAY))
         row("LR scheduler",       self.LR_SCHEDULER)
         row("Grad accum steps",   str(self.GRAD_ACCUM_STEPS))
         row("AMP (mixed prec.)",  "ENABLED" if self.USE_AMP else "DISABLED")
-        row("DataLoader workers", str(self.NUM_WORKERS))
 
         section("REGULARIZATION")
         if self.TRADES_ENABLED:
@@ -294,23 +302,14 @@ class Settings:
             row("Activity reg", f"ENABLED   min={self.ACTIVITY_REG_MIN_RATE * 100:.0f}%   max={self.ACTIVITY_REG_MAX_RATE * 100:.0f}%")
         else:
             row("Activity reg", "DISABLED")
-        if self.STDP_ENABLED:
-            row("STDP",         f"ENABLED   tau={self.STDP_TAU}   A+={self.STDP_A_PLUS}   A-={self.STDP_A_MINUS}")
-        else:
-            row("STDP",         "DISABLED")
 
         section("DATASET")
         row("Dataset",   self.DATASET_NAME)
-        row("Data path", self.DATA_PATH or "(default)")
 
         section("OUTPUT")
         row("Output dir", self.OUTPUT_DIR)
         row("Plot dir",   self.PLOT_DIR)
         row("Data dir",   self.DATA_DIR)
-
-        section("COMPILER")
-        row("CUDA kernel",   self.KERNEL)
-        row("torch.compile", "ENABLED" if self.TORCH_COMPILE else "DISABLED")
 
         print()
         print("=" * W)

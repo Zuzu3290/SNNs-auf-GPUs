@@ -2,28 +2,30 @@ architecture:
   input_size: 50
   hidden_size: 50
   hidden_layers: 5
-  output_size: 10
   leak: 1.0
   override: false
   network_struct: S
-  device: cuda
   simulator: ON
 
 training:
-  kernel: OFF                   # ON → use the compiled CRSC CUDA kernel for LIF forward pass.
-                                # Requires: python src/learning/setup.py build_ext --inplace
-  framework: norse           # YAML selector: norse | torch | sj | sinabs | bindsnet | spyx
-  epochs: 2
-  iterations_per_epoch: 100
-  timesteps: 25
+  framework: sj           # YAML selector: norse | torch | sj | sinabs
+  device: cuda
+  epochs: 2              # one epoch = one full pass over the training set; more epochs = more chances to learn.
+                          # not calibrated -- your call how many repeated passes the model needs.
+  iterations_per_epoch: 400
   batch_size: 128
+  calibrate_batch_size: true    # true: live GPU probe overrides batch_size above, and iterations_per_epoch
+                                # below is recomputed so one epoch covers (nearly) the whole training set
+                                # (see docs/functions.md).
+                                # false: batch_size and iterations_per_epoch below are used exactly as
+                                # written, no probe run.
   nap_times: 1
   learning_rate: 0.001
   weight_decay: 0.0001
-  num_classes: 10
+
   # TRADES robustness training — penalises the network for changing its prediction under input corruption.
   # Loss = CrossEntropy(clean) + lambda * KL(clean || adversarial).
-  trades_enabled: true          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
+  trades_enabled: false          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
 
   trades_epsilon: 0.05          # Perturbation budget: max allowed input corruption per element.
                                 # Range: 0.001 (near-imperceptible) → 0.3 (heavy corruption).
@@ -40,23 +42,8 @@ training:
   activity_reg_lambda_low: 0.1  # Penalty weight for dead neurons.
   activity_reg_lambda_high: 0.1 # Penalty weight for saturated neurons.
 
-  num_workers: 6                # CPU DataLoader workers that prefetch batches while the GPU trains.
-                                # More workers reduce GPU starvation between batches (better utilisation).
-                                # Recommended: 4–8 on a workstation. Capped by CPU count automatically.
-                                # Set to 0 to disable multiprocessing (needed for non-picklable transforms).
-
-  stdp_enabled: true           # STDP causal correlation loss alongside BPTT.
-  stdp_tau: 20.0                # Trace decay time constant in timesteps. Higher = longer memory of past spikes.
-  stdp_a_plus: 0.01             # LTP strength — how strongly to reinforce causal (pre→post) spike order.
-  stdp_a_minus: 0.01            # LTD strength — how strongly to penalise anticausal (post→pre) spike order.
-  
-compiler:
-  torch_compile: false      # true → wrap model with torch.compile() (TorchInductor kernel fusion).
-                            # First run is slower (compilation overhead); subsequent runs are faster.
-
-dataset:
-  dataset_name: MNIST
-  data_path:
+  enable_pipeline_monitor: true  # Background CPU/GPU utilization sampler (utilization, power, clock,
+                                # sustained-idle warnings). Diagnostic only — set false to disable.
 
 output:
   output_dir: ./outputs
@@ -75,7 +62,7 @@ frameworks:
 
   norse:
     tau_mem_inv: 100.0
-    threshold:   0.5
+    threshold:   1.0
     optimizer:   adam
     loss_fn:     cross_entropy
 
@@ -91,16 +78,3 @@ frameworks:
     optimizer:   adam
     loss_fn:     cross_entropy
 
-  bindsnet:
-    nu_pre:      0.0001    # STDP pre-synaptic (LTP) learning rate
-    nu_post:     0.01      # STDP post-synaptic (LTD) learning rate
-    threshold:   0.5       # informational only — BindsNET's own -52.0/-65.0 mV neuron defaults are used internally
-    optimizer:   none      # no backprop — weights update via STDP inside forward()
-    loss_fn:     cross_entropy
-
-  spyx:
-    beta:        0.9
-    gamma:       0.9        # ALIF adaptation rate (only used when neuron_types.spyx.* = alif)
-    threshold:   0.5
-    optimizer:   adam
-    loss_fn:     cross_entropy
