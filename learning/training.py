@@ -3,6 +3,7 @@ import os
 import csv
 import time
 import logging
+from pathlib import Path
 from contextlib import contextmanager, nullcontext
 import torch
 import torch.nn.functional as F
@@ -580,7 +581,11 @@ class SNNTrainer:
             print(f"  • RAM trend        : {trend['ram_trend']}  ({trend['ram_start_gb']}GB -> {trend['ram_end_gb']}GB)")
 
         self.write_csv(csv_path)
-        self.write_batch_csv()
+        # Beside training_results.csv, wherever that went -- NOT the module default.
+        # Called bare, it wrote to ./outputs/data/batch_metrics.csv even on a run whose
+        # --results-root pointed at mounted Drive, so on Colab that one file stayed on
+        # the runtime and vanished with it while every other artefact was saved.
+        self.write_batch_csv(str(Path(csv_path).parent / "batch_metrics.csv"))
 
         return {
             "loss_history":       self.loss_hist,

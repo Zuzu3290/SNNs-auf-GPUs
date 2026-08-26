@@ -8,7 +8,7 @@ from skeleton.snn_logging import configure_logging
 from skeleton.seeding import (
     param_report, seed_everything, seed_model_init, shared_weight_fingerprint,
 )
-from skeleton.results import write_results
+from skeleton.results import make_run_id, write_results
 from skeleton.results_collect import build_epoch_rows, build_layer_rows, build_run_row
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
@@ -126,18 +126,37 @@ if __name__ == "__main__":
     cfg.display()
 
     results_dir, _, plots_dir = run_info["results_dir"], run_info["equivalence_dir"], run_info["plots_dir"]
-    results_dir.mkdir(parents=True, exist_ok=True)
-    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- one folder per run, for everything with a fixed filename -----------------
+    # training_results.csv, batch_metrics.csv, test.csv and the seven diagnostic PNGs
+    # are all named without the framework or seed in them, so four frameworks writing
+    # into one experiment folder would leave only the last one's files. Giving each run
+    # its own subfolder keyed by run_id fixes that, and because the SAME run_id goes
+    # into the runs.csv row, any figure can be traced back to the row that describes it.
+    #
+    # runs.csv / epochs.csv / layers.csv stay at the TOP of results_dir: they are
+    # append-only across runs, which is the whole point of them.
+    #
+    # Only when --experiment routed the output. Without it nothing is nested and the
+    # original ./outputs layout is untouched.
+    run_id = make_run_id(cfg.FRAMEWORK, cfg.SEED)
+    run_results_dir = (results_dir / run_id) if run_info["routed"] else results_dir
+    run_plots_dir = (plots_dir / run_id) if run_info["routed"] else plots_dir
+    for directory in (results_dir, run_results_dir, run_plots_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    if run_info["routed"]:
+        print(f"  run_id         : {run_id}   -> {run_results_dir}")
+
     trainer = SNNTrainer(model, train_loader, cfg, device)
-    results = trainer.train(csv_path=str(results_dir / "training_results.csv"))
+    results = trainer.train(csv_path=str(run_results_dir / "training_results.csv"))
     print("\n Training complete!")
     print(f"  Final loss      : {results['loss_history'][-1]:.4f}")
     print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}")
     print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
 
-    trainer.plot_training(save_dir=str(plots_dir))
-    trainer.plot_iteration_metrics(save_dir=str(plots_dir))
-    trainer.plot_raster(save_dir=str(plots_dir))
+    trainer.plot_training(save_dir=str(run_plots_dir))
+    trainer.plot_iteration_metrics(save_dir=str(run_plots_dir))
+    trainer.plot_raster(save_dir=str(run_plots_dir))
 
     # Copied out BEFORE the trainer is dropped below: epoch_log is the source for
     # epochs.csv, and the last activity snapshot is the free per-layer spike record
@@ -154,7 +173,7 @@ if __name__ == "__main__":
 
     visualize = select_inference_mode()
     tester       = SNNTester(model, test_loader, cfg, device, visualize=visualize)
-    test_results = tester.run(csv_path=str(results_dir / "test.csv"))
+    test_results = tester.run(csv_path=str(run_results_dir / "test.csv"))
     print("\n Testing complete!")
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
     print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")
@@ -195,6 +214,8 @@ if __name__ == "__main__":
             params=params,
             timesteps=test_results.get("timesteps"), num_workers=num_workers,
             latency=latency,
+            # The SAME id the run folder is named after, so a figure maps to its row.
+            run_id=run_id,
             notes=" ".join(f"{k}={v}" for k, v in (run_info.get("overrides") or {}).items()),
         )
         paths = write_results(
@@ -219,4 +240,6 @@ if __name__ == "__main__":
 
     if RUN_ADVERSARIAL_EVAL:
         evaluator = AdversarialEvaluator(model, test_loader, cfg, device)
-        evaluator.evaluate()
+        # Routed like every other artefact. Called bare it would default to
+        # ./outputs/data/ and be left behind on a Colab runtime.
+        evaluator.evaluate(csv_path=str(run_results_dir / "adversarial_robustness.csv"))

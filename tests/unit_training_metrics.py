@@ -470,8 +470,113 @@ def test_latency_samples_is_configurable() -> None:
     suite.check("0 disables the pass", cfg2.LATENCY_SAMPLES == 0)
 
 
+# ---------------------------------------------------------------------------
+# 7. every artefact follows --results-root
+# ---------------------------------------------------------------------------
+def test_training_writes_every_csv_beside_the_given_path() -> None:
+    """A real Colab run put training_results.csv on mounted Drive but
+    batch_metrics.csv in ./outputs/data -- so that one file stayed on the runtime and
+    died with it. Nothing may keep its module default when a path was given."""
+    from learning.training import SNNTrainer
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = pathlib.Path(tmp) / "ex9" / "results"
+        cfg = fresh_cfg()
+        cfg.EPOCHS, cfg.ITERA, cfg.BATCH_SIZE = 1, 2, 2
+        cfg.ENABLE_PIPELINE_MONITOR = False
+        model, _ = build_model("torch", cfg)
+        trainer = SNNTrainer(model, FakeLoader(4, cfg), cfg, torch.device("cpu"))
+        trainer.train(csv_path=str(target / "training_results.csv"))
+
+        written = sorted(p.name for p in target.glob("*.csv"))
+        suite.check("training_results.csv is routed", "training_results.csv" in written,
+                    str(written))
+        suite.check("batch_metrics.csv is routed too", "batch_metrics.csv" in written,
+                    str(written))
+
+        # And nothing leaked to the module default.
+        stray = pathlib.Path("outputs/data/batch_metrics.csv")
+        before = stray.stat().st_mtime if stray.exists() else None
+        trainer.train(csv_path=str(target / "training_results.csv"))
+        after = stray.stat().st_mtime if stray.exists() else None
+        suite.check("nothing was written to the ./outputs default", before == after,
+                    "outputs/data/batch_metrics.csv was touched")
+
+
+def test_per_run_folder_keeps_two_frameworks_apart() -> None:
+    """The collision this layout exists to prevent. training_results.csv,
+    batch_metrics.csv and the seven diagnostic PNGs carry no framework or seed in their
+    names, so two runs writing into one experiment folder would leave only the last.
+    Simulated here with the same paths main.py builds."""
+    from learning.training import SNNTrainer
+    from skeleton.results import make_run_id
+
+    with tempfile.TemporaryDirectory() as tmp:
+        experiment = pathlib.Path(tmp) / "ex9"
+        seen = []
+        for framework in ("torch", "norse"):
+            cfg = fresh_cfg()
+            cfg.FRAMEWORK = framework
+            cfg.EPOCHS, cfg.ITERA, cfg.BATCH_SIZE = 1, 2, 2
+            cfg.ENABLE_PIPELINE_MONITOR = False
+            run_id = make_run_id(cfg.FRAMEWORK, cfg.SEED)
+            run_results = experiment / "results" / run_id
+            run_plots = experiment / "plots" / run_id
+            run_results.mkdir(parents=True, exist_ok=True)
+            run_plots.mkdir(parents=True, exist_ok=True)
+
+            model, _ = build_model(framework, cfg)
+            trainer = SNNTrainer(model, FakeLoader(4, cfg), cfg, torch.device("cpu"))
+            trainer.train(csv_path=str(run_results / "training_results.csv"))
+            trainer.plot_training(save_dir=str(run_plots))
+            seen.append((run_id, run_results, run_plots))
+
+        ids = [r for r, _, _ in seen]
+        suite.check("the two runs got different run_ids", ids[0] != ids[1], str(ids))
+        for run_id, run_results, run_plots in seen:
+            suite.check(f"{run_id}: its own training_results.csv survives",
+                        (run_results / "training_results.csv").is_file())
+            suite.check(f"{run_id}: its own batch_metrics.csv survives",
+                        (run_results / "batch_metrics.csv").is_file())
+            suite.check(f"{run_id}: its own plot survives",
+                        (run_plots / "training_metrics.png").is_file())
+
+        suite.check("nothing was written flat into results/",
+                    not list((experiment / "results").glob("*.csv")),
+                    str([p.name for p in (experiment / "results").glob("*.csv")]))
+
+
+def test_run_id_ties_the_folder_to_the_results_row() -> None:
+    """main.py must reuse ONE run_id for the folder and the runs.csv row -- generating
+    a second one would break the link between a figure and the row describing it."""
+    import inspect
+
+    from learning import main as main_module
+
+    source = inspect.getsource(main_module)
+    suite.check("run_id generated once", source.count("make_run_id(") == 1)
+    suite.check("the run folder uses it", "results_dir / run_id" in source)
+    suite.check("the plots folder uses it", "plots_dir / run_id" in source)
+    suite.check("the results row is given the same one", "run_id=run_id" in source)
+    suite.check("nesting only happens when routed", 'run_info["routed"]' in source)
+
+
+def test_adversarial_evaluator_is_routed_in_main() -> None:
+    import inspect
+
+    from learning import main as main_module
+
+    source = inspect.getsource(main_module)
+    suite.check("evaluate() is given an explicit csv_path",
+                "evaluate(csv_path=" in source)
+
+
 def main() -> int:
     return suite.run([
+        test_training_writes_every_csv_beside_the_given_path,
+        test_per_run_folder_keeps_two_frameworks_apart,
+        test_run_id_ties_the_folder_to_the_results_row,
+        test_adversarial_evaluator_is_routed_in_main,
         test_collect_single_samples_gives_batch_of_one,
         test_measure_latency_is_a_real_per_sample_measurement,
         test_measure_latency_refuses_an_empty_sample_list,

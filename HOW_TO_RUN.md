@@ -245,10 +245,36 @@ Output is routed into its own tree instead of `./outputs`:
 
 ```
 experiments/ex2/
-├── results/      training_results.csv, test.csv
-├── equivalence/
-└── plots/        training_metrics.png, vram_breakdown.png, spike_raster.png, ...
+├── config.yaml                              the experiment, beside its README
+├── README.md
+├── results/
+│   ├── runs.csv  epochs.csv  layers.csv     APPEND-ONLY, every run of this experiment
+│   ├── runs/<run_id>.json                   full record, one per run
+│   └── <run_id>/                            this run only
+│       └── training_results.csv  batch_metrics.csv  test.csv
+├── plots/<run_id>/                          this run's 7 diagnostics
+├── figures/                                 make_plots.py -- the cross-run comparison
+└── equivalence/
 ```
+
+`run_id` is `<timestamp>_<framework>_seed<n>`, and it is the **same** id used in the
+`runs.csv` row — so any figure traces back to the row describing it.
+
+**Why the per-run subfolder.** `training_results.csv`, `batch_metrics.csv`, `test.csv`
+and the seven PNGs all carry fixed names with no framework or seed in them. Four
+frameworks writing into one experiment folder would leave only the last one's files.
+The three schema CSVs are exempt because they are append-only — that is what they are
+for.
+
+**Two families of plot, and they do not mix:**
+
+| folder | written by | shows |
+|---|---|---|
+| `plots/<run_id>/` | `learning/main.py`, automatically | this ONE run — loss curve, VRAM, spike raster |
+| `figures/` | `make_plots.py`, after several runs | the COMPARISON across frameworks (F0–F6) |
+
+Nesting happens only when `--experiment` is given. Without it, everything stays flat in
+`./outputs` exactly as before.
 
 Repeat with a different `--framework` and the same `--seed` to compare frameworks; with
 the same `--framework` and a different `--seed` to get replicates.
