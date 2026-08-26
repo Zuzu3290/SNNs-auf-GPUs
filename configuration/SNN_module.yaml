@@ -3,6 +3,29 @@
 # What the network IS (layer dimensions, neuron) lives in network_architecture.yaml.
 # How the DATA arrives (framing, slicing, cache) lives in data_workflow.yaml.
 
+# ---------------------------------------------------------------------------
+# dataset: which dataset this run uses.
+#
+# null (the default) means ASK -- the interactive menu, exactly as this pipeline has
+# always worked. Leave it null for a hands-on run.
+#
+# Set it to skip the prompt, which anything non-interactive REQUIRES: a Colab cell, a
+# scripted multi-seed sweep, or several runs launched at once cannot answer a prompt,
+# and a run that needed one is not reproducible from its config alone.
+#
+# Accepts either the dataset name or its number in the menu. Case, spaces, hyphens and
+# underscores are all ignored, so "DVS128 Gesture", "dvs128-gesture" and
+# "dvs128_gesture" are the same. An unrecognised name RAISES at startup, naming the
+# closest matches -- it never falls back to a default.
+#
+#   N-MNIST (1) | N-Caltech101 (2) | DAVIS Camera Pose (3) | DVS128 Gesture (4)
+#   DSEC (5)    | Eye Tracking (6)
+#
+# See event_data_workflow/dataset_registry.py for the full registry.
+# ---------------------------------------------------------------------------
+dataset:
+  name: null
+
 architecture:
   input_size: 50
   hidden_size: 50

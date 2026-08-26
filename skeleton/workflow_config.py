@@ -5,9 +5,22 @@ DEFAULT_YAML = Path(__file__).parent.parent / "configuration" / "data_workflow.y
 
 
 class WorkflowSettings:
-    def __init__(self, yaml_path: str = str(DEFAULT_YAML)):
-        with open(yaml_path) as f:
-            config = yaml.safe_load(f)
+    def __init__(self, config: dict | None = None, overlay: str | None = None):
+        """
+        config   an already-merged config dict (from skeleton.config_loader.load_config)
+        overlay  path to one experiment overlay to merge over the three base files
+
+        Both omitted loads the three base files, matching the previous behaviour of
+        reading data_workflow.yaml directly. Taking the merged dict is what lets an
+        experiment overlay override framing, slicing, cache or resource_policy the same
+        way it overrides anything else -- previously this class read its own file, so
+        an overlay could not reach it.
+        """
+        from skeleton.config_loader import load_config
+
+        if config is not None and overlay is not None:
+            raise ValueError("pass either `config` or `overlay`, not both")
+        config = config if config is not None else load_config(overlay)
 
         framing = config.get("framing", {})
         self.FRAME_MODE     = framing.get("mode", "time_window")

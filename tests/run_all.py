@@ -29,7 +29,9 @@ SUITES = [
     "unit_neuron_picker.py",
     "unit_shared_net.py",
     "unit_pipeline_integration.py",
+    "unit_cli_config.py",
     "unit_seeding.py",
+    "unit_entrypoints.py",
 ]
 
 

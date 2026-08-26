@@ -6,6 +6,7 @@ extracted/on-disk footprint — None where no figure has been measured or
 documented; see docs/Event-Based_camera.md for sourcing).
 """
 from __future__ import annotations
+import difflib
 import logging
 from pathlib import Path
 
@@ -250,24 +251,87 @@ DATASET_REGISTRY = {
 }
 
 
-def resolve_dataset_entry(cfg) -> dict:
-    """Match cfg.DATASET_NAME against DATASET_REGISTRY, else prompt interactively (works in a real terminal and in a live notebook kernel, both accept input() even though neither always reports a tty), else default to N-MNIST."""
-    wanted = (cfg.DATASET_NAME or "").strip().upper()
+class UnknownDataset(Exception):
+    """dataset.name names something that is not in DATASET_REGISTRY."""
+
+
+def normalise_dataset_name(name: str) -> str:
+    """Fold case, spaces, hyphens and underscores so 'DVS128 Gesture',
+    'dvs128-gesture' and 'dvs128_gesture' all name the same dataset."""
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def dataset_menu() -> str:
+    lines = []
+    for key, entry in DATASET_REGISTRY.items():
+        kind = entry.get("kind", "classification")
+        output = f"{entry['num_classes']} classes" if kind == "classification" else "regression target TBD"
+        lines.append(f"  {key}) {entry['name']}  [{output}]")
+    return "\n".join(lines)
+
+
+def lookup_dataset(wanted: str) -> dict:
+    """Find one dataset by name or by registry key ('1'..'6').
+
+    Raises UnknownDataset on anything unrecognised, naming the closest matches. A typo
+    must fail HERE, at startup, rather than being silently ignored -- a run that
+    quietly used the wrong dataset, or fell back to N-MNIST while the config asked for
+    DVS128 Gesture, is worse than one that refuses to start.
+    """
+    text = str(wanted).strip()
+    if text in DATASET_REGISTRY:            # a registry key, as the menu prints them
+        return DATASET_REGISTRY[text]
+
+    target = normalise_dataset_name(text)
     for entry in DATASET_REGISTRY.values():
-        if entry["name"].upper() == wanted:
+        if normalise_dataset_name(entry["name"]) == target:
             return entry
 
+    names = [entry["name"] for entry in DATASET_REGISTRY.values()]
+    close = difflib.get_close_matches(text, names, n=3, cutoff=0.5)
+    if not close:  # try again on the normalised forms, so 'nmnist' still suggests N-MNIST
+        folded = {normalise_dataset_name(n): n for n in names}
+        close = [folded[m] for m in difflib.get_close_matches(target, list(folded), n=3, cutoff=0.5)]
+    hint = f" Did you mean: {', '.join(close)}?" if close else ""
+    raise UnknownDataset(
+        f"dataset.name = {text!r} is not a known dataset.{hint}\n"
+        f"Available (name, or the number in brackets):\n{dataset_menu()}"
+    )
+
+
+def resolve_dataset_entry(cfg) -> dict:
+    """Which dataset this run uses.
+
+    Two paths, both supported:
+
+      dataset.name set in config  -> used directly, no prompt. Required for anything
+                                     non-interactive: a Colab cell, a scripted
+                                     multi-seed sweep, or several runs launched at
+                                     once cannot answer a prompt, and a run that
+                                     needed one is not reproducible from its config.
+      dataset.name absent/null    -> prompt, exactly as this pipeline always has.
+
+    A name that is set but unrecognised RAISES rather than falling back -- see
+    lookup_dataset.
+    """
+    wanted = getattr(cfg, "DATASET_NAME", None)
+    if wanted is not None and str(wanted).strip():
+        entry = lookup_dataset(wanted)
+        logger.info(f"[PIPELINE] Dataset from config: {entry['name']}")
+        return entry
+
     print("\n[PIPELINE] Select a dataset:")
-    for key, entry in DATASET_REGISTRY.items():
-        output = f"{entry['num_classes']} classes" if entry.get("kind", "classification") == "classification" else "regression target TBD"
-        print(f"  {key}) {entry['name']}  [{output}]")
+    print(dataset_menu())
+    print("  (set dataset.name in the config to skip this prompt)")
     try:
         choice = input("Enter number: ").strip()
     except EOFError:
-        logger.warning("[PIPELINE] No interactive input source attached — defaulting to N-MNIST")
+        logger.warning("[PIPELINE] No interactive input source attached — defaulting to N-MNIST. "
+                       "Set dataset.name in the config to choose deliberately.")
         return DATASET_REGISTRY["1"]
 
-    if choice in DATASET_REGISTRY:
-        return DATASET_REGISTRY[choice]
-    logger.warning(f"[PIPELINE] Invalid selection '{choice}' — defaulting to N-MNIST")
-    return DATASET_REGISTRY["1"]
+    try:
+        return lookup_dataset(choice)
+    except UnknownDataset:
+        logger.warning(f"[PIPELINE] Invalid selection '{choice}' — defaulting to N-MNIST")
+        return DATASET_REGISTRY["1"]

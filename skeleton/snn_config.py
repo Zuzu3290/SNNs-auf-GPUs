@@ -14,9 +14,23 @@ FW_TO_CFG_KEY = {
 
 
 class Settings:
-    def __init__(self, yaml_path=str(DEFAULT_YAML)):
-        self.yaml_path = yaml_path
-        self.config = self.load_yaml(yaml_path)
+    def __init__(self, config: dict | None = None, overlay: str | None = None):
+        """
+        config   an already-merged config dict (from skeleton.config_loader.load_config).
+                 Pass this when the CLI has already loaded and overlaid everything.
+        overlay  path to one experiment overlay to merge over the three base files.
+
+        Both omitted -- `Settings()` -- loads the three base files and nothing else,
+        which is exactly how this pipeline behaved before overlays existed. That is
+        what keeps `python learning/main.py` working with no arguments.
+        """
+        from skeleton.config_loader import load_config
+
+        if config is not None and overlay is not None:
+            raise ValueError("pass either `config` or `overlay`, not both")
+        self.config = config if config is not None else load_config(overlay)
+        self.overlay_path = overlay
+        self.yaml_path = str(DEFAULT_YAML)  # kept: some callers print it
 
         architecture = self.config.get("architecture", {})
         training     = self.config.get("training", {})
@@ -25,8 +39,10 @@ class Settings:
         # NOTE: the old `frameworks:` block is gone -- neuron params moved to
         # network_architecture.yaml, optimizer/loss became one shared training setting.
 
-        # Load conv-SNN architecture from network_architecture.yaml
-        network_arch = self.load_yaml(str(NETWORK_ARCH_YAML))
+        # The three base files are merged into one dict by the loader (their top-level
+        # sections do not collide), so the conv-SNN architecture is read from the same
+        # dict as everything else rather than from a second file read here.
+        network_arch = self.config
         conv = network_arch.get("convolution", {})
 
         # Legacy MLP architecture params (kept for backward compatibility)
@@ -54,6 +70,12 @@ class Settings:
 
         # Auto-compute flattened size after both conv+pool stages
         self.FC_IN = self.compute_fc_in(self.SENSOR_H, self.SENSOR_W)
+
+        # Placeholder until apply_dataset_shape() sets the real per-dataset count.
+        # Present from construction so anything that builds a network before a dataset
+        # has been picked -- check_network.py, a unit test -- gets a usable value
+        # instead of an AttributeError.
+        self.NUM_CLASSES = int(architecture.get("output_size", 10))
 
         self.NEURON_TYPES = network_arch.get("neuron_types", {})
 
@@ -111,7 +133,11 @@ class Settings:
 
 
         # Dataset control
-        self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
+        # None (the default) means "ask" -- the interactive prompt, as this pipeline
+        # has always worked. Set dataset.name in the config to skip it, which anything
+        # non-interactive (a Colab cell, a scripted sweep) needs. An unrecognised name
+        # raises at startup rather than falling back; see dataset_registry.lookup_dataset.
+        self.DATASET_NAME = dataset.get("name", dataset.get("dataset_name", None))
         self.TASK_TYPE    = "classification"  # overwritten by NeuromorphicEncoder.load_raw() once a dataset is picked
 
         # Output control

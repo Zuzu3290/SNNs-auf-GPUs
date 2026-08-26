@@ -1,0 +1,16 @@
+# Experiment 2 -- sinabs out-of-box behaviour.
+#
+# Overlays the three files in configuration/. States ONLY what differs; conv dims,
+# framing, cache policy and the other three neurons are inherited untouched.
+dataset:
+  name: N-MNIST
+
+neuron:
+  sinabs:
+    tau_mem: .inf         # alpha = exp(-1/inf) = 1 -> no leak, i.e. integrate-and-fire
+    spike_fn: multi       # sinabs' own default: 2, 3, ... spikes in one timestep
+    reset_mechanism: subtract
+    min_v_mem: -1.0
+
+training:
+  epochs: 1

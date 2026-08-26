@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))  # project root → skelet
 import torch
 from skeleton import Settings, WorkflowSettings
 from skeleton.snn_logging import configure_logging
+from skeleton.seeding import seed_everything, seed_model_init, shared_weight_fingerprint
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder, resolve_dataset_entry
@@ -23,9 +24,34 @@ FRAMEWORK_MODULES = {
     "sinabs":   ("frameworks.snn_sinabs", "SNN_SINABS"),
 }
 
+def parse_args():
+    """Every flag is optional and every default reproduces this pipeline's original
+    behaviour, so `python learning/main.py` on its own runs exactly as it always has:
+    the three base config files, a dataset prompt, and output to the `output:` paths.
+    """
+    import argparse
+
+    from skeleton.cli import add_common_args
+
+    parser = argparse.ArgumentParser(
+        description="Train and evaluate one SNN framework on one event dataset.",
+        epilog="examples:\n"
+               "  python learning/main.py\n"
+               "  python learning/main.py --config config/ex2.yaml --experiment ex2 "
+               "--framework sinabs --seed 1\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    return add_common_args(parser).parse_args()
+
+
 if __name__ == "__main__":
+    from skeleton.cli import build, run_banner
+
     configure_logging()
-    cfg = Settings()
+    args = parse_args()
+    cfg, wf_settings, run_info = build(args)
+    print(run_banner("learning/main.py", cfg, run_info))
+    seed_everything(cfg.SEED)  # data order, augmentation, random_split -- see skeleton/seeding.py
     device = torch.device(cfg.DEVICE)
 
     dataset_entry = resolve_dataset_entry(cfg)
@@ -51,7 +77,7 @@ if __name__ == "__main__":
     sensor_w, sensor_h, in_channels = dataset_entry["sensor_size"]
     cfg.apply_dataset_shape(sensor_h=sensor_h, sensor_w=sensor_w, in_channels=in_channels,
                              num_classes=dataset_entry["num_classes"])
-    wf = WorkflowSettings()
+    wf = wf_settings  # same merged config; overlay and --cache-root already applied
     if cfg.CALIBRATE_BATCH_SIZE:
         cfg.BATCH_SIZE = calibrate_batch_size(ModelClass, cfg, device, timesteps=wf.N_TIME_BINS,
                                                data_vram_fraction=wf.BATCH_VRAM_FRACTION, max_batch_size=wf.MAX_BATCH_SIZE,
@@ -78,20 +104,28 @@ if __name__ == "__main__":
               f"(covers {covered}/{n_train_samples} training samples per epoch, "
               f"{covered / n_train_samples * 100:.2f}%)")
 
+    # Seed immediately before construction, so weight init depends only on the seed
+    # regardless of what drew from the RNG first (dataset probing, batch-size
+    # calibration). This is what makes all four frameworks start from identical weights.
+    seed_model_init(cfg.SEED)
     model = ModelClass(cfg)
+    print(f"  weight fingerprint : {shared_weight_fingerprint(model)}")
     print(f"\n  Model backend  : {cfg.FRAMEWORK.upper()}")
     cfg.display()
 
+    results_dir, _, plots_dir = run_info["results_dir"], run_info["equivalence_dir"], run_info["plots_dir"]
+    results_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir.mkdir(parents=True, exist_ok=True)
     trainer = SNNTrainer(model, train_loader, cfg, device)
-    results = trainer.train()
+    results = trainer.train(csv_path=str(results_dir / "training_results.csv"))
     print("\n Training complete!")
     print(f"  Final loss      : {results['loss_history'][-1]:.4f}")
     print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}")
     print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
 
-    trainer.plot_training()
-    trainer.plot_iteration_metrics()
-    trainer.plot_raster()
+    trainer.plot_training(save_dir=str(plots_dir))
+    trainer.plot_iteration_metrics(save_dir=str(plots_dir))
+    trainer.plot_raster(save_dir=str(plots_dir))
 
     # train_loader has persistent_workers=True -- its worker processes stay alive
     # until this DataLoader is garbage-collected, so drop every reference (trainer
@@ -101,7 +135,7 @@ if __name__ == "__main__":
 
     visualize = select_inference_mode()
     tester       = SNNTester(model, test_loader, cfg, device, visualize=visualize)
-    test_results = tester.run()
+    test_results = tester.run(csv_path=str(results_dir / "test.csv"))
     print("\n Testing complete!")
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
     print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")
