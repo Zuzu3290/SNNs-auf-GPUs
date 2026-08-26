@@ -4,7 +4,7 @@ from pathlib import Path
 DEFAULT_YAML      = Path(__file__).parent.parent / "configuration" / "SNN_module.yaml"
 NETWORK_ARCH_YAML = Path(__file__).parent.parent / "configuration" / "network_architecture.yaml"
 
-# Maps training.framework selector → FRAMEWORK_CFG / NEURON_TYPES key
+# Maps training.framework selector → neuron: / neuron_types: key in network_architecture.yaml
 FW_TO_CFG_KEY = {
     "torch":    "snntorch",
     "norse":    "norse",
@@ -22,7 +22,8 @@ class Settings:
         training     = self.config.get("training", {})
         dataset      = self.config.get("dataset", {})
         output       = self.config.get("output", {})
-        frameworks   = self.config.get("frameworks", {})
+        # NOTE: the old `frameworks:` block is gone -- neuron params moved to
+        # network_architecture.yaml, optimizer/loss became one shared training setting.
 
         # Load conv-SNN architecture from network_architecture.yaml
         network_arch = self.load_yaml(str(NETWORK_ARCH_YAML))
@@ -56,6 +57,12 @@ class Settings:
 
         self.NEURON_TYPES = network_arch.get("neuron_types", {})
 
+        # The unified neuron spec: one block per framework, all describing the SAME
+        # neuron in each framework's own units. Read through skeleton/neuron_spec.py,
+        # which raises on a missing key rather than falling back to a framework default.
+        # Deliberately NOT given per-key defaults here -- see that module's header.
+        self.NEURON = network_arch.get("neuron", {})
+
         # Training parameters
         self.EPOCHS                   = int(training.get("epochs", 10))
         self.ITERA                    = int(training.get("iterations_per_epoch", 100))
@@ -64,8 +71,23 @@ class Settings:
         # is never called — see docs/functions.md for why this exists.
         self.CALIBRATE_BATCH_SIZE     = bool(training.get("calibrate_batch_size", True))
         self.NAP_TIMES                = int(training.get("nap_times", 1))
-        self.LEARNING_RATE             = float(training.get("learning_rate", 0.001))
-        self.WEIGHT_DECAY              = float(training.get("weight_decay", 0.0001))
+
+        # Fixes weight init AND batch order. Without it, any measured difference
+        # between two frameworks is confounded with initialisation noise -- there was
+        # no seeding anywhere in this pipeline before.
+        self.SEED                     = int(training.get("seed", 0))
+
+        # ONE optimizer and ONE loss, shared by every framework -- not per-framework.
+        # These are plain torch; none of the four SNN libraries supplies them, so giving
+        # a framework its own would mean comparing training recipes, not frameworks.
+        optimizer_cfg                 = training.get("optimizer", {})
+        self.OPTIMIZER                = str(optimizer_cfg.get("type", "nadam"))
+        self.LEARNING_RATE            = float(optimizer_cfg.get("lr", 0.002))
+        # 0.0 is this pipeline's value. The pre-merge default here was 1e-4, applied to
+        # every framework -- a real recipe difference, recorded in docs/merge_decisions.md.
+        self.WEIGHT_DECAY             = float(optimizer_cfg.get("weight_decay", 0.0))
+        self.SGD_MOMENTUM             = float(optimizer_cfg.get("momentum", 0.0))
+        self.LOSS_FN                  = str(training.get("loss", "cross_entropy"))
         self.DEVICE                    = training.get("device", "cuda")
         self.DDP                      = training.get("DDP", "OFF")
         self.USE_AMP                  = bool(training.get("use_amp", True))
@@ -87,59 +109,6 @@ class Settings:
         # Framework selector
         self.FRAMEWORK = training.get("framework", "norse")
 
-        # Per-framework config blocks
-        snt = frameworks.get("snntorch",     {})
-        nor = frameworks.get("norse",        {})
-        spj = frameworks.get("spikingjelly", {})
-        sin = frameworks.get("sinabs",       {})
-        bds = frameworks.get("bindsnet",     {})
-        spx = frameworks.get("spyx",         {})
-
-        self.FRAMEWORK_CFG = {
-            "snntorch": {
-                "beta":      float(snt.get("beta", 0.95)),
-                "threshold": float(snt.get("threshold", 0.5)),
-                "optimizer": snt.get("optimizer", "adam"),
-                "loss_fn":   snt.get("loss_fn", "mse_count"),
-            },
-            "norse": {
-                "tau_mem_inv": float(nor.get("tau_mem_inv", 100.0)),
-                "threshold":   float(nor.get("threshold", 0.5)),
-                "optimizer":   nor.get("optimizer", "adam"),
-                "loss_fn":     nor.get("loss_fn", "cross_entropy"),
-            },
-            "spikingjelly": {
-                "tau":       float(spj.get("tau", 2.0)),
-                "threshold": float(spj.get("threshold", 0.5)),
-                "optimizer": spj.get("optimizer", "adam"),
-                "loss_fn":   spj.get("loss_fn", "cross_entropy"),
-            },
-            "sinabs": {
-                "tau_mem":   float(sin.get("tau_mem", 20.0)),
-                "threshold": float(sin.get("threshold", 0.5)),
-                "optimizer": sin.get("optimizer", "adam"),
-                "loss_fn":   sin.get("loss_fn", "cross_entropy"),
-            },
-            "bindsnet": {
-                "nu_pre":    float(bds.get("nu_pre", 0.0001)),
-                "nu_post":   float(bds.get("nu_post", 0.01)),
-                "threshold": float(bds.get("threshold", 0.5)),
-                "optimizer": bds.get("optimizer", "none"),
-                "loss_fn":   bds.get("loss_fn", "cross_entropy"),
-            },
-            "spyx": {
-                "beta":      float(spx.get("beta", 0.9)),
-                "gamma":     float(spx.get("gamma", 0.9)),
-                "threshold": float(spx.get("threshold", 0.5)),
-                "optimizer": spx.get("optimizer", "adam"),
-                "loss_fn":   spx.get("loss_fn", "cross_entropy"),
-            },
-        }
-
-        # Backward-compatible shorthands
-        self.BETA        = self.FRAMEWORK_CFG["snntorch"]["beta"]
-        self.TAU_MEM_INV = self.FRAMEWORK_CFG["norse"]["tau_mem_inv"]
-        self.TAU         = self.FRAMEWORK_CFG["spikingjelly"]["tau"]
 
         # Dataset control
         self.DATASET_NAME = dataset.get("dataset_name", "MNIST")
@@ -156,13 +125,19 @@ class Settings:
 
     @property
     def active_fw_cfg(self) -> dict:
-        """Config dict for whichever framework is currently selected."""
+        """The neuron spec block for whichever framework is currently selected.
+
+        Was the per-framework `frameworks:` block in SNN_module.yaml, which mixed
+        neuron parameters with optimizer and loss. The neuron moved to
+        network_architecture.yaml's `neuron:` section; optimizer and loss became one
+        shared setting, since neither belongs to any of the four SNN libraries.
+        """
         if self.FRAMEWORK not in FW_TO_CFG_KEY:
             raise ValueError(
                 f"training.framework='{self.FRAMEWORK}' has no FW_TO_CFG_KEY mapping. "
                 f"Available: {sorted(FW_TO_CFG_KEY)}."
             )
-        return self.FRAMEWORK_CFG[FW_TO_CFG_KEY[self.FRAMEWORK]]
+        return self.NEURON.get(FW_TO_CFG_KEY[self.FRAMEWORK], {})
 
     def compute_fc_in(self, sensor_h: int, sensor_w: int) -> int:
         """Flattened size after both conv+pool stages — independent H/W so non-square sensors work."""
@@ -278,17 +253,26 @@ class Settings:
         for layer, ntype in neuron_types.items():
             row(layer, ntype)
 
-        section(f"FRAMEWORK PARAMS — {fw}")
+        section(f"NEURON SPEC — {fw}")
+        if not fw_cfg:
+            row("(none)", f"network_architecture.yaml has no neuron.{cfg_key} block")
         for key, val in fw_cfg.items():
-            display_val = f"{val} Hz" if key == "tau_mem_inv" else str(val)
-            row(key, display_val)
+            if isinstance(val, dict):  # e.g. surrogate: {type:..., alpha:...}
+                inner = ", ".join(f"{k}={v}" for k, v in val.items())
+                row(key, inner)
+            else:
+                display_val = f"{val} Hz" if key == "tau_mem_inv" else str(val)
+                row(key, display_val)
 
         section("TRAINING")
+        row("Seed",               str(self.SEED))
         row("Epochs",             str(self.EPOCHS))
         row("Iterations / epoch", str(self.ITERA))
         row("Batch size",         str(self.BATCH_SIZE))
+        row("Optimizer",          self.OPTIMIZER)
         row("Learning rate",      str(self.LEARNING_RATE))
         row("Weight decay",       str(self.WEIGHT_DECAY))
+        row("Loss",               self.LOSS_FN)
         row("LR scheduler",       self.LR_SCHEDULER)
         row("Grad accum steps",   str(self.GRAD_ACCUM_STEPS))
         row("AMP (mixed prec.)",  "ENABLED" if self.USE_AMP else "DISABLED")

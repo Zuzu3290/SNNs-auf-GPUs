@@ -1,3 +1,8 @@
+# How the network is TRAINED.
+#
+# What the network IS (layer dimensions, neuron) lives in network_architecture.yaml.
+# How the DATA arrives (framing, slicing, cache) lives in data_workflow.yaml.
+
 architecture:
   input_size: 50
   hidden_size: 50
@@ -10,6 +15,12 @@ architecture:
 training:
   framework: sj           # YAML selector: norse | torch | sj | sinabs
   device: cuda
+
+  # Fixes weight init AND batch order, so a rerun reproduces and so all four frameworks
+  # start from byte-identical conv/linear weights. Without it, any measured difference
+  # between two frameworks is confounded with initialisation noise.
+  seed: 0
+
   epochs: 2              # one epoch = one full pass over the training set; more epochs = more chances to learn.
                           # not calibrated -- your call how many repeated passes the model needs.
   iterations_per_epoch: 400
@@ -20,8 +31,48 @@ training:
                                 # false: batch_size and iterations_per_epoch below are used exactly as
                                 # written, no probe run.
   nap_times: 1
-  learning_rate: 0.001
-  weight_decay: 0.0001
+
+  # ---------------------------------------------------------------------------
+  # optimizer and loss: ONE block, shared by every framework.
+  #
+  # Deliberately NOT per-framework. These are plain torch -- none of the four SNN
+  # libraries supplies them, and all four networks are ordinary nn.Modules holding
+  # ordinary Conv2d/Linear parameters. Giving any framework its own optimizer, learning
+  # rate or loss would mean comparing training recipes instead of frameworks.
+  #
+  # An unrecognised name RAISES. The previous build_optimizer() silently returned Adam
+  # for anything it did not recognise, so a typo produced a real run with the wrong
+  # optimizer and no warning.
+  # ---------------------------------------------------------------------------
+  optimizer:
+    type: nadam         # nadam | adam | adamw | sgd
+    lr: 0.002           # drop to 0.001 if training is unstable
+
+    # 0.0 is this pipeline's value; the pre-merge default was 1e-4 applied to every
+    # framework. A real training-recipe difference -- whichever value a published run
+    # uses has to be stated alongside it. See docs/merge_decisions.md.
+    weight_decay: 0.0
+
+    momentum: 0.0       # SGD only, ignored by the others. The pre-merge code hardcoded
+                        # 0.9 here; it is a config value now rather than a hidden one.
+
+  # Plain torch.nn.CrossEntropyLoss on the spike counts accumulated over T, shape
+  # [batch, num_classes]. Nothing custom.
+  #
+  #   cross_entropy - torch's own loss, belonging to none of the four libraries
+  #   mse_count     - snnTorch's functional.mse_count_loss. Available, but it belongs to
+  #                   ONE of the four frameworks, so it is not neutral: do not use it
+  #                   for a cross-framework comparison run.
+  loss: cross_entropy
+
+  lr_scheduler: cosine  # cosine | none. Must be identical across frameworks.
+
+  # Mixed precision. MUST be stated explicitly: this key was previously absent from
+  # this file and silently defaulted to true in Settings, so every run used float16
+  # autocast without saying so. It changes both speed and numerics.
+  use_amp: false
+
+  grad_accum_steps: 1
 
   # TRADES robustness training — penalises the network for changing its prediction under input corruption.
   # Loss = CrossEntropy(clean) + lambda * KL(clean || adversarial).
@@ -36,7 +87,13 @@ training:
   trades_steps: 3              # PGD iterations used to find worst-case input per batch. Recommended: 10 for training.
                                 # Range: 1 (fast, weaker adversarial) → 40 (slow, strongest adversarial).
 
-  activity_reg_enabled: true   # Two-sided per-neuron activity regularization on hidden LIF layers.
+  # Two-sided per-neuron activity regularization on hidden LIF layers.
+  #
+  # OFF by default. It adds a term to the loss, so it must be identical across
+  # frameworks or the loss itself differs — which it did: sinabs had no ActivityMonitor
+  # hooks, so three of four frameworks were penalised and sinabs was not. All four are
+  # hooked now, but it stays off for comparison runs.
+  activity_reg_enabled: false
   activity_reg_min_rate: 0.01   # Penalize neurons firing less than 1% of timesteps  (dead neuron prevention).
   activity_reg_max_rate: 0.50   # Penalize neurons firing more than 50% of timesteps (saturation prevention).
   activity_reg_lambda_low: 0.1  # Penalty weight for dead neurons.
@@ -49,32 +106,3 @@ output:
   output_dir: ./outputs
   plot_dir: ./outputs/plots
   data_dir: ./outputs/data
-
-# Per-framework neuron / optimiser / loss params.
-# threshold=0.5: SNNTorch amplifies input 20x (V_eq=20I), Norse/SpikingJelly do not (V_eq=I).
-# threshold=1.0 kills Norse (dead neurons, confirmed EXP-004). 0.5 is a safe neutral starting point.
-frameworks:
-  snntorch:
-    beta:       0.95
-    threshold:  0.5
-    optimizer:  adam
-    loss_fn:    cross_entropy
-
-  norse:
-    tau_mem_inv: 100.0
-    threshold:   1.0
-    optimizer:   adam
-    loss_fn:     cross_entropy
-
-  spikingjelly:
-    tau:         2.0
-    threshold:   0.5
-    optimizer:   adam
-    loss_fn:     cross_entropy
-
-  sinabs:
-    tau_mem:     20.0
-    threshold:   0.5
-    optimizer:   adam
-    loss_fn:     cross_entropy
-

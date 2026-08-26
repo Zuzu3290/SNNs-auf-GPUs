@@ -1,3 +1,21 @@
+# What the network IS: its layer dimensions, and the neuron that fills every LIF slot.
+#
+# How it is TRAINED (optimizer, loss, epochs, regularisation) lives in SNN_module.yaml.
+# How the DATA arrives (framing, slicing, cache) lives in data_workflow.yaml.
+
+# ---------------------------------------------------------------------------
+# convolution: layer dimensions.
+#
+# sensor_h / sensor_w / in_channels are OVERWRITTEN at runtime by
+# Settings.apply_dataset_shape() from the selected dataset's registry entry, so the
+# values here are only the fallback for a standalone Settings() with no dataset picked.
+# The conv/pool numbers are the real architecture and are used as written.
+#
+# Architecture 12C5 - MP2 - 32C5 - MP2 - FC, from the snnTorch/Tonic N-MNIST tutorial.
+# The flattened width is NOT here: Settings.compute_fc_in() derives it by formula for
+# display, and frameworks/spiking_net.py measures it with a real forward pass and
+# raises if the two disagree.
+# ---------------------------------------------------------------------------
 convolution:
   sensor_h:     34
   sensor_w:     34
@@ -8,27 +26,255 @@ convolution:
   conv2_kernel: 5
   pool_kernel:  2
 
+# ---------------------------------------------------------------------------
+# neuron_types: WHICH neuron fills each LIF slot, per framework.
+#
+# There is no default. A missing or misspelled key RAISES rather than falling back --
+# previously the code defaulted to `alpha` for snnTorch and `izhikevich` for
+# SpikingJelly, so a dropped key silently put a two-compartment or Izhikevich neuron
+# inside a run labelled a LIF comparison.
+#
+# `lif` is the only implemented value, and it names the SAME first-order leaky
+# integrate-and-fire neuron in all four frameworks, built from the `neuron:` block
+# below. The class each one actually instantiates differs:
+#
+#     snntorch      snn.Leaky
+#     norse         norse.LIFBoxCell   (NOT LIFCell -- that one is second-order)
+#     spikingjelly  neuron.LIFNode
+#     sinabs        sinabs.layers.LIF
+#
+# Recognised but NOT implemented, each raising with an explanation:
+#   alpha        snnTorch's two-compartment neuron (membrane + synaptic current)
+#   izhikevich   SpikingJelly's Izhikevich node -- two state variables, not a LIF
+#   iaf          reachable already: set neuron.sinabs.tau_mem to .inf (no leak)
+#   alif         adaptive-threshold LIF
+#   leaky        the old snnTorch name for `lif`; write `lif`
+#   lif_cell     the old norse name, and it selected the second-order cell; write `lif`
+# ---------------------------------------------------------------------------
 neuron_types:
   snntorch:
-    lif1:    leaky        # alpha | leaky
-    lif2:    leaky        # alpha | leaky
-    lif_out: leaky        # alpha | leaky
+    lif1:    lif
+    lif2:    lif
+    lif_out: lif
   norse:
-    lif1:    lif_cell     # lif_cell | lif_rec_cell
-    lif2:    lif_cell     # lif_cell | lif_rec_cell
-    lif_out: lif_cell     # lif_cell | lif_rec_cell
+    lif1:    lif
+    lif2:    lif
+    lif_out: lif
   spikingjelly:
-    lif1:    lif   # izhikevich | lif
-    lif2:    lif   # izhikevich | lif
-    lif_out: lif   # izhikevich | lif
+    lif1:    lif
+    lif2:    lif
+    lif_out: lif
   sinabs:
-    lif1:    lif          # lif | iaf
-    lif2:    lif          # lif | iaf
-    lif_out: lif          # lif | iaf
-  spyx:
-    lif1:    lif          # lif | alif
-    lif2:    lif          # lif | alif
-    lif_out: lif          # lif | alif
+    lif1:    lif
+    lif2:    lif
+    lif_out: lif
 
-# Future: pure_snn:
-#   hidden_layers: [256, 128]
+# ---------------------------------------------------------------------------
+# neuron: one block per framework.
+#
+# The SAME idealised neuron described four times, because each framework names and
+# parameterises it differently. Target neuron:
+#
+#     threshold 1.0 | hard reset to 0 | per-step decay 0.9 | input gain 1.0
+#
+# The conversion arithmetic for each framework is in the comments, so the numbers can
+# be checked by reading rather than by trusting. equivalence_check.py measures whether
+# the four actually agree.
+#
+# NO SILENT DEFAULTS: every key here must be stated. skeleton/neuron_spec.py raises on
+# a missing key rather than falling back to the framework's own default -- those
+# defaults differ from each other, which is exactly how the previous per-framework
+# config ended up with a 40x spread in the input needed to fire.
+# ---------------------------------------------------------------------------
+neuron:
+
+  snntorch:
+    # snnTorch update: mem = beta * mem + input
+    # `beta` IS the decay factor, so it is written directly.
+    beta: 0.9
+    threshold: 1.0
+
+    # VERIFIED against snntorch 1.0.0: the default is "subtract" (soft reset), which
+    # would NOT match the other three. "zero" = hard reset.
+    reset_mechanism: zero
+
+    # VERIFIED against snntorch 1.0.0, and easy to miss: snnTorch defaults to
+    # reset_delay=True, which applies a spike's reset on the FOLLOWING timestep. The
+    # other three reset immediately. Left at the default, snnTorch's membrane reads 1.2
+    # where the others read 0.0. false = reset immediately = matches the other three.
+    reset_delay: false
+
+    # BACKWARD PASS ONLY -- forward membrane/spike dynamics are identical regardless.
+    surrogate:
+      type: atan          # atan | fast_sigmoid
+      alpha: 2.0
+
+  spikingjelly:
+    # SpikingJelly update (decay_input=False): v = v - v/tau + input
+    #                                            = (1 - 1/tau) * v + input
+    # So decay = 1 - 1/tau. For decay 0.9:  tau = 1 / (1 - 0.9) = 10.0
+    tau: 10.0
+
+    # VERIFIED against spikingjelly 0.0.0.0.14: the default is True, which divides the
+    # input by tau and changes the input gain to 1/tau = 0.1. false keeps gain at 1.0.
+    decay_input: false
+
+    v_threshold: 1.0
+    v_reset: 0.0          # a number means HARD reset; null would mean soft
+
+    # Whether gradient may flow back through the reset. MEASURED, not cosmetic: on a
+    # 6-step test, flipping this changed d(spikes)/d(weight) from 2.64 to 4.34 -- a 64%
+    # change in gradient size. false (SpikingJelly's own default) lets gradient through,
+    # matching snnTorch, whose reset path also carries gradient. Affects training only.
+    detach_reset: false
+
+    # 's' = one timestep per forward call, which is what the shared network hands each
+    # layer. 'm' is REFUSED rather than ignored.
+    #
+    # WHY THIS MATTERS FOR THE BENCHMARK: single-step supports only the 'torch' backend
+    # (verified). SpikingJelly's fused CUDA kernel -- the 'cupy' backend and the source
+    # of the speed advantage claimed in Fang et al. 2023 -- requires 'm'. So this
+    # configuration measures SpikingJelly WITHOUT its headline optimisation. That is the
+    # correct choice for "identical computation across frameworks", but it must be
+    # stated in the write-up. Verified: 'm' and looped 's' produce identical spikes, so
+    # such a run would differ in speed only, never in accuracy.
+    step_mode: s
+    backend: torch
+
+    # VERIFIED: SpikingJelly's own default surrogate is Sigmoid(alpha=4.0), not ATan.
+    surrogate:
+      type: atan          # atan | sigmoid
+      alpha: 2.0
+
+  norse:
+    # Norse LIFBoxCell update, read from the installed source:
+    #   dv = dt * tau_mem_inv * (input + v_leak - v)
+    #   v  = v + dv = (1 - dt*tau_mem_inv) * v + (dt*tau_mem_inv) * input
+    #
+    # So decay = 1 - dt*tau_mem_inv, and the input gain is dt*tau_mem_inv -- the two are
+    # LOCKED together and cannot be set independently.
+    # For decay 0.9:  dt * tau_mem_inv = 0.1
+    cell: lif_box         # lif_box only. LIFCell carries synaptic current as a second
+                          # state, making it second-order unlike the other three.
+    dt: 0.001
+    tau_mem_inv: 100.0
+
+    v_th: 1.0
+    v_reset: 0.0
+    v_leak: 0.0
+
+    # Norse's equivalent of snnTorch's reset_mechanism.
+    #   value    - hard reset: jump to v_reset          (matches the other three)
+    #   subtract - soft reset: subtract the threshold
+    reset_method: value
+
+    # Because decay and gain are locked (see above), choosing decay 0.9 forces input
+    # gain 0.1. The input is multiplied by this before it reaches the neuron, bringing
+    # the effective gain back to 1.0:  0.1 * 10.0 = 1.0
+    #
+    # THIS IS WHY SINABS NEEDS NO input_scale: sinabs has the identical lock but exposes
+    # `norm_input` to break it. Norse does not.
+    input_scale: 10.0
+
+    # Norse has no ATan surrogate. SuperSpike with alpha=10 looks like the closest match
+    # and is what most guides suggest -- DO NOT use it. Two measured reasons:
+    #
+    #   1. norse 1.1.0's SuperSpike IGNORES alpha entirely. Its backward reads
+    #      grad = grad_output / (|x| + 1)^2, with ctx.alpha never referenced, so
+    #      alpha=1, 10 and 100 give byte-identical gradients. Fixed upstream in commit
+    #      1d2671a (Aug 2024) but never released.
+    #   2. Consequently SuperSpike behaves as alpha=1, whose tails are far fatter than
+    #      ATan(2) (at x=1.0: 0.250 vs 0.092). Measured effect: Norse's conv1 gradient
+    #      norm was 6.03x the other frameworks', so with a shared learning rate Norse
+    #      would train at ~6x the step size.
+    #
+    # `circ` DOES respect alpha, and alpha=0.5 tracks ATan(2) about 10x more closely
+    # (curve MSE 0.0017 vs 0.0163) -- at x=1.0 it gives 0.0894 against ATan's 0.0920.
+    # Measured gradient ratio drops from 6.03x to 1.19x.
+    #
+    # Norse still cannot match EXACTLY -- a documented limitation -- but this is far
+    # closer than the literature assumes. Selecting 'super' logs a loud warning.
+    surrogate:
+      type: circ          # circ | super | heaviside | tanh | triangle | heavi_erfc
+      alpha: 0.5
+
+  sinabs:
+    # sinabs LIF update, from the class docstring:
+    #   norm_input=true :  v = alpha * v + (1 - alpha) * input
+    #   norm_input=false:  v = alpha * v +               input
+    # with alpha = exp(-1/tau_mem).
+    #
+    # NOTE: sinabs has NO dt. tau_mem is already in timesteps, so it is the time
+    # constant directly -- no unit conversion, unlike Norse's dt * tau_mem_inv.
+    # For decay 0.9:  tau_mem = -1 / ln(0.9) = 9.491221581029905
+    #
+    # WRITTEN TO FULL PRECISION DELIBERATELY. At 4 dp (9.4912) sinabs derives alpha
+    # 2.16e-07 low, which over 90 timesteps drifts the membrane 1.19e-06 from the other
+    # three -- past a 1e-6 tolerance. Spike trains still match, so nothing is wrong, but
+    # the margin was being spent for no reason. This value puts the error at the float32
+    # floor (2.4e-08).
+    tau_mem: 9.491221581029905
+
+    # null = first-order neuron (membrane state only), matching the other three.
+    # A number here would add a second, synaptic state -- a different neuron.
+    tau_syn: null
+
+    # VERIFIED against the sinabs source: the default is true, which multiplies the
+    # input by (1 - alpha) and drops the input gain from 1.0 to 0.1 at decay 0.9 -- the
+    # same lock Norse has structurally. false decouples gain from decay, keeping it 1.0.
+    norm_input: false
+
+    spike_threshold: 1.0
+
+    # VERIFIED, and the easiest of these to miss: sinabs defaults to MultiSpike, which
+    # lets ONE neuron emit 2, 3 or more spikes in a SINGLE timestep. All three other
+    # frameworks emit a binary spike. "single" matches them.
+    #
+    # The default is not a bug -- no-leak + multi-spike + subtract-reset are the three
+    # conditions that make a spiking neuron's firing rate exactly ReLU, which is the
+    # ANN-to-SNN conversion guarantee sinabs exists to provide. It is a different goal.
+    #
+    # WARNING if you ever set this to "multi": BaseLIF.spike_rate() is documented as a
+    # FRACTION (spikes per neuron per timestep) and can then exceed 1.0, so the
+    # spike-rate column stops being comparable with the other three.
+    spike_fn: single      # single | multi
+
+    # sinabs' equivalent of snnTorch's reset_mechanism, named to match it.
+    # VERIFIED: sinabs defaults to MembraneSubtract (soft), like snnTorch does.
+    reset_mechanism: zero # zero | subtract
+    v_reset: 0.0          # used only when reset_mechanism is "zero"
+
+    # Lower clamp on the membrane, applied every timestep. null = no clamp, which is
+    # what the other three do (none of them offers this knob at all).
+    min_v_mem: null
+
+    # Which quantity is the nn.Parameter: tau_mem (false) or exp(-1/tau_mem) (true).
+    #
+    # This does NOT mean "do not train the time constant". Either setting leaves an
+    # nn.Parameter in the layer, so the optimiser would learn it: MEASURED as 18,257
+    # trainable parameters against 18,254 for the other three, one extra per LIF layer.
+    # frameworks/adapters/sinabs_lif.py therefore FREEZES the neuron's parameters
+    # unconditionally, which is what actually holds the decay at 0.9 and keeps the
+    # parameter count identical. This key only decides WHICH quantity gets frozen.
+    train_alphas: false
+
+    # Surrogate gradient. BACKWARD PASS ONLY.
+    #
+    # OPEN QUESTION, NOT YET RESOLVED. sinabs has NO ATan surrogate, exactly like Norse.
+    # The other three blocks use atan/circ tuned to match atan(alpha=2.0); no equivalent
+    # curve-fitting has been done for sinabs yet. The value below is sinabs' OWN
+    # DEFAULT, chosen so this config is runnable and honest -- it is NOT a matched
+    # value, and until it is measured, sinabs' gradient scale is unknown relative to the
+    # other three.
+    #
+    # sinabs uses none of the other frameworks' `alpha` naming, so each type declares
+    # its own real parameter names. Only the keys for the CHOSEN type are read:
+    #   single_exponential   - grad_width, grad_scale   (sinabs' default)
+    #   periodic_exponential - grad_width, grad_scale
+    #   gaussian             - mu, sigma, grad_scale
+    #   multi_gaussian       - mu, sigma, h, s, grad_scale
+    #   heaviside            - window
+    surrogate:
+      type: single_exponential
+      grad_width: 0.5
+      grad_scale: 1.0

@@ -1,0 +1,411 @@
+"""Unit tests for the four LIF adapters: the neuron each one actually builds.
+
+    python tests/unit_adapters.py
+
+The network tests (unit_shared_net.py) show the four frameworks AGREE. These show
+WHAT they agree on -- that each adapter really produces the neuron the config asked
+for: decay 0.9, input gain 1.0, threshold 1.0, hard reset to 0, one binary spike.
+
+That distinction matters. Four adapters could agree on the wrong neuron. Each check
+here measures a property directly from a single layer, with no network and no dataset,
+so a failure names the framework and the property rather than just "the frameworks
+disagree".
+
+There is also one test per framework-specific TRAP: the default that, left alone,
+silently makes that framework incomparable with the other three.
+"""
+from __future__ import annotations
+
+import torch
+
+from _harness import FRAMEWORKS, Suite, fresh_cfg, single_neuron
+
+suite = Suite("unit_adapters")
+
+# What every framework's neuron must be, per network_architecture.yaml's `neuron:` block.
+TARGET_DECAY = 0.9
+TARGET_GAIN = 1.0
+TARGET_THRESHOLD = 1.0
+TOLERANCE = 1e-6
+
+
+def membrane_value(layer) -> float:
+    membrane = layer.membrane()
+    return float("nan") if membrane is None else float(membrane.detach().flatten()[0])
+
+
+# ---------------------------------------------------------------------------
+# 1. the target neuron, measured one property at a time
+# ---------------------------------------------------------------------------
+def test_input_gain_is_one() -> None:
+    """A single sub-threshold impulse must land on the membrane undiminished.
+
+    This is the one Norse and sinabs both get wrong by default: each locks input gain
+    to its decay, so decay 0.9 would give gain 0.1 and the neuron would need 10x the
+    input to fire. Norse compensates with input_scale, sinabs with norm_input=false.
+    """
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.reset()
+        layer(torch.tensor([[0.3]]))
+        gain = membrane_value(layer) / 0.3
+        suite.check(f"input gain is 1.0: {framework}", abs(gain - TARGET_GAIN) < TOLERANCE,
+                    f"measured {gain:.9f}")
+
+
+def test_decay_is_zero_point_nine() -> None:
+    """Charge once, then feed zero: the membrane must retain exactly 90%."""
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.reset()
+        layer(torch.tensor([[0.3]]))
+        charged = membrane_value(layer)
+        layer(torch.zeros(1, 1))
+        decay = membrane_value(layer) / charged
+        suite.check(f"decay is 0.9: {framework}", abs(decay - TARGET_DECAY) < TOLERANCE,
+                    f"measured {decay:.9f}")
+
+
+def test_threshold_is_one() -> None:
+    """Just over threshold fires, just under stays silent. Brackets the value rather
+    than reading it from the config, so a framework that ignores the setting is caught."""
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.reset()
+        fires = float(layer(torch.tensor([[TARGET_THRESHOLD + 0.01]])).flatten()[0])
+        layer.reset()
+        silent = float(layer(torch.tensor([[TARGET_THRESHOLD - 0.01]])).flatten()[0])
+        suite.check(f"threshold 1.0 brackets correctly: {framework}",
+                    fires == 1.0 and silent == 0.0, f"above={fires}, below={silent}")
+
+
+def test_reset_is_hard_to_zero() -> None:
+    """After a spike the membrane must be 0, not (membrane - threshold).
+
+    snnTorch and sinabs both default to a SOFT reset, which leaves the remainder
+    behind; the config pins both to hard. Driven well above threshold so soft and hard
+    are far apart and cannot be confused by float noise.
+    """
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.reset()
+        spike = float(layer(torch.tensor([[1.6]])).flatten()[0])
+        after = membrane_value(layer)
+        suite.check(f"hard reset to 0 after a spike: {framework}",
+                    spike == 1.0 and abs(after) < TOLERANCE,
+                    f"spike={spike}, membrane after={after:.9f} (soft reset would be ~0.6)")
+
+
+def test_reset_is_immediate_not_delayed() -> None:
+    """snnTorch's reset_delay=True applies the reset on the FOLLOWING timestep, so its
+    membrane reads differently from the other three for one step after every spike.
+    Fire, then feed zero: a delayed reset shows up as a non-zero membrane here."""
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.reset()
+        layer(torch.tensor([[1.6]]))
+        layer(torch.zeros(1, 1))
+        after = membrane_value(layer)
+        suite.check(f"reset is immediate, not delayed: {framework}", abs(after) < TOLERANCE,
+                    f"membrane one step after the spike = {after:.9f}")
+
+
+def test_spike_is_binary() -> None:
+    """sinabs defaults to MultiSpike: one neuron may emit 2, 3 or more spikes in a
+    single timestep, which would make its spike-rate FRACTION exceed 1.0 and stop
+    being comparable. Driven to 5x threshold, where MultiSpike would return 5."""
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.reset()
+        spike = float(layer(torch.tensor([[5.0]])).flatten()[0])
+        suite.check(f"one spike maximum per timestep: {framework}", spike == 1.0,
+                    f"emitted {spike}")
+
+
+def test_subthreshold_integration_over_time() -> None:
+    """The whole neuron at once: repeated sub-threshold input must integrate toward
+    0.15/(1-0.9) = 1.5, cross the threshold, reset, and climb again. All four must
+    fire on exactly the same timestep."""
+    first_spike_step = {}
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.reset()
+        for step in range(40):
+            if float(layer(torch.tensor([[0.15]])).flatten()[0]) == 1.0:
+                first_spike_step[framework] = step
+                break
+    suite.check("every framework eventually fires on a 0.15 ramp",
+                len(first_spike_step) == len(FRAMEWORKS), str(first_spike_step))
+    suite.check("all four fire on the same timestep",
+                len(set(first_spike_step.values())) == 1, str(first_spike_step))
+
+
+# ---------------------------------------------------------------------------
+# 2. the BaseLIF state contract
+# ---------------------------------------------------------------------------
+def test_state_lifecycle() -> None:
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        suite.check(f"no state before the first forward: {framework}", not layer.has_state())
+        suite.check(f"membrane is None before the first forward: {framework}",
+                    layer.membrane() is None)
+        layer(torch.tensor([[0.3]]))
+        suite.check(f"state exists after a forward: {framework}", layer.has_state())
+        suite.check(f"membrane is readable after a forward: {framework}",
+                    layer.membrane() is not None)
+        layer.reset()
+        suite.check(f"reset clears the state: {framework}", not layer.has_state())
+        suite.check(f"membrane is None again after reset: {framework}",
+                    layer.membrane() is None)
+
+
+def test_reset_actually_restarts_the_trajectory() -> None:
+    """has_state() going False is not proof the neuron forgot. Charge it, reset, then
+    repeat the identical input and require the identical response."""
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.reset()
+        first = [float(layer(torch.tensor([[0.4]])).flatten()[0]) for _ in range(12)]
+        layer.reset()
+        second = [float(layer(torch.tensor([[0.4]])).flatten()[0]) for _ in range(12)]
+        suite.check(f"reset restarts the trajectory: {framework}", first == second,
+                    f"{first} vs {second}")
+
+
+def test_shape_is_preserved() -> None:
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.reset()
+        data = torch.rand(2, 5, 7, 7)
+        suite.check(f"output shape matches input shape: {framework}",
+                    tuple(layer(data).shape) == tuple(data.shape))
+
+
+# ---------------------------------------------------------------------------
+# 3. spike counting (BaseLIF._record) -- the spike-rate metric's foundation
+# ---------------------------------------------------------------------------
+def test_spike_counting_is_off_by_default() -> None:
+    """Counting costs a GPU reduction per layer per timestep, and this project measures
+    wall-clock time. It must stay off unless a measurement pass asks for it."""
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        suite.check(f"count_spikes defaults to False: {framework}", layer.count_spikes is False)
+        layer(torch.ones(1, 4))
+        suite.check(f"nothing accumulates while off: {framework}", layer.spike_slots == 0,
+                    f"slots={layer.spike_slots}")
+
+
+def test_spike_rate_is_a_true_fraction() -> None:
+    """A neuron driven far above threshold every step fires every step, so its rate
+    must be exactly 1.0 -- not T, and not a count."""
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.count_spikes = True
+        layer.reset_spike_stats()
+        layer.reset()
+        for _ in range(10):
+            layer(torch.full((3, 4), 5.0))
+        suite.check(f"always-firing neuron has rate 1.0: {framework}",
+                    abs(layer.spike_rate() - 1.0) < TOLERANCE, f"{layer.spike_rate():.9f}")
+        suite.check(f"neurons() reports per-sample width: {framework}", layer.neurons() == 4,
+                    str(layer.neurons()))
+        suite.check(f"slots counts neurons x batch x steps: {framework}",
+                    layer.spike_slots == 3 * 4 * 10, str(layer.spike_slots))
+
+
+def test_silent_neuron_has_rate_zero() -> None:
+    for framework in FRAMEWORKS:
+        layer = single_neuron(framework)
+        layer.count_spikes = True
+        layer.reset_spike_stats()
+        layer.reset()
+        for _ in range(10):
+            layer(torch.zeros(3, 4))
+        suite.check(f"silent neuron has rate 0.0: {framework}", layer.spike_rate() == 0.0,
+                    f"{layer.spike_rate()}")
+
+
+def test_reset_spike_stats_clears_everything() -> None:
+    layer = single_neuron("torch")
+    layer.count_spikes = True
+    layer.reset()
+    layer(torch.full((2, 3), 5.0))
+    layer.reset_spike_stats()
+    suite.check("reset_spike_stats zeroes the total", layer.spike_total == 0.0)
+    suite.check("reset_spike_stats zeroes the slots", layer.spike_slots == 0)
+    suite.check("reset_spike_stats forgets the shape", layer.spike_shape is None)
+    suite.check("rate is 0.0 with no slots", layer.spike_rate() == 0.0)
+
+
+def test_counting_does_not_sync_to_host() -> None:
+    """The running total must stay a device tensor. Calling .item() per layer per
+    timestep would force a host sync and wreck the latency measurements this pipeline
+    exists to take."""
+    layer = single_neuron("torch")
+    layer.count_spikes = True
+    layer.reset()
+    layer(torch.full((2, 3), 5.0))
+    suite.check("accumulated spike total stays a tensor",
+                isinstance(layer.spike_total, torch.Tensor), type(layer.spike_total).__name__)
+
+
+# ---------------------------------------------------------------------------
+# 4. describe() -- what lands in the run record
+# ---------------------------------------------------------------------------
+def test_describe_names_the_framework_and_its_real_parameters() -> None:
+    expected_keys = {
+        "torch": {"beta", "threshold", "reset_mechanism", "reset_delay", "surrogate"},
+        "norse": {"cell", "dt", "tau_mem_inv", "v_th", "v_reset", "v_leak",
+                  "reset_method", "input_scale", "surrogate"},
+        "sj": {"tau", "decay_input", "v_threshold", "v_reset", "detach_reset",
+               "step_mode", "backend", "surrogate"},
+        "sinabs": {"tau_mem", "tau_syn", "spike_threshold", "spike_fn", "reset_mechanism",
+                   "v_reset", "min_v_mem", "norm_input", "train_alphas",
+                   "tau_mem_trainable", "surrogate"},
+    }
+    for framework in FRAMEWORKS:
+        described = single_neuron(framework).describe()
+        suite.check(f"describe names the framework: {framework}",
+                    described.get("framework") is not None, str(described.get("framework")))
+        missing = expected_keys[framework] - set(described)
+        suite.check(f"describe reports every real parameter: {framework}", not missing,
+                    f"missing {sorted(missing)}")
+
+
+def test_sinabs_reports_its_frozen_time_constant() -> None:
+    """sinabs makes tau_mem trainable by default and the adapter freezes it. That the
+    freeze happened is a fact about the run, so it has to be recorded, not assumed."""
+    described = single_neuron("sinabs").describe()
+    suite.check("sinabs records tau_mem_trainable as False",
+                described.get("tau_mem_trainable") is False,
+                str(described.get("tau_mem_trainable")))
+    suite.check("sinabs reports its effective decay/gain",
+                described.get("effective_decay_gain", "").startswith("0.9"),
+                str(described.get("effective_decay_gain")))
+
+
+def test_sinabs_neuron_parameters_are_frozen() -> None:
+    layer = single_neuron("sinabs")
+    trainable = [n for n, p in layer.named_parameters() if p.requires_grad]
+    suite.check("no trainable parameter survives on the sinabs neuron", not trainable,
+                f"trainable: {trainable}")
+
+
+# ---------------------------------------------------------------------------
+# 5. refusals -- settings the adapter must not silently accept
+# ---------------------------------------------------------------------------
+def test_spikingjelly_refuses_multi_step() -> None:
+    """The shared network hands every layer ONE timestep, so 'm' cannot run here.
+    Accepting it would also imply the fused cupy backend was in play when it is not."""
+    cfg = fresh_cfg()
+    cfg.NEURON["spikingjelly"]["step_mode"] = "m"
+    suite.expect_raises("SpikingJelly refuses step_mode 'm'", ValueError,
+                        lambda: single_neuron("sj", cfg), must_mention=["step_mode"])
+
+
+def test_unknown_surrogate_is_refused() -> None:
+    cfg = fresh_cfg()
+    cfg.NEURON["snntorch"]["surrogate"]["type"] = "not_a_surrogate"
+    suite.expect_raises("snnTorch refuses an unknown surrogate", ValueError,
+                        lambda: single_neuron("torch", cfg),
+                        must_mention=["not_a_surrogate"])
+
+
+def test_sinabs_surrogate_is_actually_read() -> None:
+    """The archived adapter never read the surrogate at all, so a config naming one was
+    silently ignored. An unknown name must now be refused, which proves it is read."""
+    cfg = fresh_cfg()
+    cfg.NEURON["sinabs"]["surrogate"]["type"] = "not_a_surrogate"
+    suite.expect_raises("sinabs refuses an unknown surrogate", Exception,
+                        lambda: single_neuron("sinabs", cfg),
+                        must_mention=["not_a_surrogate"])
+
+
+def test_sinabs_honours_the_selected_surrogate() -> None:
+    """ex2 selects periodic_exponential. Check the object actually reaches the layer."""
+    cfg = fresh_cfg()
+    cfg.NEURON["sinabs"]["surrogate"] = {
+        "type": "periodic_exponential", "grad_width": 0.5, "grad_scale": 1.0,
+    }
+    layer = single_neuron("sinabs", cfg)
+    name = type(layer.lif.surrogate_grad_fn).__name__
+    suite.check("sinabs builds the configured surrogate", name == "PeriodicExponential", name)
+    suite.check("sinabs describe reports it",
+                "periodic_exponential" in layer.describe().get("surrogate", ""),
+                layer.describe().get("surrogate", ""))
+
+
+def test_missing_neuron_key_raises() -> None:
+    """The no-silent-defaults rule, at the adapter level rather than the picker level."""
+    cfg = fresh_cfg()
+    del cfg.NEURON["snntorch"]["beta"]
+    suite.expect_raises("a missing neuron key raises", Exception,
+                        lambda: single_neuron("torch", cfg), must_mention=["beta"])
+
+
+def test_missing_neuron_block_raises() -> None:
+    cfg = fresh_cfg()
+    cfg.NEURON = {}
+    suite.expect_raises("an empty neuron block raises", Exception,
+                        lambda: single_neuron("norse", cfg))
+
+
+# ---------------------------------------------------------------------------
+# 6. the config genuinely drives the neuron
+# ---------------------------------------------------------------------------
+def test_changing_the_config_changes_the_neuron() -> None:
+    """Guards against an adapter that ignores the config and hardcodes the right
+    answer -- every measurement above would still pass in that case."""
+    overrides = {
+        "torch": ("snntorch", "beta", 0.5),
+        "norse": ("norse", "tau_mem_inv", 500.0),   # decay 1 - 0.001*500 = 0.5
+        "sj": ("spikingjelly", "tau", 2.0),         # decay 1 - 1/2 = 0.5
+        "sinabs": ("sinabs", "tau_mem", 1.4426950408889634),  # -1/ln(0.5)
+    }
+    for framework, (block, key, value) in overrides.items():
+        cfg = fresh_cfg()
+        cfg.NEURON[block][key] = value
+        if framework == "norse":
+            cfg.NEURON["norse"]["input_scale"] = 2.0  # keep gain at 1.0: 0.5 * 2.0
+        layer = single_neuron(framework, cfg)
+        layer.reset()
+        layer(torch.tensor([[0.3]]))
+        charged = membrane_value(layer)
+        layer(torch.zeros(1, 1))
+        decay = membrane_value(layer) / charged
+        suite.check(f"config change moves decay to 0.5: {framework}",
+                    abs(decay - 0.5) < 1e-5, f"measured {decay:.9f}")
+
+
+def main() -> int:
+    return suite.run([
+        test_input_gain_is_one,
+        test_decay_is_zero_point_nine,
+        test_threshold_is_one,
+        test_reset_is_hard_to_zero,
+        test_reset_is_immediate_not_delayed,
+        test_spike_is_binary,
+        test_subthreshold_integration_over_time,
+        test_state_lifecycle,
+        test_reset_actually_restarts_the_trajectory,
+        test_shape_is_preserved,
+        test_spike_counting_is_off_by_default,
+        test_spike_rate_is_a_true_fraction,
+        test_silent_neuron_has_rate_zero,
+        test_reset_spike_stats_clears_everything,
+        test_counting_does_not_sync_to_host,
+        test_describe_names_the_framework_and_its_real_parameters,
+        test_sinabs_reports_its_frozen_time_constant,
+        test_sinabs_neuron_parameters_are_frozen,
+        test_spikingjelly_refuses_multi_step,
+        test_unknown_surrogate_is_refused,
+        test_sinabs_surrogate_is_actually_read,
+        test_sinabs_honours_the_selected_surrogate,
+        test_missing_neuron_key_raises,
+        test_missing_neuron_block_raises,
+        test_changing_the_config_changes_the_neuron,
+    ])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

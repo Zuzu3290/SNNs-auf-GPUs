@@ -18,21 +18,39 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-def build_optimizer(params, fw_cfg: dict) -> torch.optim.Optimizer:
-    """
-    Factory that reads optimizer name + lr + wd from fw_cfg.
+OPTIMIZERS = ("nadam", "adam", "adamw", "sgd")
 
-    fw_cfg must contain: optimizer, learning_rate, weight_decay.
-    Supported names: adam (default), adamw, sgd.
-    """
-    lr  = fw_cfg["learning_rate"]
-    wd  = fw_cfg["weight_decay"]
-    opt = fw_cfg.get("optimizer", "adam").lower()
 
-    if opt == "adamw":
+def build_optimizer(params, cfg) -> torch.optim.Optimizer:
+    """The ONE optimizer, shared by every framework.
+
+    Reads training.optimizer.{type,lr,weight_decay,momentum} from SNN_module.yaml via
+    Settings. Not per-framework: these are plain torch, none of the four SNN libraries
+    supplies them, and giving a framework its own would mean comparing training recipes
+    rather than frameworks.
+
+    An unrecognised name RAISES. This previously fell through to Adam for anything it
+    did not recognise, so a typo produced a real run with the wrong optimizer and no
+    warning anywhere in the log.
+    """
+    name = str(getattr(cfg, "OPTIMIZER", "nadam")).lower()
+    lr = cfg.LEARNING_RATE
+    wd = cfg.WEIGHT_DECAY
+
+    if name not in OPTIMIZERS:
+        raise ValueError(
+            f"training.optimizer.type = {name!r} is not supported. "
+            f"Supported: {sorted(OPTIMIZERS)}."
+        )
+    if name == "nadam":
+        return torch.optim.NAdam(params, lr=lr, weight_decay=wd)
+    if name == "adamw":
         return torch.optim.AdamW(params, lr=lr, weight_decay=wd)
-    if opt == "sgd":
-        return torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=wd)
+    if name == "sgd":
+        # Momentum was hardcoded at 0.9 here; it is a config value now.
+        return torch.optim.SGD(
+            params, lr=lr, momentum=getattr(cfg, "SGD_MOMENTUM", 0.0), weight_decay=wd
+        )
     return torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999), weight_decay=wd)
 
 
@@ -42,34 +60,39 @@ def sum_over_time_cross_entropy(spk_rec: torch.Tensor, targets: torch.Tensor) ->
     return F.cross_entropy(spk_rec.float().sum(0), targets)
 
 
-def build_loss(fw_cfg: dict, framework: str = "norse"):
-    """
-    Factory that reads loss_fn name from fw_cfg and returns a callable.
+LOSSES = ("cross_entropy", "mse_count")
 
-    Supported loss names:
-      cross_entropy   — standard classification loss.
-          Norse/SNNTorch: spk_rec is [T, B, C]; sums over T before loss.
-          SpikingJelly:   forward already sums T, returns [B, C]; uses nn.CrossEntropyLoss.
-      mse_count       — SNNTorch mse_count_loss (requires snntorch installed).
 
-    Args:
-        fw_cfg    : dict from cfg.FRAMEWORK_CFG[<framework>] merged with lr/wd
-        framework : "norse" | "torch" | "spikingjelly" | "sinabs"
+def build_loss(cfg):
+    """The ONE loss, shared by every framework.
+
+    There used to be three paths here, branching on which framework was running:
+    SpikingJelly's forward pre-summed over T and returned [B, C] while the others
+    returned [T, B, C], so SpikingJelly needed nn.CrossEntropyLoss and the rest needed
+    sum-over-T. The shared network returns [T, B, C] for all four, so one path covers
+    everything and the `framework` argument is gone.
+
+      cross_entropy — torch's own loss on spike counts summed over T. Belongs to none
+                      of the four libraries, which is what makes it neutral.
+      mse_count     — snnTorch's functional.mse_count_loss. Available, but it belongs
+                      to ONE of the four frameworks: do not use it for a
+                      cross-framework comparison run.
     """
-    loss_name = fw_cfg.get("loss_fn", "cross_entropy")
+    loss_name = str(getattr(cfg, "LOSS_FN", "cross_entropy"))
 
     if loss_name == "cross_entropy":
-        if framework == "spikingjelly":
-            return nn.CrossEntropyLoss()
         return sum_over_time_cross_entropy
 
     if loss_name == "mse_count":
         from snntorch import functional as SF
+        logger.warning(
+            "[LOSS] training.loss = 'mse_count' is snnTorch's own loss function. It is "
+            "not neutral across frameworks -- do not use it for a comparison run."
+        )
         return SF.mse_count_loss(correct_rate=0.8, incorrect_rate=0.2)
 
-    raise NotImplementedError(
-        f"loss_fn='{loss_name}' not supported for framework='{framework}'. "
-        "Supported: cross_entropy, mse_count."
+    raise ValueError(
+        f"training.loss = {loss_name!r} is not supported. Supported: {sorted(LOSSES)}."
     )
 
 
