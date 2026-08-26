@@ -483,17 +483,14 @@ def measure_batch_vram(model_cls, cfg, device, batch_size: int, timesteps: int) 
 
 
 
-BATCH_VRAM_BAND_MIN = 0.30
-BATCH_VRAM_BAND_OPTIMAL = 0.35
-BATCH_VRAM_BAND_MAX = 0.35
-
-
-def calibrate_batch_size(model_cls, cfg, device, timesteps: int, data_vram_fraction: float = BATCH_VRAM_BAND_OPTIMAL,
-                          band_min: float = BATCH_VRAM_BAND_MIN, band_max: float = BATCH_VRAM_BAND_MAX,
+def calibrate_batch_size(model_cls, cfg, device, timesteps: int, *, data_vram_fraction: float,
+                          band_min: float, band_max: float,
                           max_batch_size: int = 256, min_batch_size: int = 1,
                           baseline_sensor_px: int = 34 * 34, baseline_batch_size: int = 128) -> int:
     """Picks a batch size that fits within data_vram_fraction of total VRAM
-    (default: the 30-35% policy band above), instead of the largest one
+    (the policy band is resource_policy.batch_vram_band_{min,max} in
+    data_workflow.yaml -- WorkflowSettings is the one place that band is
+    defined; this function only consumes it), instead of the largest one
     that avoids OOM.
 
     timesteps must be the real per-sample frame count (WorkflowSettings.N_TIME_BINS,
@@ -535,7 +532,7 @@ def calibrate_batch_size(model_cls, cfg, device, timesteps: int, data_vram_fract
 
 
 def _log_stable_batch_size(cfg, batch_size: int, peak_gb: float, total_vram_gb: float,
-                            band_min: float = BATCH_VRAM_BAND_MIN, band_max: float = BATCH_VRAM_BAND_MAX) -> None:
+                            band_min: float, band_max: float) -> None:
     """One-line notification: the stable batch size found for this
     dataset, and whether it landed inside the policy band. Uses print(),
     not logger.info() -- logger.info has no attached handler anywhere in

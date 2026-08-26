@@ -266,10 +266,15 @@ class SNNTester:
                 "credit_assignment":     credit_assignment,
             })
 
+            # firing_rate_hz is None whenever the real per-sample duration isn't
+            # knowable (see firing_window_seconds) -- e.g. time_window framing with no
+            # framing.sample_duration_us stated. Shown as "n/a" rather than crashing on
+            # a None format, or guessing a duration to fill the slot.
+            hz_display = f"{firing_rate_hz:.1f} Hz" if firing_rate_hz is not None else "n/a"
             print(f"  Batch {rec['batch_idx']:>3} | "
                   f"Acc: {acc * 100:.2f}% | "
                   f"Spikes: {batch_spikes:>6} | "
-                  f"Rate: {spike_rate:.3f} ({firing_rate_hz:.1f} Hz) | "
+                  f"Rate: {spike_rate:.3f} ({hz_display}) | "
                   f"Latency: {latency_ms:.1f}ms | "
                   f"Energy: {energy_pj:.1f}pJ")
 

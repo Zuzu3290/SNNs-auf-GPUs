@@ -63,11 +63,10 @@ class Settings:
         # registry entry (learning/main.py, data_pipeline). Only the network INTERNALS --
         # filter counts, kernel sizes, pool size, hidden layers -- are configured here.
         #
-        # Kept as a placeholder so anything constructing a network before a dataset is
-        # picked (check_network.py, a unit test) gets a value rather than an
-        # AttributeError. It is NOT read from config any more: `architecture.output_size`
-        # implied the class count was configurable, which it is not.
-        self.NUM_CLASSES = 10
+        # No placeholder value: unset until apply_dataset_shape() runs, so building a
+        # network before a dataset is picked fails loudly instead of silently getting a
+        # wrong class count. See the NUM_CLASSES property below.
+        self._num_classes = None
 
         self.NEURON_TYPES = network_arch.get("neuron_types", {})
 
@@ -149,6 +148,26 @@ class Settings:
         self.PLOT_DIR   = output.get("plot_dir",   "./outputs/plots")
         self.DATA_DIR   = output.get("data_dir",   "./outputs/data")
 
+
+    @property
+    def NUM_CLASSES(self) -> int:
+        """Class count from the dataset registry, set once by apply_dataset_shape().
+
+        Raises AttributeError (not a made-up default) when read before that -- a network
+        built off a guessed class count would silently have the wrong output layer.
+        AttributeError specifically, so getattr(cfg, "NUM_CLASSES", None) (display(),
+        below) still gets its intended "not set yet" None rather than the error itself.
+        """
+        if self._num_classes is None:
+            raise AttributeError(
+                "cfg.NUM_CLASSES read before apply_dataset_shape() ran -- class count "
+                "comes from the dataset registry, not a config default."
+            )
+        return self._num_classes
+
+    @NUM_CLASSES.setter
+    def NUM_CLASSES(self, value: int) -> None:
+        self._num_classes = value
 
     @property
     def active_fw_cfg(self) -> dict:

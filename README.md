@@ -88,6 +88,37 @@ and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
 
 ---
 
+## Hardcoded Reference Values & Switches
+
+Not everything lives in the YAML configs. Two categories are intentionally
+code-level rather than config keys:
+
+**Fixed physical constants**, used as a reference point for energy estimates
+so every framework/dataset is scored against the same yardstick:
+`SYNOPS_ENERGY_PJ_PER_MAC = 4.6` and `ENERGY_PER_SPIKE_PJ = 3.5`
+(`learning/training.py`, `learning/inference.py`). These are not tuned per
+run — they model one representative piece of hardware. Swapping the target
+hardware means updating these two numbers, not adding a config key for a
+value nobody should be changing per experiment.
+
+**Run-level switches in `learning/main.py`**, each hardcoded for its own
+reason rather than surfaced as a YAML toggle:
+
+- `cfg.ENABLE_PIPELINE_MONITOR = True` — background CPU/GPU utilization and
+  power sampling. Always wanted on a real run, so it's on unconditionally;
+  set `False` in the source if you need to disable it for a specific probe.
+- `RUN_ADVERSARIAL_EVAL = False` — the TRADES adversarial evaluation pass
+  after testing. Off by default because it roughly doubles a run's time and
+  is only relevant when robustness (not accuracy/throughput) is the
+  question being asked; flip to `True` in the source for a robustness run.
+
+Both are one-line edits by design — infrequent, deliberate choices about
+what a specific run is measuring, not part of the experiment configuration
+surface that `SNN_module.yaml` / `data_workflow.yaml` /
+`network_architecture.yaml` describe.
+
+---
+
 ## Adding a New Dataset
 
 If your dataset is already available as events encoded in the standard

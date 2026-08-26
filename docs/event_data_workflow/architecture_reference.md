@@ -93,7 +93,7 @@ whether this index has been seen before.
   the raw recording is pulled and run through the deterministic transform
   chain (`Denoise` → `ToFrame`) *once*, and the result is what actually
   gets stored — not the raw events. This is enforced by
-  `PreTransformedDataset`/`BoundedRecordingCache`'s own `__getitem__`,
+  `PreTransformedDataset`'s own `__getitem__`,
   specifically because tonic's own cache classes only skip re-fetching
   the *raw* sample on a hit — they'd otherwise still re-run whatever
   transform they're given on every access, hit or miss, defeating the

@@ -48,6 +48,9 @@ def apply_shape_without_download(cfg) -> str:
     from event_data_workflow.dataset_registry import lookup_dataset
 
     if not cfg.DATASET_NAME:
+        # Settings.NUM_CLASSES has no default -- this script's own placeholder, only for
+        # inspecting the conv block's shape with no dataset picked.
+        cfg.NUM_CLASSES = 10
         return (f"convolution: block ({cfg.SENSOR_H}x{cfg.SENSOR_W}, "
                 f"{cfg.NUM_CLASSES} classes) -- no dataset.name set")
     entry = lookup_dataset(cfg.DATASET_NAME)
