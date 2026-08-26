@@ -58,6 +58,20 @@ now appears as one block immediately after training completes.
 
 **Caveat:** Spike rate and spike ratio are *proxies*, not the same thing as energy — see §2.4. A network can have low average firing rate but concentrate spikes in a few very fan-out-heavy layers, which dominates real energy cost.
 
+**Report `spikes_per_neuron_per_inference` as the headline, not Hz.** Hz requires knowing how much *real time* one sample spans, and that is often not knowable: with `n_time_bins` framing a sample is cut into T bins covering a whole recording of unspecified length. `spikes_per_neuron_per_inference = spike_rate × T` needs no time unit, cannot be wrong, and is the unit the SNN literature reports — so it is directly comparable with published figures.
+
+Hz is derived only where a real per-sample duration exists:
+
+| framing | window |
+|---|---|
+| `framing.sample_duration_us` stated | that value |
+| `time_window` framing | `time_window_ms × T` |
+| temporal slicing **by time** | the slice duration |
+| `n_time_bins` with nothing stated | **not knowable** — Hz is reported as unavailable |
+| temporal slicing **by event count** | **not knowable** — a fixed event count spans a variable time |
+
+`learning/utilities.py`'s `firing_window_seconds()` implements exactly that table and returns `None` for the last two rows rather than substituting a default. This is deliberate: an earlier version read a config attribute that did not exist, so `getattr` silently supplied 15 ms and *every* published Hz figure was ≈20× too high on N-MNIST (real window ≈300 ms). Because it was a constant factor applied to every framework, relative comparisons survived and the error was invisible — which is precisely why the fallback is now "report nothing" rather than "report a default".
+
 #### Inter-Spike Interval variability — CV(ISI)
 
 Implemented in `learning/utilities.py`'s `compute_cv_isi()`, called from the
@@ -89,6 +103,23 @@ the whole test pass, last batch / sample 0).
 
 **Caveat:** Latency (forward *and* backward) depends heavily on the number of simulated timesteps T — always report both alongside T, and separate "per-timestep" latency from "per-inference" (T-timestep) latency so different encoding schemes are comparable. Backward-pass latency is also meaningless as a cross-framework comparison unless you also record *which* credit-assignment algorithm produced it — see §2.5.
 
+#### Two per-sample timings that must not share a name
+
+Both are recorded, because they answer different questions and neither substitutes for the other. What matters is that they are labelled distinctly.
+
+| reported as | how it is obtained | what it actually answers |
+|---|---|---|
+| **`latency_single_stream_ms`** | batch size **1**, `synchronize()` around each individual sample, reported as **median** and **p90** over N samples | *"If one event arrives, how long until the answer is ready?"* The deployment/real-time question. MLPerf Single-Stream convention. |
+| **`latency_per_sample_amortised_ms`** | one batch timed as a whole, then divided by the batch size | *"At this batch size, how much wall-clock does each sample cost?"* A throughput figure expressed per sample. |
+
+Why the distinction is not pedantic:
+
+- The amortised figure is **throughput under batching**, not latency. It benefits from parallelism a single arriving event cannot use, so it is systematically optimistic as a deployment number — often by a large factor.
+- **Percentiles built from the amortised figure describe the wrong thing.** Every sample in a batch is assigned the same divided value, so the spread measures batch-to-batch variation, not sample-to-sample. A p90 computed that way is not a tail latency.
+- Only the single-stream figure is comparable with published latency numbers, which almost universally use batch size 1.
+
+Both are cheap and non-intrusive: the amortised figure falls out of timings already taken during the normal test pass, and the single-stream measurement is a separate, small, dedicated pass (default 100 samples) run **outside** any timed region, so recording one never disturbs the other.
+
 ---
 
 ### 2.3b Credit-assignment (backpropagation) method — record as metadata, not a scalar
@@ -117,8 +148,9 @@ backward-latency number it qualifies.
 | Metric | Definition | Formula / method |
 |---|---|---|
 | **Power** | Instantaneous GPU power draw during training or inference | Read from `nvidia-smi` / NVML power sensor (Watts) |
-| **Energy (training)** | Total energy consumed over a full training run or epoch | `∫ Power(t) dt` ≈ `avg_power × total_time` (Joules) |
-| **Energy (inference)** | Energy consumed per inference (single forward pass) | Same integral, scoped to inference-only time window |
+| **Energy (total)** | Energy consumed over a phase, **idle draw included** | `∫ Power(t) dt` by trapezoidal integration over the sampled series (Joules) |
+| **Energy (dynamic)** | Energy **above** the idle baseline — what the computation itself cost | `total − idle_power_w × elapsed_s`, clamped at 0 |
+| **Energy (inference)** | Either of the above, scoped to the inference-only time window | Same method, different window |
 | **Memory / VRAM usage** | Peak and average GPU memory allocated during training/inference | `torch.cuda.max_memory_allocated()`, `torch.cuda.memory_allocated()` |
 | **SynOps (Synaptic Operations)** | Hardware-agnostic proxy for the actual event-driven compute cost, accounting for spike sparsity | `SynOps = DenseOps × SpikingRate` (per layer, then summed), i.e. spikes emitted by a layer weighted by its fan-out |
 
@@ -126,16 +158,51 @@ backward-latency number it qualifies.
 
 **Caveat — important for SNN work specifically:** raw GPU-measured energy (via `nvidia-smi`/NVML) reflects the cost of *simulating* the SNN densely on a GPU, which is not event-driven hardware — a GPU still computes the zero-valued (non-spiking) terms, it just doesn't skip them the way neuromorphic silicon (Loihi, etc.) would. This is why the SNN literature almost universally reports a *second*, hardware-agnostic energy number alongside the measured GPU number: **SynOps-based estimated energy**, using standard per-operation energy costs from Horowitz's 45nm process numbers (~0.9 pJ per accumulate (AC), ~4.6 pJ per multiply-accumulate (MAC)) to convert SynOps into an estimated Joules figure that reflects what a spiking accelerator *would* consume. Report both: "measured GPU energy" (what your experiment actually cost) and "estimated event-driven energy" (what the network's sparsity implies it would cost on target hardware).
 
+#### How the measured GPU energy is obtained, and why each choice
+
+Every point below exists because the naive version of it produces a number that looks fine and is wrong.
+
+**Total and dynamic are both reported, and they are not interchangeable.** `energy_j_total` includes the 20–40 W a GPU draws simply being powered on; `energy_j_dynamic` subtracts it. Two consequences decide which to quote:
+
+- *Idle draw dilutes differences.* At a 30 W idle, one framework drawing 50 W against another at 70 W differs by **2.0×** dynamically but only **1.4×** in total. The total understates exactly what a comparison is looking for.
+- *Total scales with duration.* A framework that takes twice as long reports twice the energy at identical power draw — which measures runtime a second time rather than efficiency.
+
+Both are written to the results row alongside `idle_power_w`, so either can be reconstructed and the baseline used is never implicit. `avg_power_w × elapsed` equals the total; `dynamic_power_w × elapsed` equals the dynamic. Nothing sits on a third basis.
+
+**Trapezoidal integration, not mean × elapsed.** Power under a real training loop is not flat — it dips between batches and during data stalls. `mean × elapsed` is only equal to the integral when sampling is perfectly uniform and the window matches the samples exactly; integrating the actual `(timestamp, watts)` series makes no such assumption.
+
+**The idle baseline is measured hot, not just cold.** Idle draw on a warm card is materially higher than on a cold one. The honest baseline for work that has just finished is the one taken immediately after it, at working temperature — so both are recorded and the **hot** one is subtracted. Where no baseline was measured at all, dynamic falls back to the total and `idle_power_w` reads `None`, rather than a baseline being invented.
+
+**Poll rate is checked against the sensor's own refresh rate.** NVML updates its power reading only every N milliseconds; sampling faster returns the same value repeatedly and manufactures precision that is not there. The detected interval is recorded, and polling faster than it raises a warning.
+
+**Negative dynamic energy is clamped at 0 and flagged.** A load quieter than the recorded idle means the baseline was wrong, not that the work produced energy.
+
+**Sanity warnings are emitted, not suppressed.** Each of these has been seen in practice and each invalidates the number rather than merely degrading it:
+
+| warning | what it means |
+|---|---|
+| dynamic energy is negative | the idle baseline is above the measured load — baseline is wrong |
+| mean power under load ≤ idle | the measured region did not actually load the GPU |
+| idle baseline range > 50% of its mean | the baseline is unstable; subtraction is not meaningful |
+| poll interval < NVML update interval | duplicate readings; the precision is fictitious |
+
 **Implementation:** the dense-MAC side of SynOps is measured, not assumed —
 `learning/utilities.py`'s `measure_dense_macs()` runs one real forward pass
 with temporary hooks capturing the exact input each downstream dense module
 (the conv/linear layer immediately after a spiking layer) receives, then
 measures that module's dense FLOPs with `torch.utils.flop_counter.FlopCounterMode`
 (ships with torch ≥2.1, no fvcore/ptflops dependency) and halves it to MACs.
-Each framework model declares which spiking layer feeds which downstream
-module via `ModelInterface.synops_layer_map()` (empty by default —
-"unsupported for this framework", e.g. Sinabs, which doesn't expose
-per-timestep hooks at all; see §2.2's caveat on `ActivityMonitor`). SynOps
+`ModelInterface.synops_layer_map()` supplies which spiking layer feeds which
+downstream module, derived from the shared network's own layer list so it
+cannot fall out of sync with the architecture.
+
+It returns empty only for a framework that genuinely cannot be hooked once
+per timestep. Sinabs *used* to be that case — its LIF consumed a whole
+(B, T, ...) sequence per call — so it silently produced no SynOps, no CV_ISI
+and, with activity regularisation on, no penalty at all, while the other
+three produced all three. The shared network feeds it one timestep at a
+time, so all four are now hooked and all four report identical dense-MAC
+counts. SynOps
 itself (`firing_rate × dense_MACs × T`, summed over layers, ×4.6 pJ/MAC) is
 computed by `SNNTrainer.train()`/`SNNTester.run()` and reported alongside —
 not instead of — the flat spike-count energy estimate.
@@ -338,7 +405,7 @@ Because SNN compute cost is event-driven, a static FLOP count (§4.3a) describes
    actually implemented here (`learning/utilities.py`'s `measure_dense_macs()`),
    `torch.utils.flop_counter.FlopCounterMode` (built into torch ≥2.1), which
    avoids adding either as a project dependency.
-2. Register forward hooks on each spiking layer to accumulate output spike counts over the inference window (SpikingJelly's `activation_based.monitor` module does this out of the box if you're using that framework; otherwise a simple hook summing `output.sum()` per timestep works) — this project's `ActivityMonitor`/`DenseTimestepBuffer` (§2.2) already does this for every framework except Sinabs.
+2. Register forward hooks on each spiking layer to accumulate output spike counts over the inference window (SpikingJelly's `activation_based.monitor` module does this out of the box if you're using that framework; otherwise a simple hook summing `output.sum()` per timestep works) — this project's `ActivityMonitor`/`DenseTimestepBuffer` (§2.2) already does this for all four frameworks, including Sinabs.
 3. Combine: `SynOps_layer = mean_firing_rate_layer × dense_MACs_layer`, sum across layers.
 4. Convert to an estimated-Joules figure using per-operation energy constants (commonly the Horowitz 45nm values: ≈0.9 pJ/AC, ≈4.6 pJ/MAC) to get the "if this ran on event-driven hardware" energy number described in §2.4.
 
@@ -352,24 +419,35 @@ Report this SynOps-based estimate *alongside* (not instead of) the directly-meas
 |---|---|
 | Accuracy (top-1) | |
 | Loss (final epoch, train / val) | |
-| Mean spike rate (Hz or spikes/sample) | |
+| **Spikes / neuron / inference** (rate × T) — the headline sparsity figure | |
+| Mean spike rate (per neuron per timestep) | |
+| Firing rate (Hz) — *only if a real sample duration is known; else "n/a"* | |
 | Network-wide spike ratio | |
 | Timesteps (T) | |
 | Credit-assignment algorithm (BPTT+SG / e-prop / FPTT / SLTT / other) | |
-| Latency / inference, forward (T timesteps) | |
+| **Latency, single-stream** (batch 1) — median / p90 | |
+| **Latency, per-sample amortised** (batch time ÷ B) — *throughput, not latency* | |
 | Latency / inference, backward | |
 | Mean CV_ISI (network-wide) | |
 | Training time / epoch | |
 | Throughput (samples/s) | |
 | Peak VRAM (allocated) | |
 | Max VRAM reserved (cached) | |
-| Measured GPU energy / inference | |
-| Measured GPU energy / training epoch | |
+| **Measured GPU energy — total** (idle included) / inference / epoch | |
+| **Measured GPU energy — dynamic** (above idle) / inference / epoch | |
+| **Idle power baseline (W)** — hot; `None` if never measured | |
 | Estimated SynOps-based energy / inference | |
 | GPU temperature | |
 | SM / memory clock speed | |
 | CUDNN autotune enabled | |
 | GPU (model, precision used) | |
+| **Warm-up iterations** (untimed, before the timed region) | |
+| **Batch size, and whether it was VRAM-calibrated** | |
+| **Seed** | |
+
+**Two figures per row, not one, in three places** — spikes (unit-free vs Hz), latency (single-stream vs amortised), energy (total vs dynamic). In each case the pair answers two different questions, and collapsing them to one number silently picks an answer for the reader. Where the second figure is not knowable, report it as unavailable rather than substituting a default; see §2.2 and §2.4 for why that rule exists.
+
+**Batch size and seed are recorded because they legitimately vary.** `calibrate_batch_size` sizes the batch from live VRAM, which is the mechanism that keeps it inside the card and that characterises the scalability constraints — so it differs by machine by design. Batch size is also the largest single lever on wall-clock time, so two rows can only be compared on speed once this column is known to match.
 
 ---
 

@@ -4,11 +4,34 @@ framing:
   n_time_bins: 16
   time_window_ms: 15.0
 
-temporal_slicing:
-  enabled: false
+  # How much REAL TIME one sample spans, in microseconds. Used only to convert the
+  # spike rate into Hz:  firing_rate_hz = spikes_per_neuron_per_inference / duration_s
+  #
+  # null (the default) means "not known", and then Hz is reported as unavailable rather
+  # than guessed. The headline spike figure is `spikes_per_neuron_per_inference`
+  # (rate x T), which needs no time unit, cannot be wrong, and is the unit the SNN
+  # literature reports -- so nothing is lost by leaving this null.
+  #
+  # It is only knowable per dataset: with `n_time_bins` framing a sample is cut into T
+  # bins spanning the WHOLE recording, and recordings differ (N-MNIST is roughly
+  # 300000 us / 300 ms). With `time_window` framing it is derived automatically from
+  # time_window_ms x T and this key is ignored. With temporal slicing enabled it is
+  # derived from the slice duration.
+  #
+  # Set it only if you know your dataset's real per-sample duration and want Hz.
+  sample_duration_us: null
 
-  events_per_slice: null
-  calibrate_events_per_slice: false
+temporal_slicing:
+  enabled: false                # true | false
+
+  # Slice length in MICROSECONDS, used when slicing by time. Also what turns a spike
+  # rate into Hz (see utilities.firing_window_seconds). Moved here from
+  # SNN_module.yaml's architecture block, where it was separated from the rest of the
+  # slicing settings.
+  slice_duration_us: 15000
+
+  events_per_slice: null        # null = slice by time; a number = slice by event count
+  calibrate_events_per_slice: false   # true = derive the event count from the dataset
 
 # Train-only augmentation. Applied after ToFrame, on the dense frame — a
 # rotated frame interpolates, so spike counts on an augmented sample become

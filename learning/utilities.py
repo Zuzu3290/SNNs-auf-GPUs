@@ -54,6 +54,110 @@ def build_optimizer(params, cfg) -> torch.optim.Optimizer:
     return torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999), weight_decay=wd)
 
 
+def firing_window_seconds(cfg, wf) -> float | None:
+    """How much REAL TIME one sample spans, in seconds, or None if not knowable.
+
+    Only used to turn a spike rate into Hz:
+
+        firing_rate_hz = spikes_per_neuron_per_inference / window_seconds
+
+    Returning None rather than a guess is the point. This previously read a config
+    attribute that does not exist (`TEMPORAL_SLICE_DURATION_US` -- the real name has no
+    `_US`), so `getattr` silently supplied its 15000 default and EVERY reported Hz figure
+    was computed against a fixed 15 ms window. With `n_time_bins` framing a sample spans
+    the whole recording -- roughly 300 ms for N-MNIST -- so the published numbers were
+    about 20x too high. It was a constant factor across frameworks, so relative
+    comparisons survived; the absolute values did not.
+
+    Three cases are genuinely derivable, and one is not:
+
+      temporal slicing by TIME   one slice = wf.SLICE_DURATION_US microseconds
+      time_window framing        T frames x time_window_ms each
+      framing.sample_duration_us stated explicitly by whoever knows the dataset
+      otherwise                  None -- n_time_bins divides a recording of unknown
+                                 length, and slicing by EVENT COUNT spans no fixed time
+
+    When this returns None, report `spikes_per_neuron_per_inference` (rate x T) instead:
+    it needs no time unit, cannot be wrong, and is the unit the SNN literature uses.
+    """
+    stated = getattr(wf, "SAMPLE_DURATION_US", None)
+    if stated:
+        return stated / 1e6
+
+    if getattr(wf, "TEMPORAL_SLICING_ENABLED", False):
+        # Slicing by event count covers a variable, unknown span of time.
+        if getattr(wf, "EVENTS_PER_SLICE", None) or getattr(wf, "CALIBRATE_EVENTS_PER_SLICE", False):
+            return None
+        duration_us = getattr(wf, "SLICE_DURATION_US", None)
+        return duration_us / 1e6 if duration_us else None
+
+    if getattr(wf, "FRAME_MODE", None) == "time_window":
+        window_us = getattr(wf, "TIME_WINDOW_US", None)
+        bins = getattr(wf, "N_TIME_BINS", None)
+        if window_us and bins:
+            return window_us * bins / 1e6
+
+    return None
+
+
+def spikes_per_neuron_per_inference(spike_rate: float, timesteps: int) -> float:
+    """The time-unit-free spike figure: spikes per neuron over one whole inference.
+
+    `spike_rate` is spikes per neuron per TIMESTEP, so multiplying by T gives the count
+    per sample. This is the headline number precisely because it needs no window and
+    therefore cannot be wrong -- see firing_window_seconds() for why Hz can be.
+    """
+    return spike_rate * timesteps
+
+
+def warm_up(model, sample_batch: torch.Tensor, iterations: int) -> dict:
+    """Run untimed forward+backward passes so the timed epochs measure steady state.
+
+    The first CUDA kernel launch pays compilation, cuDNN algorithm selection and
+    allocator pool growth. Left inside the timed region that one-off cost is charged to
+    training -- and in a multi-framework run only to whichever framework happens to go
+    FIRST. Measured on this pipeline before this existed: the first framework reported
+    174 ms forward latency against 41-80 ms for the other three, which was cache and
+    kernel warm-up, not the framework.
+
+    Backward as well as forward, because backward kernels need compiling too.
+
+    NO optimizer.step() is called and gradients are cleared afterwards, so the weights
+    are untouched and the timed epochs begin exactly where they would have. The caller
+    is expected to verify that with a weight fingerprint -- `weights_unchanged` in the
+    returned dict is that check, done here so every call site gets it.
+
+    The same batch is reused rather than consuming the epoch's data.
+    """
+    from skeleton.seeding import shared_weight_fingerprint
+
+    report = {"iterations": 0, "weights_unchanged": True, "fingerprint": None}
+    if iterations <= 0:
+        return report
+
+    before = shared_weight_fingerprint(model)
+    model.train_mode()
+    # Recordings from warm-up must not reach the metrics. forward() clears at entry, so
+    # the real first batch overwrites them anyway -- pausing makes that independent of
+    # call order rather than a coincidence.
+    model.activity.pause()
+    try:
+        for _ in range(iterations):
+            # A plain sum stands in for the loss. Warm-up only needs the same KERNELS
+            # to be compiled and the same allocations made; the loss value is discarded
+            # and no step is taken, so the real loss function would add nothing. Same
+            # surrogate measure_batch_vram() already uses for its probe.
+            model(sample_batch).float().sum().backward()
+    finally:
+        model.activity.resume()
+        model.activity.clear()
+        model.zero_grad()
+
+    after = shared_weight_fingerprint(model)
+    report.update(iterations=iterations, weights_unchanged=(before == after), fingerprint=after)
+    return report
+
+
 def sum_over_time_cross_entropy(spk_rec: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     """Cross entropy over spike counts summed across the time dimension
     (dim 0): spk_rec is [T, B, C], as returned by Norse/SNNTorch/SNN_LIF."""

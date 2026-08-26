@@ -32,7 +32,6 @@ class Settings:
         self.overlay_path = overlay
         self.yaml_path = str(DEFAULT_YAML)  # kept: some callers print it
 
-        architecture = self.config.get("architecture", {})
         training     = self.config.get("training", {})
         dataset      = self.config.get("dataset", {})
         output       = self.config.get("output", {})
@@ -45,18 +44,6 @@ class Settings:
         network_arch = self.config
         conv = network_arch.get("convolution", {})
 
-        # Legacy MLP architecture params (kept for backward compatibility)
-        self.INPUT_SIZE              = int(architecture.get("input_size", 10))
-        self.HIDDEN_SIZE             = int(architecture.get("hidden_size", 16))
-        self.HIDDEN_LAYERS           = int(architecture.get("hidden_layers", 3))
-        self.OUTPUT_SIZE             = int(architecture.get("output_size", 10))
-        self.LEAK                    = float(architecture.get("leak", 1.0))
-        self.OVERRIDE                = bool(architecture.get("override", False))
-        self.NETWORK_STRUCT          = architecture.get("network_struct", "S")
-        self.SIMULATOR               = architecture.get("simulator", "OFF")
-        self.TEMPORAL_SLICE_DURATION = int(architecture.get("temporal_slice_duration", 15000))
-        self.TEMPORAL_OVERLAP        = int(architecture.get("temporal_overlap", 0))
-        self.TOTAL_TIME_WINDOW       = int(architecture.get("total_time_window", 30000))
 
         # Conv-SNN architecture (from network_architecture.yaml)
         self.SENSOR_H     = int(conv.get("sensor_h",     34))
@@ -71,11 +58,16 @@ class Settings:
         # Auto-compute flattened size after both conv+pool stages
         self.FC_IN = self.compute_fc_in(self.SENSOR_H, self.SENSOR_W)
 
-        # Placeholder until apply_dataset_shape() sets the real per-dataset count.
-        # Present from construction so anything that builds a network before a dataset
-        # has been picked -- check_network.py, a unit test -- gets a usable value
-        # instead of an AttributeError.
-        self.NUM_CLASSES = int(architecture.get("output_size", 10))
+        # Output classes belong to the DATASET REGISTRY, not to this config: the input
+        # sensor shape and the class count both arrive via apply_dataset_shape() from the
+        # registry entry (learning/main.py, data_pipeline). Only the network INTERNALS --
+        # filter counts, kernel sizes, pool size, hidden layers -- are configured here.
+        #
+        # Kept as a placeholder so anything constructing a network before a dataset is
+        # picked (check_network.py, a unit test) gets a value rather than an
+        # AttributeError. It is NOT read from config any more: `architecture.output_size`
+        # implied the class count was configurable, which it is not.
+        self.NUM_CLASSES = 10
 
         self.NEURON_TYPES = network_arch.get("neuron_types", {})
 
@@ -87,12 +79,17 @@ class Settings:
 
         # Training parameters
         self.EPOCHS                   = int(training.get("epochs", 10))
-        self.ITERA                    = int(training.get("iterations_per_epoch", 100))
+        # null (or 0) = auto: one epoch is a full pass, derived from dataset size and
+        # batch size. A number caps the epoch at that many batches (never more than a
+        # full pass). Resolved once the loader exists -- see resolve_iterations().
+        _itera                        = training.get("iterations_per_epoch", None)
+        self.ITERA                    = None if _itera in (None, 0) else int(_itera)
         self.BATCH_SIZE               = int(training.get("batch_size", 128))
         # When False, BATCH_SIZE above is used as-is and calibrate_batch_size()
         # is never called — see docs/functions.md for why this exists.
         self.CALIBRATE_BATCH_SIZE     = bool(training.get("calibrate_batch_size", True))
-        self.NAP_TIMES                = int(training.get("nap_times", 1))
+        # Untimed forward+backward passes before the timed epochs -- see the YAML comment.
+        self.WARMUP_ITERATIONS        = int(training.get("warmup_iterations", 5))
 
         # Fixes weight init AND batch order. Without it, any measured difference
         # between two frameworks is confounded with initialisation noise -- there was
@@ -114,8 +111,15 @@ class Settings:
         self.DDP                      = training.get("DDP", "OFF")
         self.USE_AMP                  = bool(training.get("use_amp", True))
         self.GRAD_ACCUM_STEPS         = max(1, int(training.get("grad_accum_steps", 1)))
-        self.ENABLE_PIPELINE_MONITOR  = bool(training.get("enable_pipeline_monitor", True))
-        self.LR_SCHEDULER             = training.get("lr_scheduler", "cosine")
+        # Validated, not compared loosely: the use site tested `== "cosine"`, so any
+        # unrecognised string (a typo like "cosinne") silently meant NO scheduler --
+        # a training-recipe change with no error.
+        self.LR_SCHEDULER             = str(training.get("lr_scheduler", "none")).lower()
+        if self.LR_SCHEDULER not in ("none", "cosine"):
+            raise ValueError(
+                f"training.lr_scheduler={self.LR_SCHEDULER!r} is not supported. "
+                "Options: none (constant lr), cosine (anneal to ~0 by the last epoch)."
+            )
 
         self.TRADES_ENABLED           = bool(training.get("trades_enabled", False))
         self.TRADES_EPSILON           = float(training.get("trades_epsilon", 0.05))
@@ -144,9 +148,6 @@ class Settings:
         self.OUTPUT_DIR = output.get("output_dir", "./outputs")
         self.PLOT_DIR   = output.get("plot_dir",   "./outputs/plots")
         self.DATA_DIR   = output.get("data_dir",   "./outputs/data")
-
-        # Generated network structure
-        self.network_structure = self.generate_network_structure()
 
 
     @property
@@ -186,63 +187,31 @@ class Settings:
         self.IN_CHANNELS = int(in_channels)
         self.NUM_CLASSES = int(num_classes)
         self.FC_IN       = self.compute_fc_in(self.SENSOR_H, self.SENSOR_W)
-        self.network_structure = self.generate_network_structure()
+
+    def resolve_iterations(self, train_loader) -> int:
+        """Settle ITERA against the real loader. Call once, after the loader is built.
+
+        A full pass is len(DataLoader), NOT ceil(samples / batch): the loader's own
+        __len__ already accounts for drop_last=True (floor, not ceil), so this matches
+        what actually executes for any drop_last setting.
+
+        Deliberately NOT gated on CALIBRATE_BATCH_SIZE. Epoch length follows from dataset
+        size and batch size; whether the batch size came from a VRAM probe or from the
+        config is a separate concern. Previously the derivation only ran when the probe
+        was on, so turning the probe OFF left a literal YAML value as a hard cap -- e.g.
+        400 against a 468-batch full pass silently trained on 85% of the data per epoch.
+        """
+        loader = getattr(train_loader, "loader", train_loader)
+        full_pass = len(loader)
+        if self.ITERA is None:
+            self.ITERA = full_pass
+        else:
+            self.ITERA = min(self.ITERA, full_pass)
+        return self.ITERA
 
     def load_yaml(self, yaml_path):
         with open(yaml_path, "r") as file:
             return yaml.safe_load(file)
-
-    def generate_network_structure(self):
-        """
-        Generates a list representing the neuron count per layer:
-        [input_layer, hidden1, hidden2, ..., output_layer]
-
-        NETWORK_STRUCT options:
-        S = stable
-        A = ascending
-        D = descending
-        """
-
-        layers = []
-
-        # Append input layer separately
-        layers.append(self.INPUT_SIZE)
-
-        # Generate hidden layers independently from input size
-        if self.OVERRIDE:
-            if self.NETWORK_STRUCT == "S" or self.NETWORK_STRUCT is None:
-                hidden_layers = [self.HIDDEN_SIZE] * self.HIDDEN_LAYERS
-
-            elif self.NETWORK_STRUCT == "A":
-                hidden_layers = []
-                current = self.HIDDEN_SIZE
-
-                for _ in range(self.HIDDEN_LAYERS):
-                    hidden_layers.append(current)
-                    current += 4
-
-            elif self.NETWORK_STRUCT == "D":
-                hidden_layers = []
-                current = self.HIDDEN_SIZE
-
-                for _ in range(self.HIDDEN_LAYERS):
-                    hidden_layers.append(current)
-                    current = max(2, current // 2)
-
-            else:
-                raise ValueError("Invalid NETWORK_STRUCT. Use 'S', 'A', or 'D'.")
-
-        else:
-            hidden_layers = [self.HIDDEN_SIZE] * self.HIDDEN_LAYERS
-
-        # Append hidden layers
-        layers.extend(hidden_layers)
-
-        # Append output layer separately — the real per-dataset class count
-        # once apply_dataset_shape() has run, else the legacy YAML default.
-        layers.append(getattr(self, "NUM_CLASSES", self.OUTPUT_SIZE))
-
-        return layers
 
     def display(self):
         W      = 76
@@ -271,7 +240,6 @@ class Settings:
         row("FC input (auto)", str(self.FC_IN))
         num_classes = getattr(self, "NUM_CLASSES", None)
         row("Output classes",  str(num_classes) if num_classes is not None else "N/A (regression target)")
-        row("Network structure", " -> ".join(str(n) for n in self.network_structure))
 
         cfg_key      = FW_TO_CFG_KEY[self.FRAMEWORK]
         neuron_types = self.NEURON_TYPES.get(cfg_key, {})

@@ -26,104 +26,69 @@
 dataset:
   name: null
 
-architecture:
-  input_size: 50
-  hidden_size: 50
-  hidden_layers: 5
-  leak: 1.0
-  override: false
-  network_struct: S
-  simulator: ON
+# No `architecture:` block: the conv-SNN internals (filter counts, kernel sizes, pool
+# size) live in network_architecture.yaml, the input sensor shape and output class count
+# come from the dataset registry, and the slice duration moved to data_workflow.yaml with
+# the rest of the slicing settings.
 
 training:
-  framework: sj           # YAML selector: norse | torch | sj | sinabs
-  device: cuda
+  framework: sj                 # norse | torch | sj | sinabs
+  device: cuda                  # cuda | cpu
 
-  # Fixes weight init AND batch order, so a rerun reproduces and so all four frameworks
-  # start from byte-identical conv/linear weights. Without it, any measured difference
-  # between two frameworks is confounded with initialisation noise.
+  # Fixes weight init AND batch order, so a rerun reproduces and all four frameworks
+  # start from identical conv/linear weights.
   seed: 0
 
-  epochs: 2              # one epoch = one full pass over the training set; more epochs = more chances to learn.
-                          # not calibrated -- your call how many repeated passes the model needs.
-  iterations_per_epoch: 400
-  batch_size: 128
-  calibrate_batch_size: true    # true: live GPU probe overrides batch_size above, and iterations_per_epoch
-                                # below is recomputed so one epoch covers (nearly) the whole training set
-                                # (see docs/functions.md).
-                                # false: batch_size and iterations_per_epoch below are used exactly as
-                                # written, no probe run.
-  nap_times: 1
+  epochs: 2                     # full passes over the training set
+  batch_size: 128               # used as-is when calibrate_batch_size is false
 
-  # ---------------------------------------------------------------------------
-  # optimizer and loss: ONE block, shared by every framework.
-  #
-  # Deliberately NOT per-framework. These are plain torch -- none of the four SNN
-  # libraries supplies them, and all four networks are ordinary nn.Modules holding
-  # ordinary Conv2d/Linear parameters. Giving any framework its own optimizer, learning
-  # rate or loss would mean comparing training recipes instead of frameworks.
-  #
-  # An unrecognised name RAISES. The previous build_optimizer() silently returned Adam
-  # for anything it did not recognise, so a typo produced a real run with the wrong
-  # optimizer and no warning.
-  # ---------------------------------------------------------------------------
+  # null = auto: one epoch is a full pass, derived from dataset size / batch size.
+  # A number caps the epoch at that many batches (never more than a full pass).
+  iterations_per_epoch: null
+
+  # true  = live GPU probe picks batch_size, overriding the value above
+  # false = batch_size above is used exactly as written, no probe
+  # Either way iterations_per_epoch is resolved against the real loader.
+  calibrate_batch_size: true
+
+  # Untimed forward+backward passes before timing starts, so CUDA kernel compilation and
+  # allocator warm-up are not charged to whichever framework runs first (measured: 174 ms
+  # vs 41-80 ms). No optimizer step is taken. 0 disables.
+  warmup_iterations: 5
+
+  # ONE optimizer and ONE loss for every framework -- these are plain torch, so giving a
+  # framework its own would compare training recipes instead of frameworks.
   optimizer:
-    type: nadam         # nadam | adam | adamw | sgd
-    lr: 0.002           # drop to 0.001 if training is unstable
-
-    # 0.0 is this pipeline's value; the pre-merge default was 1e-4 applied to every
-    # framework. A real training-recipe difference -- whichever value a published run
-    # uses has to be stated alongside it. See docs/merge_decisions.md.
+    type: nadam                 # nadam | adam | adamw | sgd  (unknown name raises)
+    lr: 0.002
     weight_decay: 0.0
+    momentum: 0.0               # sgd only, ignored by the others
 
-    momentum: 0.0       # SGD only, ignored by the others. The pre-merge code hardcoded
-                        # 0.9 here; it is a config value now rather than a hidden one.
-
-  # Plain torch.nn.CrossEntropyLoss on the spike counts accumulated over T, shape
-  # [batch, num_classes]. Nothing custom.
-  #
-  #   cross_entropy - torch's own loss, belonging to none of the four libraries
-  #   mse_count     - snnTorch's functional.mse_count_loss. Available, but it belongs to
-  #                   ONE of the four frameworks, so it is not neutral: do not use it
-  #                   for a cross-framework comparison run.
+  # cross_entropy = torch's own, neutral across frameworks
+  # mse_count     = snnTorch's; belongs to ONE framework, so not neutral for comparison
   loss: cross_entropy
 
-  lr_scheduler: cosine  # cosine | none. Must be identical across frameworks.
+  # none   = learning rate stays constant
+  # cosine = annealed toward ~0 by the last epoch (T_max = epochs, so short runs end near 0)
+  lr_scheduler: cosine
 
-  # Mixed precision. MUST be stated explicitly: this key was previously absent from
-  # this file and silently defaulted to true in Settings, so every run used float16
-  # autocast without saying so. It changes both speed and numerics.
-  use_amp: false
+  use_amp: false                # true | false. Changes speed AND numerics; state it explicitly.
+  grad_accum_steps: 1           # batches accumulated before an optimizer step
 
-  grad_accum_steps: 1
 
-  # TRADES robustness training — penalises the network for changing its prediction under input corruption.
-  # Loss = CrossEntropy(clean) + lambda * KL(clean || adversarial).
-  trades_enabled: false          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
+  # TRADES robustness training: loss = CE(clean) + lambda * KL(clean || adversarial).
+  trades_enabled: false         # adds ~(trades_steps * 2) forward passes per batch
+  trades_epsilon: 0.05          # perturbation budget per element. 0.001 (subtle) .. 0.3 (heavy)
+  trades_lambda: 4.0            # clean accuracy vs robustness. 1.0 (clean) .. 10.0 (robust)
+  trades_steps: 3               # PGD iterations per batch. 1 (fast) .. 40 (strongest)
 
-  trades_epsilon: 0.05          # Perturbation budget: max allowed input corruption per element.
-                                # Range: 0.001 (near-imperceptible) → 0.3 (heavy corruption).
-
-  trades_lambda: 4.0            # Balances clean accuracy vs robustness. Higher = more robust, lower clean accuracy.
-                                # Range: 1.0 (favour clean accuracy) → 10.0 (favour robustness).
-
-  trades_steps: 3              # PGD iterations used to find worst-case input per batch. Recommended: 10 for training.
-                                # Range: 1 (fast, weaker adversarial) → 40 (slow, strongest adversarial).
-
-  # Two-sided per-neuron activity regularization on hidden LIF layers.
-  #
-  # OFF by default. It adds a term to the loss, so it must be identical across
-  # frameworks or the loss itself differs — which it did: sinabs had no ActivityMonitor
-  # hooks, so three of four frameworks were penalised and sinabs was not. All four are
-  # hooked now, but it stays off for comparison runs.
-  activity_reg_enabled: false
-  activity_reg_min_rate: 0.01   # Penalize neurons firing less than 1% of timesteps  (dead neuron prevention).
-  activity_reg_max_rate: 0.50   # Penalize neurons firing more than 50% of timesteps (saturation prevention).
-  activity_reg_lambda_low: 0.1  # Penalty weight for dead neurons.
-  activity_reg_lambda_high: 0.1 # Penalty weight for saturated neurons.
-
-  enable_pipeline_monitor: true  # Background CPU/GPU utilization sampler (utilization, power, clock,
-                                # sustained-idle warnings). Diagnostic only — set false to disable.
+  # Two-sided per-neuron activity regularization on hidden LIF layers. Adds a loss term,
+  # so it must be identical across frameworks -- keep off for comparison runs.
+  activity_reg_enabled: false   # true | false
+  activity_reg_min_rate: 0.01   # penalise neurons firing below this fraction of timesteps
+  activity_reg_max_rate: 0.50   # penalise neurons firing above it
+  activity_reg_lambda_low: 0.1  # penalty weight, dead neurons
+  activity_reg_lambda_high: 0.1 # penalty weight, saturated neurons
 
 output:
   output_dir: ./outputs

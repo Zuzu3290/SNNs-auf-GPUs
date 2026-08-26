@@ -37,7 +37,6 @@ class DatasetAwareConfig(Protocol):
     DEVICE: str
     DATASET_NAME: str
     BATCH_SIZE: int
-    TEMPORAL_SLICE_DURATION: int
     TASK_TYPE: str
 
     def apply_dataset_shape(self, sensor_h: int, sensor_w: int, in_channels: int, num_classes: int) -> None: ...
@@ -235,7 +234,7 @@ class NeuromorphicEncoder:
         )
 
         self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else self.wf.TEMPORAL_SLICING_ENABLED
-        self.slice_duration_ms = slice_duration_ms or (cfg.TEMPORAL_SLICE_DURATION / 1000.0)
+        self.slice_duration_ms = slice_duration_ms or (self.wf.SLICE_DURATION_US / 1000.0)
         self.events_per_slice = events_per_slice if events_per_slice is not None else self.wf.EVENTS_PER_SLICE
         self.calibrate_events_per_slice = (
             calibrate_events_per_slice if calibrate_events_per_slice is not None else self.wf.CALIBRATE_EVENTS_PER_SLICE
@@ -375,7 +374,7 @@ class NeuromorphicEncoder:
                 raise RuntimeError(
                     f"[PIPELINE] Temporal slicing produced an empty dataset — "
                     f"train: {len(train_data)} samples, test: {len(test_data)} samples. "
-                    "Increase architecture.temporal_slice_duration in SNN_module.yaml."
+                    "Increase temporal_slicing.slice_duration_us in data_workflow.yaml."
                 )
         else:
             # Cache the deterministic frame transform; keep the random

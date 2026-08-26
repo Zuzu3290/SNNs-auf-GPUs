@@ -83,26 +83,29 @@ if __name__ == "__main__":
                                                data_vram_fraction=wf.BATCH_VRAM_FRACTION, max_batch_size=wf.MAX_BATCH_SIZE,
                                                band_min=wf.BATCH_VRAM_BAND_MIN, band_max=wf.BATCH_VRAM_BAND_MAX)
 
-    cfg.ENABLE_PIPELINE_MONITOR = True  # background CPU/GPU utilization + power sampling; set False to disable
+    # Hardcoded on purpose, NOT a config key: background CPU/GPU utilization and power
+    # sampling is a diagnostic, always wanted on a real run. Set False here to disable.
+    cfg.ENABLE_PIPELINE_MONITOR = True
 
     encoder = NeuromorphicEncoder(cfg)
     train_loader, test_loader = encoder.get_dataloaders()
 
-    if cfg.CALIBRATE_BATCH_SIZE:
-        # One epoch = one real pass over the actual training set, not a fixed
-        # iteration count disconnected from batch size or dataset size.
-        # len(DataLoader) rather than ceil(len(dataset)/batch_size): the
-        # loader's own __len__ already accounts for drop_last=True (floor,
-        # not ceil) -- using ceil() here previously overcounted by one
-        # unreachable iteration, since the loader exhausts (drops the final
-        # partial batch) one iteration before that ceil'd count. This
-        # matches what actually executes, exactly, for any drop_last setting.
-        cfg.ITERA = len(train_loader.loader)
-        n_train_samples = len(train_loader.loader.dataset)
-        covered = cfg.ITERA * cfg.BATCH_SIZE
-        print(f"  [CALIBRATE] iterations/epoch = {cfg.ITERA}  "
-              f"(covers {covered}/{n_train_samples} training samples per epoch, "
-              f"{covered / n_train_samples * 100:.2f}%)")
+    # Runs whether or not the batch size was probed: epoch length follows from dataset
+    # size and batch size either way.
+    requested_itera = cfg.ITERA
+    full_pass = len(train_loader.loader)
+    cfg.resolve_iterations(train_loader)
+    n_train_samples = len(train_loader.loader.dataset)
+    covered = cfg.ITERA * cfg.BATCH_SIZE
+    if requested_itera is None:
+        note = "auto (full pass)"
+    elif cfg.ITERA < requested_itera:
+        note = f"capped to the full pass; config asked for {requested_itera}"
+    else:
+        note = f"capped by config at {requested_itera} of {full_pass}"
+    print(f"  [ITERATIONS] {cfg.ITERA} batches/epoch x {cfg.BATCH_SIZE} batch = "
+          f"{covered}/{n_train_samples} samples ({covered / n_train_samples * 100:.1f}%)  "
+          f"-- {note}")
 
     # Seed immediately before construction, so weight init depends only on the seed
     # regardless of what drew from the RNG first (dataset probing, batch-size
@@ -139,7 +142,11 @@ if __name__ == "__main__":
     print("\n Testing complete!")
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
     print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")
-    print(f"  Avg Firing Rate : {test_results['avg_firing_rate_hz']:.2f} Hz")
+    print(f"  Spikes/neuron   : {test_results['avg_spikes_per_neuron_per_inference']:.4f} per inference")
+    if test_results["avg_firing_rate_hz"] is not None:
+        print(f"  Avg Firing Rate : {test_results['avg_firing_rate_hz']:.2f} Hz")
+    else:
+        print("  Avg Firing Rate : n/a -- set framing.sample_duration_us for Hz")
 
     RUN_ADVERSARIAL_EVAL = False
 

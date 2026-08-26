@@ -26,19 +26,26 @@ class WorkflowSettings:
         self.FRAME_MODE     = framing.get("mode", "time_window")
         self.N_TIME_BINS    = int(framing.get("n_time_bins", 16))
         self.TIME_WINDOW_US = int(framing.get("time_window_ms", 15.0) * 1000)
+        # null = "not known"; Hz is then reported as unavailable rather than guessed.
+        sample_duration = framing.get("sample_duration_us", None)
+        self.SAMPLE_DURATION_US = int(sample_duration) if sample_duration is not None else None
 
         slicing = config.get("temporal_slicing", {})
         self.TEMPORAL_SLICING_ENABLED = bool(slicing.get("enabled", False))
-        # null (default) -> SliceByTime, using cfg.TEMPORAL_SLICE_DURATION (the
-        # "normal"/timing-window method, set in SNN_module.yaml). An int here
-        # switches slicing to SliceByEventCount instead. See
-        # CALIBRATE_EVENTS_PER_SLICE below for the third strategy.
+        # null (default) -> SliceByTime, using SLICE_DURATION_US below. An int here
+        # switches to SliceByEventCount instead. See CALIBRATE_EVENTS_PER_SLICE for
+        # the third strategy.
         events_per_slice = slicing.get("events_per_slice", None)
         self.EVENTS_PER_SLICE = int(events_per_slice) if events_per_slice is not None else None
         # true -> SliceByEventCount with a value calibrated from the dataset's
         # own recordings (Case A) instead of a guessed constant; overrides
         # EVENTS_PER_SLICE above whenever both are set.
         self.CALIBRATE_EVENTS_PER_SLICE = bool(slicing.get("calibrate_events_per_slice", False))
+        # Slice length in microseconds, used when slicing by TIME. Deliberately not
+        # called TEMPORAL_SLICE_DURATION_US: that spelling was read by code while never
+        # existing, so getattr silently supplied 15 ms and every Hz figure came out ~20x
+        # high. Tests assert that name stays absent.
+        self.SLICE_DURATION_US          = int(slicing.get("slice_duration_us", 15000))
 
         augmentation = config.get("augmentation", {})
         self.RANDOM_ROTATION_ENABLED = bool(augmentation.get("random_rotation_enabled", True))

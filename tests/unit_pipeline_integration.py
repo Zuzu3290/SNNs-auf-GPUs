@@ -414,8 +414,108 @@ def test_optimizer_covers_every_trainable_weight() -> None:
                     trainable <= owned, f"{len(trainable - owned)} unowned")
 
 
+# ---------------------------------------------------------------------------
+# 9. energy reporting -- two figures on two bases (D13)
+# ---------------------------------------------------------------------------
+def _monitor_at(watts: float, phase: str = "e0"):
+    """A PipelineMonitor with synthetic power samples and no live sampling thread."""
+    from event_data_workflow.system_monitor import PipelineMonitor, PipelineSample
+
+    monitor = PipelineMonitor(cuda_enabled=False, enabled=False)
+    monitor.samples = [
+        PipelineSample(t_s=i * 0.2, phase=phase, cpu_percent=0.0, ram_available_gb=0.0,
+                       gpu_util_pct=90.0, gpu_power_w=watts, gpu_sm_clock_mhz=None)
+        for i in range(4)
+    ]
+    return monitor
+
+
+def test_energy_report_exposes_both_bases() -> None:
+    report = _monitor_at(70.0).phase_energy_report("e0", 10.0)
+    for key in ["gpu_energy_j", "gpu_dynamic_energy_j", "avg_power_w",
+                "dynamic_power_w", "idle_power_w"]:
+        suite.check(f"energy report has {key}", key in report)
+
+
+def test_total_energy_includes_idle_draw() -> None:
+    monitor = _monitor_at(70.0)
+    monitor.idle_power_w = 30.0
+    report = monitor.phase_energy_report("e0", 10.0)
+    suite.check("total is average power x elapsed", report["gpu_energy_j"] == 700.0,
+                str(report["gpu_energy_j"]))
+    suite.check("dynamic subtracts the idle baseline",
+                report["gpu_dynamic_energy_j"] == 400.0, str(report["gpu_dynamic_energy_j"]))
+
+
+def test_the_two_energies_match_their_own_power_figures() -> None:
+    """The inconsistency D13 describes: previously `dynamic_power_w x elapsed` did not
+    equal any reported energy, because only the power figure was idle-subtracted."""
+    monitor = _monitor_at(70.0)
+    monitor.idle_power_w = 30.0
+    elapsed = 10.0
+    report = monitor.phase_energy_report("e0", elapsed)
+    suite.check("avg_power_w x elapsed == total energy",
+                abs(report["avg_power_w"] * elapsed - report["gpu_energy_j"]) < 1e-9)
+    suite.check("dynamic_power_w x elapsed == dynamic energy",
+                abs(report["dynamic_power_w"] * elapsed - report["gpu_dynamic_energy_j"]) < 1e-9)
+
+
+def test_dynamic_falls_back_to_total_with_no_baseline() -> None:
+    """No baseline measured means there is nothing to subtract. Reporting the total
+    is honest; inventing a baseline would not be."""
+    report = _monitor_at(70.0).phase_energy_report("e0", 10.0)
+    suite.check("idle_power_w is None when never measured", report["idle_power_w"] is None)
+    suite.check("dynamic equals total when there is no baseline",
+                report["gpu_dynamic_energy_j"] == report["gpu_energy_j"],
+                f"{report['gpu_dynamic_energy_j']} vs {report['gpu_energy_j']}")
+
+
+def test_dynamic_energy_is_clamped_at_zero() -> None:
+    """A load quieter than the recorded idle baseline means the baseline was wrong,
+    not that the work produced energy."""
+    monitor = _monitor_at(20.0)
+    monitor.idle_power_w = 30.0
+    report = monitor.phase_energy_report("e0", 10.0)
+    suite.check("dynamic energy never goes negative",
+                report["gpu_dynamic_energy_j"] == 0.0, str(report["gpu_dynamic_energy_j"]))
+
+
+def test_no_power_data_gives_none_not_zero() -> None:
+    """Zero joules and 'not measured' are different claims."""
+    from event_data_workflow.system_monitor import PipelineMonitor
+
+    report = PipelineMonitor(cuda_enabled=False, enabled=False).phase_energy_report("e0", 10.0)
+    suite.check("total is None without power data", report["gpu_energy_j"] is None)
+    suite.check("dynamic is None without power data", report["gpu_dynamic_energy_j"] is None)
+
+
+def test_idle_draw_dilutes_the_difference_between_frameworks() -> None:
+    """Why the two bases are not interchangeable, as arithmetic rather than prose.
+    Idle 30 W; one framework draws 50 W, another 70 W. Dynamic shows a 2x difference,
+    total shows 1.4x -- so the total understates what the comparison is looking for."""
+    energies = {}
+    for label, watts in [("a", 50.0), ("b", 70.0)]:
+        monitor = _monitor_at(watts, phase="x")
+        monitor.idle_power_w = 30.0
+        report = monitor.phase_energy_report("x", 10.0)
+        energies[label] = (report["gpu_energy_j"], report["gpu_dynamic_energy_j"])
+
+    total_ratio = energies["b"][0] / energies["a"][0]
+    dynamic_ratio = energies["b"][1] / energies["a"][1]
+    suite.check("total ratio is 1.4x", abs(total_ratio - 1.4) < 1e-9, f"{total_ratio:.3f}")
+    suite.check("dynamic ratio is 2.0x", abs(dynamic_ratio - 2.0) < 1e-9, f"{dynamic_ratio:.3f}")
+    suite.check("the total understates the difference", total_ratio < dynamic_ratio)
+
+
 def main() -> int:
     return suite.run([
+        test_energy_report_exposes_both_bases,
+        test_total_energy_includes_idle_draw,
+        test_the_two_energies_match_their_own_power_figures,
+        test_dynamic_falls_back_to_total_with_no_baseline,
+        test_dynamic_energy_is_clamped_at_zero,
+        test_no_power_data_gives_none_not_zero,
+        test_idle_draw_dilutes_the_difference_between_frameworks,
         test_every_abstract_method_is_implemented,
         test_interface_methods_behave,
         test_state_dict_round_trips,

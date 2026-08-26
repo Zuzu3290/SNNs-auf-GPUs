@@ -441,13 +441,34 @@ class PipelineMonitor:
         }
 
     def phase_energy_j(self, phase: str, elapsed_s: float) -> float | None:
-        """Estimated GPU energy in joules for one phase, from that phase's
-        sampled power readings. None if no power data (no CUDA / no NVML)."""
+        """TOTAL GPU energy in joules for one phase, from that phase's sampled power.
+
+        Total means exactly that: it INCLUDES the idle draw the card has whether or
+        not it is working (typically 20-40 W). It is not idle-subtracted -- see
+        phase_dynamic_energy_j() for the figure that is, and read
+        phase_energy_report()'s docstring for which one answers which question.
+
+        None if no power data (no CUDA / no NVML).
+        """
         power_vals = [s.gpu_power_w for s in self.samples if s.phase == phase and s.gpu_power_w is not None]
         if not power_vals:
             return None
         avg_w = sum(power_vals) / len(power_vals)
         return avg_w * elapsed_s
+
+    def phase_dynamic_energy_j(self, phase: str, elapsed_s: float) -> float | None:
+        """Energy ABOVE the idle baseline, i.e. what the computation itself cost.
+
+        None when there is no power data, and equal to the total when
+        measure_idle_baseline() was never called -- in that case there is no baseline
+        to subtract and pretending otherwise would be worse than reporting the total.
+        """
+        total = self.phase_energy_j(phase, elapsed_s)
+        if total is None:
+            return None
+        if self.idle_power_w is None:
+            return total
+        return max(0.0, total - self.idle_power_w * elapsed_s)
 
     def runtime_diagnostics(self) -> dict:
         """Point-in-time GPU runtime diagnostics beyond phase_summary(): max
@@ -475,19 +496,42 @@ class PipelineMonitor:
         return diag
 
     def phase_energy_report(self, phase: str, elapsed_s: float) -> dict:
-        """One-call bundle of everything a caller needs to report a phase's
-        GPU cost — utilization/memory summary, measured energy/power (idle
-        baseline subtracted), and runtime diagnostics — instead of pulling
-        phase_summary()/phase_energy_j()/dynamic_power_w()/
-        runtime_diagnostics() together by hand at every call site."""
+        """One-call bundle of everything a caller needs to report a phase's GPU cost.
+
+        TWO ENERGY FIGURES, AND THEY ARE NOT INTERCHANGEABLE
+        ----------------------------------------------------
+            gpu_energy_j          TOTAL, idle draw INCLUDED
+                                  "what did this cost the wall socket"
+            gpu_dynamic_energy_j  ABOVE idle
+                                  "what did the computation itself cost"
+
+        Both are reported, alongside `idle_power_w`, so a reader can reconstruct
+        either one and can see which baseline was used. An earlier version of this
+        docstring claimed the energy was idle-subtracted while only the POWER figure
+        was, which put two numbers on different bases in the same CSV row with
+        nothing saying so.
+
+        Which to use depends on the question:
+
+          * total scales with DURATION, so a framework that is twice as slow reports
+            twice the energy even at identical power draw -- that measures runtime a
+            second time, not efficiency
+          * dynamic isolates the work, but rests entirely on the idle baseline being
+            trustworthy; with no baseline measured it falls back to the total
+
+        `idle_power_w` is None when measure_idle_baseline() was never called, which
+        is also exactly when the two energy figures will be equal.
+        """
         gpu_energy_j = self.phase_energy_j(phase, elapsed_s)
         avg_power_w  = gpu_energy_j / elapsed_s if gpu_energy_j is not None else None
         return {
-            "gpu":             self.phase_summary(phase),
-            "gpu_energy_j":    gpu_energy_j,
-            "avg_power_w":     avg_power_w,
-            "dynamic_power_w": self.dynamic_power_w(avg_power_w) if avg_power_w is not None else None,
-            "gpu_diag":        self.runtime_diagnostics(),
+            "gpu":                   self.phase_summary(phase),
+            "gpu_energy_j":          gpu_energy_j,
+            "gpu_dynamic_energy_j":  self.phase_dynamic_energy_j(phase, elapsed_s),
+            "avg_power_w":           avg_power_w,
+            "dynamic_power_w":       self.dynamic_power_w(avg_power_w) if avg_power_w is not None else None,
+            "idle_power_w":          self.idle_power_w,
+            "gpu_diag":              self.runtime_diagnostics(),
         }
 
     def start(self) -> None:

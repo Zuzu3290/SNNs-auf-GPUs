@@ -8,7 +8,11 @@ import torch
 import numpy as np
 from skeleton import Settings
 from learning.training import aggregate_spike_output
-from learning.utilities import measure_dense_macs, compute_cv_isi
+from learning.utilities import (
+    compute_cv_isi, firing_window_seconds, measure_dense_macs,
+    spikes_per_neuron_per_inference,
+)
+from skeleton import WorkflowSettings
 from event_data_workflow.system_monitor import PipelineMonitor, monitor
 import matplotlib.pyplot as plt
 
@@ -109,8 +113,16 @@ class SNNTester:
         monitor.enter_phase("testing")
         self.model.eval_mode()
 
-        window_s = getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US', 15000) / 1e6
-        timesteps_cfg = getattr(self.cfg, 'TIMESTEPS', 25)
+        # None when the real per-sample duration is not knowable. Previously this read
+        # `TEMPORAL_SLICE_DURATION_US`, which is defined nowhere -- the real name has no
+        # `_US` -- so getattr silently returned its 15000 default and every Hz figure
+        # below was computed against a fixed 15 ms window. With n_time_bins framing a
+        # sample spans the whole recording (~300 ms on N-MNIST), so the numbers were
+        # roughly 20x too high. See utilities.firing_window_seconds.
+        window_s = firing_window_seconds(self.cfg, WorkflowSettings(config=self.cfg.config))
+        # T is read from the DATA below, per batch. It used to come from a
+        # `cfg.TIMESTEPS` that is also defined nowhere, so it was always the 25 in the
+        # getattr default regardless of framing.n_time_bins.
 
         # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4
         probe_data, _ = next(iter(self.test_loader))
@@ -173,9 +185,14 @@ class SNNTester:
         self.pipeline_monitor.stop()
         energy_report   = self.pipeline_monitor.phase_energy_report("test_run", t_run_elapsed)
         gpu             = energy_report["gpu"]
-        gpu_energy_j    = energy_report["gpu_energy_j"]
-        avg_power_w     = energy_report["avg_power_w"]
-        dynamic_power_w = energy_report["dynamic_power_w"]
+        # TOTAL includes idle draw and scales with runtime; DYNAMIC is above idle and
+        # isolates the work. See PipelineMonitor.phase_energy_report for which answers
+        # which question -- they are not interchangeable.
+        gpu_energy_j         = energy_report["gpu_energy_j"]
+        gpu_dynamic_energy_j = energy_report["gpu_dynamic_energy_j"]
+        avg_power_w          = energy_report["avg_power_w"]
+        dynamic_power_w      = energy_report["dynamic_power_w"]
+        idle_power_w         = energy_report["idle_power_w"]
         gpu_diag        = energy_report["gpu_diag"]
         credit_assignment = self.model.credit_assignment()
 
@@ -195,6 +212,10 @@ class SNNTester:
         total_samples            = 0
         total_energy_pj          = 0.0
         total_synops_pj          = 0.0
+        # Accumulated from each batch's real T and B. The average rate used to divide
+        # by (n_batches x 25 x num_classes) -- a hardcoded 25 timesteps, and no batch
+        # dimension at all -- so it was wrong by a factor of roughly (T/25) x B.
+        total_possible_spikes    = 0
         per_sample_latencies_ms: list[float] = []
 
         for rec, latency_ms in zip(raw_batch_records, fwd_latencies_ms):
@@ -207,7 +228,10 @@ class SNNTester:
             possible_spikes = T * B * self.num_classes
             spike_rate      = batch_spikes / possible_spikes if possible_spikes > 0 else 0.0
             energy_pj       = batch_spikes * ENERGY_PER_SPIKE_PJ
-            firing_rate_hz  = spike_rate * T / window_s if window_s > 0 else 0.0
+            # Time-unit free, always valid.
+            spikes_per_inference = spikes_per_neuron_per_inference(spike_rate, T)
+            # None when the real per-sample duration is not knowable.
+            firing_rate_hz  = (spikes_per_inference / window_s) if window_s else None
 
             total_spikes       += batch_spikes
             total_input_spikes += batch_input_spikes
@@ -215,6 +239,7 @@ class SNNTester:
             total_samples      += B
             total_energy_pj    += energy_pj
             total_synops_pj    += batch_synops_pj
+            total_possible_spikes += possible_spikes
             # Per-sample latency isn't individually timed — only per-batch is —
             # so this repeats the batch's per-sample average once per sample.
             # Percentiles below are an approximation at batch-timing granularity,
@@ -231,7 +256,9 @@ class SNNTester:
                 "framework_ratio":       round(batch_input_spikes / batch_spikes, 4) if batch_spikes > 0 else None,
                 "possible_spikes":       possible_spikes,
                 "spike_rate":            round(spike_rate, 4),
-                "firing_rate_hz":        round(firing_rate_hz, 2),
+                "spikes_per_neuron_per_inference": round(spikes_per_inference, 4),
+                "firing_rate_hz":        (round(firing_rate_hz, 2)
+                                          if firing_rate_hz is not None else None),
                 "latency_ms":            round(latency_ms, 3),
                 "latency_per_sample_ms": round(latency_ms / B, 3),
                 "energy_pJ":             round(energy_pj, 2),
@@ -261,8 +288,14 @@ class SNNTester:
         # encoding/neuron dynamics compress more raw input activity into each output
         # spike; lower = the network stays closer to 1:1 with what it was shown.
         framework_ratio        = total_input_spikes / total_spikes if total_spikes > 0 else None
-        avg_spike_rate         = total_spikes / (len(self.batch_log) * timesteps_cfg * self.num_classes) if self.batch_log else 0.0
-        avg_firing_rate_hz     = avg_spike_rate * timesteps_cfg / window_s if window_s > 0 else 0.0
+        # Divided by the REAL total slots seen -- sum of (T x B x num_classes) over the
+        # batches actually run. This used to divide by (n_batches x 25 x num_classes):
+        # a hardcoded 25 timesteps regardless of framing, and no batch dimension at all.
+        avg_spike_rate         = (total_spikes / total_possible_spikes) if total_possible_spikes else 0.0
+        mean_timesteps         = (sum(r["timesteps"] for r in self.batch_log) / len(self.batch_log)
+                                  if self.batch_log else 0)
+        avg_spikes_per_inference = spikes_per_neuron_per_inference(avg_spike_rate, mean_timesteps)
+        avg_firing_rate_hz     = (avg_spikes_per_inference / window_s) if window_s else None
         energy_per_sample_pj   = total_energy_pj / total_samples if total_samples > 0 else 0.0
         synops_energy_per_sample_pj = total_synops_pj / total_samples if total_samples > 0 else 0.0
         class_metrics          = self.class_metrics(cm)
@@ -279,7 +312,12 @@ class SNNTester:
         print(f"  • Total Input Activity    : {total_input_spikes:,.0f}")
         print(f"  • Avg Input / Sample      : {avg_input_spikes_per_sample:.2f}")
         print(f"  • Framework Ratio (in/out): {framework_ratio:.3f}" if framework_ratio is not None else "  • Framework Ratio (in/out): N/A (zero output spikes)")
-        print(f"  • Avg Firing Rate         : {avg_firing_rate_hz:.2f} Hz")
+        print(f"  • Avg Spikes/neuron       : {avg_spikes_per_inference:.4f} per inference  (rate x T)")
+        if avg_firing_rate_hz is not None:
+            print(f"  • Avg Firing Rate         : {avg_firing_rate_hz:.2f} Hz  (over a {window_s * 1000:.1f} ms sample)")
+        else:
+            print("  • Avg Firing Rate         : n/a -- real per-sample duration unknown. "
+                  "Set framing.sample_duration_us to get Hz.")
         print(f"  • CV_ISI (network-wide)   : {cv_isi_mean:.3f}  (last batch)")
         print(f"  • Avg Batch Latency       : {avg_latency_ms:.2f} ms")
         print(f"  • Avg Latency / Sample    : {avg_latency_per_sample:.3f} ms")
@@ -291,9 +329,13 @@ class SNNTester:
         print(f"  • Energy / Sample         : {energy_per_sample_pj:.2f} pJ")
         print(f"  • SynOps Energy Estimate  : {total_synops_pj:.1f} pJ  (per-layer, dense-MAC-weighted)")
         print(f"  • SynOps Energy / Sample  : {synops_energy_per_sample_pj:.2f} pJ")
-        print(f"  • GPU Energy (actual)     : {gpu_energy_j * 1e3:.2f} mJ")
-        print(f"  • Mean GPU Power (actual) : {avg_power_w:.1f} W")
-        print(f"  • Mean Dynamic Power      : {dynamic_power_w:.1f} W  (idle baseline {self.pipeline_monitor.idle_power_w:.1f} W subtracted)")
+        print(f"  • GPU Energy (total)      : {gpu_energy_j * 1e3:.2f} mJ  (idle draw INCLUDED)")
+        print(f"  • Mean GPU Power          : {avg_power_w:.1f} W")
+        if idle_power_w is not None:
+            print(f"  • GPU Energy (dynamic)    : {gpu_dynamic_energy_j * 1e3:.2f} mJ  "
+                  f"({dynamic_power_w:.1f} W above a {idle_power_w:.1f} W idle baseline)")
+        else:
+            print("  • GPU Energy (dynamic)    : not available -- no idle baseline measured")
         print(f"  • Peak GPU Memory        : {gpu['gpu_mem_peak_gb']} GB / {self.pipeline_monitor.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
         print(f"  • GPU Utilization         : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
         if gpu.get("gpu_idle_episodes", 0) > 0:
@@ -325,6 +367,7 @@ class SNNTester:
             "avg_input_spikes_per_sample": avg_input_spikes_per_sample,
             "framework_ratio":           framework_ratio,
             "avg_spikes_per_sample":     avg_spikes_per_sample,
+            "avg_spikes_per_neuron_per_inference": avg_spikes_per_inference,
             "avg_firing_rate_hz":        avg_firing_rate_hz,
             "cv_isi_mean":               cv_isi_mean,
             "avg_latency_ms":            avg_latency_ms,
@@ -337,9 +380,12 @@ class SNNTester:
             "energy_per_sample_pj":      energy_per_sample_pj,
             "total_synops_energy_pj":    total_synops_pj,
             "synops_energy_per_sample_pj": synops_energy_per_sample_pj,
-            "gpu_energy_j":              gpu_energy_j,
+            # Named so a CSV reader cannot mistake one basis for the other.
+            "gpu_energy_j_total":        gpu_energy_j,
+            "gpu_energy_j_dynamic":      gpu_dynamic_energy_j,
             "avg_power_w":               avg_power_w,
             "dynamic_power_w":           dynamic_power_w,
+            "idle_power_w":              idle_power_w,
             "gpu_mem_peak_gb":           gpu.get("gpu_mem_peak_gb") if gpu else None,
             "gpu_util_avg_pct":          gpu.get("gpu_util_avg_pct") if gpu else None,
             "max_memory_reserved_gb":    gpu_diag.get("max_memory_reserved_gb"),

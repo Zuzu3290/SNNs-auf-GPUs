@@ -31,6 +31,7 @@ SUITES = [
     "unit_pipeline_integration.py",
     "unit_cli_config.py",
     "unit_seeding.py",
+    "unit_training_metrics.py",
     "unit_entrypoints.py",
 ]
 
