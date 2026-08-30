@@ -82,16 +82,11 @@ replicated what tonic already provides natively. This has been replaced entirely
 with tonic's built-in machinery:
 
     from tonic import SlicedDataset
-    from tonic.slicers import SliceByTime, SliceByEventCount
+    from tonic.slicers import SliceByTime
 
 SliceByTime(time_window=N_microseconds)
-    Cuts each recording into windows of fixed duration. Good when recordings
-    have consistent length and temporal consistency matters (e.g. RNNs).
-
-SliceByEventCount(event_count=N)
-    Cuts each recording into windows of fixed event count regardless of time.
-    Good when activity density varies across recordings and spatial consistency
-    matters more than temporal consistency (e.g. CNNs).
+    Cuts each recording into windows of fixed duration. This is the only
+    slicing strategy the pipeline uses.
 
 SlicedDataset builds a slice index (start/end positions per recording) once at
 construction and stores it as HDF5 at metadata_path. Subsequent runs load the
@@ -102,15 +97,40 @@ The pipeline passes:
     metadata/test/slice_metadata.h5   — for the test split
 
 AdaptiveTemporalSlicer (event_data_workflow/temporal_slicer.py) has since been
-removed entirely — nothing in the codebase references it any more. Its
-successor is calibrate_events_per_slice() (event_data_workflow/data_pipeline.py,
-Case A of Case_Study_Evaluation_Report.pdf): it samples recordings, measures
-their event-count distribution, and derives an events_per_slice value for
-SliceByEventCount instead of a guessed constant. It's the project's only
-remaining custom slicing code, and is opt-in via
-configuration/data_workflow.yaml's temporal_slicing.calibrate_events_per_slice
-(false by default — timing-window slicing, SliceByTime, remains the default
-method either way).
+removed entirely — nothing in the codebase references it any more.
+
+tonic.slicers.SliceByEventCount and the calibrate_events_per_slice() helper
+that picked its event count (formerly Case A of Case_Study_Evaluation_Report.pdf)
+were removed outright, not kept as an opt-in. Event-count slicing gives each
+slice a variable, scene-dependent real duration; combined with this project's
+n_time_bins binning mode (configuration/data_workflow.yaml, "recommended for
+Conv-SNN"), which splits each sample's own duration into a fixed number of
+equal-time bins, that means one time-bin index maps to a different real dt on
+every sample — the leaky-integrate time constants downstream are defined
+against a physical time unit that would no longer be consistent across the
+dataset. SliceByTime doesn't have this problem: every slice has the same real
+duration, so n_time_bins binning yields the same dt for every sample. There was
+no case where the removed path was the better fit for this pipeline, so it's
+gone rather than disabled.
+
+CONFIG LAYOUT — data_workflow.yaml
+-----------------------------------
+Two separate top-level blocks, deliberately not nested inside one another:
+
+    temporal:   optional. Splits ONE recording into several samples (SliceByTime
+                above). enabled: false by default -- everything below runs
+                whether or not this is on.
+    binning:    always runs. Turns ONE sample (a whole recording, or one slice
+                if `temporal` is on) into its T frames (tonic ToFrame). Its
+                `mode` key is `n_time_bins` or `time_window`, same two values
+                ToFrame itself takes -- these are kept as-is, not renamed.
+
+They used to be named `framing:`/`temporal_slicing:`, with `temporal_slicing`
+also holding its own `slice_duration_us` at a value that happened to equal
+`framing.time_window_ms` (both 15) — easy to misread as the same setting
+governing the same thing. They don't: one multiplies dataset samples, the
+other fixes one sample's frame count/duration, and neither depends on the
+other being enabled.
 
 
 CACHING SYSTEM — AdaptiveCacheController

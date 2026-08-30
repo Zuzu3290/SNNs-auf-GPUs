@@ -171,7 +171,7 @@ def parse_args():
                         help="compare every framework instead of inspecting one")
     parser.add_argument("--batch", type=int, default=4, help="dummy batch size")
     parser.add_argument("--timesteps", type=int, default=None,
-                        help="override T for the forward pass (default: framing.n_time_bins)")
+                        help="override T for the forward pass (default: binning.n_time_bins)")
     return parser.parse_args()
 
 

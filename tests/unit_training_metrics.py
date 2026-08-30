@@ -46,45 +46,35 @@ def settings_pair(overrides: dict):
 def test_window_is_none_when_not_knowable() -> None:
     """n_time_bins divides a recording of unknown length. Withholding Hz is the point:
     the previous code invented 15 ms and published figures ~20x too high."""
-    cfg, wf = settings_pair({"framing": {"mode": "n_time_bins", "sample_duration_us": None}})
+    cfg, wf = settings_pair({"binning": {"mode": "n_time_bins", "sample_duration_us": None}})
     suite.check("n_time_bins with no stated duration gives None",
                 firing_window_seconds(cfg, wf) is None, str(firing_window_seconds(cfg, wf)))
 
 
 def test_window_from_a_stated_sample_duration() -> None:
-    cfg, wf = settings_pair({"framing": {"sample_duration_us": 300000}})
+    cfg, wf = settings_pair({"binning": {"sample_duration_us": 300000}})
     suite.check("stated duration is used", firing_window_seconds(cfg, wf) == 0.3,
                 str(firing_window_seconds(cfg, wf)))
 
 
 def test_window_derived_from_time_window_framing() -> None:
-    """time_window framing fixes each frame's duration, so T frames span T x that."""
-    cfg, wf = settings_pair({"framing": {"mode": "time_window", "time_window_ms": 15.0,
+    """time_window binning fixes each frame's duration, so T frames span T x that."""
+    cfg, wf = settings_pair({"binning": {"mode": "time_window", "time_window_ms": 15.0,
                                          "n_time_bins": 16, "sample_duration_us": None}})
-    suite.check("time_window framing derives T x window",
+    suite.check("time_window binning derives T x window",
                 abs(firing_window_seconds(cfg, wf) - 0.24) < 1e-12,
                 str(firing_window_seconds(cfg, wf)))
 
 
 def test_window_from_temporal_slicing_by_time() -> None:
-    cfg, wf = settings_pair({"temporal_slicing": {"enabled": True, "events_per_slice": None,
-                                                  "calibrate_events_per_slice": False,
-                                                  "slice_duration_us": 15000},
-                             "framing": {"sample_duration_us": None}})
+    cfg, wf = settings_pair({"temporal": {"enabled": True, "slice_duration_us": 15000},
+                             "binning": {"sample_duration_us": None}})
     suite.check("slicing by time uses the slice duration",
                 firing_window_seconds(cfg, wf) == 0.015, str(firing_window_seconds(cfg, wf)))
 
 
-def test_window_is_none_when_slicing_by_event_count() -> None:
-    """A fixed number of events spans a variable, unknown amount of time."""
-    cfg, wf = settings_pair({"temporal_slicing": {"enabled": True, "events_per_slice": 500},
-                             "framing": {"sample_duration_us": None}})
-    suite.check("slicing by event count gives None",
-                firing_window_seconds(cfg, wf) is None, str(firing_window_seconds(cfg, wf)))
-
-
 def test_stated_duration_wins_over_derivation() -> None:
-    cfg, wf = settings_pair({"framing": {"mode": "time_window", "time_window_ms": 15.0,
+    cfg, wf = settings_pair({"binning": {"mode": "time_window", "time_window_ms": 15.0,
                                          "n_time_bins": 16, "sample_duration_us": 500000}})
     suite.check("an explicitly stated duration takes precedence",
                 firing_window_seconds(cfg, wf) == 0.5, str(firing_window_seconds(cfg, wf)))
@@ -394,7 +384,6 @@ def main() -> int:
         test_window_from_a_stated_sample_duration,
         test_window_derived_from_time_window_framing,
         test_window_from_temporal_slicing_by_time,
-        test_window_is_none_when_slicing_by_event_count,
         test_stated_duration_wins_over_derivation,
         test_the_attribute_the_old_code_read_does_not_exist,
         test_spikes_per_inference_is_time_unit_free,

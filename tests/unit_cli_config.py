@@ -72,10 +72,10 @@ def test_base_loads_and_covers_every_section() -> None:
     # No "architecture": that block held the legacy MLP params (input_size,
     # hidden_size, hidden_layers, leak, override, network_struct, simulator), which
     # described a network this pipeline no longer builds. Its one live key, the slice
-    # duration, moved to temporal_slicing in data_workflow.yaml.
+    # duration, moved to temporal in data_workflow.yaml.
     for section in ["training", "output", "dataset",
                     "convolution", "neuron_types", "neuron",
-                    "framing", "temporal_slicing", "augmentation", "cache",
+                    "binning", "temporal", "augmentation", "cache",
                     "resource_policy"]:
         suite.check(f"base config has '{section}'", section in base)
 
@@ -120,7 +120,7 @@ def test_overlay_overrides_only_what_it_names() -> None:
                     merged["neuron"]["norse"] == base["neuron"]["norse"])
         suite.check("sections in the OTHER base files survive",
                     merged["convolution"] == base["convolution"])
-        suite.check("data_workflow sections survive", merged["framing"] == base["framing"])
+        suite.check("data_workflow sections survive", merged["binning"] == base["binning"])
 
 
 def test_overlay_reaches_every_base_file() -> None:
@@ -129,7 +129,7 @@ def test_overlay_reaches_every_base_file() -> None:
         overlay = write_overlay(Path(tmp), "ov.yaml",
                                 "training:\n  epochs: 7\n"       # SNN_module.yaml
                                 "convolution:\n  conv1_out: 16\n"  # network_architecture.yaml
-                                "framing:\n  n_time_bins: 25\n")   # data_workflow.yaml
+                                "binning:\n  n_time_bins: 25\n")   # data_workflow.yaml
         cfg = Settings(config=load_config(overlay))
         wf = WorkflowSettings(config=load_config(overlay))
         suite.check("overlay reaches SNN_module.yaml", cfg.EPOCHS == 7, str(cfg.EPOCHS))

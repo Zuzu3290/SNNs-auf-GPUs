@@ -34,18 +34,16 @@ fully proven, just no-longer-immediately-broken.
 
 ---
 
-## `event_data_workflow/data_pipeline.py` — `calibrate_events_per_slice()`
+## `event_data_workflow/data_pipeline.py` — `calibrate_events_per_slice()` (removed)
 
-Case A from `Case_Study_Evaluation_Report.md`. Also not on the live default
-path (`temporal_slicing.enabled: false` in `configuration/data_workflow.yaml`) —
-inert unless someone opts in.
-
-| Constant | Value | Where it came from | Open question |
-|---|---|---|---|
-| `target_bins_per_recording` | `8` | Picked as a round-number target for "reasonable temporal subdivision" | Confirmed by testing to *not* hit its own target — the 10th-percentile anchor overshoots to a mean of ~17 on N-MNIST. The target itself was never re-tuned after that was found; the report notes it as a known miss, not a fixed one |
-| `min_events_per_slice` | `100` | Floor to avoid degenerate tiny bins | Not derived from anything — a round number |
-| `sample_recordings` | `200` | Sample size for the event-count distribution probe | Not swept against smaller/larger sample sizes for stability of the resulting calibration |
-| percentile anchor | `10th` (hardcoded inline, not a parameter) | Chosen deliberately conservative (a below-typical recording should still clear the target) | This is the direct cause of the 8→17 target miss above — a straightforward, testable question of whether a different percentile (e.g. 25th) would hit the stated target more closely |
+Was Case A from `Case_Study_Evaluation_Report.md`. Removed entirely, not kept
+as an opt-in: `SliceByEventCount` gives each slice a variable, scene-dependent
+duration, which is inconsistent with this project's `n_time_bins` framing
+(fixed number of equal-time bins per sample) — the two combined mean a
+time-bin index maps to a different real dt on every sample, which conflicts
+with the fixed time constants the SNN dynamics are defined against.
+`SliceByTime` doesn't have this problem and remains the only slicing strategy.
+See `docs/Event-Based_camera.md`.
 
 ---
 

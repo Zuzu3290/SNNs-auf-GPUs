@@ -12,7 +12,7 @@ class WorkflowSettings:
 
         Both omitted loads the three base files, matching the previous behaviour of
         reading data_workflow.yaml directly. Taking the merged dict is what lets an
-        experiment overlay override framing, slicing, cache or resource_policy the same
+        experiment overlay override binning, slicing, cache or resource_policy the same
         way it overrides anything else -- previously this class read its own file, so
         an overlay could not reach it.
         """
@@ -22,31 +22,22 @@ class WorkflowSettings:
             raise ValueError("pass either `config` or `overlay`, not both")
         config = config if config is not None else load_config(overlay)
 
-        framing = config.get("framing", {})
-        self.FRAME_MODE     = framing.get("mode", "time_window")
-        self.N_TIME_BINS    = int(framing.get("n_time_bins", 16))
-        self.TIME_WINDOW_US = int(framing.get("time_window_ms", 15.0) * 1000)
+        binning = config.get("binning", {})
+        self.FRAME_MODE     = binning.get("mode", "time_window")
+        self.N_TIME_BINS    = int(binning.get("n_time_bins", 16))
+        self.TIME_WINDOW_US = int(binning.get("time_window_ms", 15.0) * 1000)
         # null = "not known"; Hz is then reported as unavailable rather than guessed.
-        sample_duration = framing.get("sample_duration_us", None)
+        sample_duration = binning.get("sample_duration_us", None)
         # Part of the cache identity: it changes which events exist. null disables.
-        _denoise = framing.get("denoise_filter_time_us", 10000)
+        _denoise = binning.get("denoise_filter_time_us", 10000)
         self.DENOISE_FILTER_TIME_US = None if _denoise is None else int(_denoise)
         # Applied AFTER the cache, so toggling it needs no rebuild and it is NOT part of
         # the cache identity.
-        self.BINARIZE               = bool(framing.get("binarize", False))
+        self.BINARIZE               = bool(binning.get("binarize", False))
         self.SAMPLE_DURATION_US = int(sample_duration) if sample_duration is not None else None
 
-        slicing = config.get("temporal_slicing", {})
+        slicing = config.get("temporal", {})
         self.TEMPORAL_SLICING_ENABLED = bool(slicing.get("enabled", False))
-        # null (default) -> SliceByTime, using SLICE_DURATION_US below. An int here
-        # switches to SliceByEventCount instead. See CALIBRATE_EVENTS_PER_SLICE for
-        # the third strategy.
-        events_per_slice = slicing.get("events_per_slice", None)
-        self.EVENTS_PER_SLICE = int(events_per_slice) if events_per_slice is not None else None
-        # true -> SliceByEventCount with a value calibrated from the dataset's
-        # own recordings (Case A) instead of a guessed constant; overrides
-        # EVENTS_PER_SLICE above whenever both are set.
-        self.CALIBRATE_EVENTS_PER_SLICE = bool(slicing.get("calibrate_events_per_slice", False))
         # Slice length in microseconds, used when slicing by TIME. Deliberately not
         # called TEMPORAL_SLICE_DURATION_US: that spelling was read by code while never
         # existing, so getattr silently supplied 15 ms and every Hz figure came out ~20x

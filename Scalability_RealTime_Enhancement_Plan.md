@@ -99,12 +99,14 @@ That was false and has been discarded. The real literature, checked just
 now, is public, real, and directly on-topic:
 
 **Tier A — tactical, minimal architecture change, works within existing BPTT:**
-- **Gradient checkpointing** (Chen et al. 2016, "Training Deep Nets with
-  Sublinear Memory Cost") — don't store most intermediate activations;
-  recompute them during backward instead. PyTorch-native
-  (`torch.utils.checkpoint`). Trades backward-pass compute time for memory.
-  Not yet implemented anywhere in this codebase (verified: no
-  `torch.utils.checkpoint` usage in `learning/training.py`).
+tried and closed. Gradient checkpointing (Chen et al. 2016, "Training Deep
+Nets with Sublinear Memory Cost", `torch.utils.checkpoint`) was implemented
+and tested against SNNTorch: `init_hidden=True` membrane state is a module
+side effect, not a function argument, which breaks `torch.utils.checkpoint`'s
+recompute assumption — confirmed two independent ways via PyTorch's own error
+diagnostics, not a codebase bug. Dropped for SNNTorch; Norse's explicit
+state-threading was left as an untested lead, not built. No remaining Tier A
+option is planned.
 
 **Tier B — architectural, replaces the learning rule itself, constant memory
 regardless of timestep count:**
@@ -115,15 +117,14 @@ regardless of timestep count:**
 - **FPTT (Forward Propagation Through Time)** — reports 4-5x lower memory
   and 3-4x faster training than BPTT in its own published results.
 
-Tier A is a bounded engineering task on top of the current design. Tier B is
-a genuine research-grade change — it doesn't extend the current BPTT+SG
-training loop, it replaces the credit-assignment method entirely, and would
-need per-framework compatibility investigation (SNNTorch/Norse/SpikingJelly/
-Sinabs each have different internal state handling, as the existing
-CUDA-graph/`Leaky`-neuron incompatibility already found in this project
-shows). **Scope Tier B as a stretch goal for later, not this semester's
-committed deliverable** — directly in line with the professor's own caution
-about not conflicting with thesis timing.
+Tier B is a genuine research-grade change — it doesn't extend the current
+BPTT+SG training loop, it replaces the credit-assignment method entirely, and
+would need per-framework compatibility investigation (SNNTorch/Norse/
+SpikingJelly/Sinabs each have different internal state handling, as the
+`Leaky`-neuron state incompatibility already found in this project shows).
+**Scope Tier B as a stretch goal for later, not this semester's committed
+deliverable** — directly in line with the professor's own caution about not
+conflicting with thesis timing.
 
 ## 5. Where this plugs into the existing architecture
 
@@ -137,29 +138,16 @@ trainer/tester code needing to know which strategy backs any given model —
 the extension point already exists, it's just only ever been populated with
 one value so far.
 
-## 6. Test-before-code strategy (as requested — test space before production code)
-
-Before touching `learning/training.py`:
-1. Build a small standalone harness (same shape as
-   `diagnostics/verify_dataset_load.py`) that runs one backend, one dataset,
-   at increasing sensor resolution, logging peak VRAM and final-epoch
-   accuracy for: (a) current plain BPTT, (b) BPTT + gradient checkpointing.
-2. Confirm accuracy is unchanged (checkpointing must be numerically
-   equivalent, just recomputed — a real risk to verify, not assume) and
-   measure the actual memory reduction and backward-pass time cost.
-3. Only after that comparison exists, wire the verified-working version into
-   `training.py` for real.
-
-## 7. Phased implementation plan
+## 6. Phased implementation plan
 
 | Phase | Scope | Estimated effort | Status |
 |---|---|---|---|
 | 1 | Set `batch_size`/`grad_accum_steps` for N-Caltech101 in the registry, verify via a real training run | Hours | **DONE** (2026-08-18) — §3 above |
-| 2 | Build the Tier-A test harness (§6), implement gradient checkpointing, verify per-backend (start with one backend, expand once proven) | 1-2 days | **DONE for SNNTorch — DROPPED.** `Case_Study_Evaluation_Report.md` Case B: architectural incompatibility (`init_hidden=True` state breaks `torch.utils.checkpoint`'s recompute assumption), confirmed two independent ways via PyTorch's own error diagnostics. Norse left as an untested lead (explicit state-threading, the natural next candidate) — not yet built. |
+| 2 | Tier A (gradient checkpointing) | — | **CLOSED — dropped.** See §4. |
 | 3 (stretch, not committed) | Investigate OTTT/e-prop/FPTT adoption feasibility against this project's 4 backends | Multi-week research scope — separate from this semester's timeline | Not started, still out of scope |
-| 4 (new) | Network dimensionality sweep — capacity vs. criticality/fragility trade-off (§9) | Multi-week, follow-on to Phase 1-2 instrumentation | Not started |
+| 4 (new) | Network dimensionality sweep — capacity vs. criticality/fragility trade-off (§8) | Multi-week, follow-on to Phase 1-2 instrumentation | Not started |
 
-## 8. Confirming the two claims raised in discussion
+## 7. Confirming the two claims raised in discussion
 
 **"Someone who wants to bring a new dataset can easily configure it" — true,
 with a calibrated caveat.** Verified: `WindowedRecordingDataset` is a real,
@@ -187,7 +175,7 @@ for those, since PyTorch's autograd can't trace through XLA/TF's graph. So:
 true for the forward/training path, with one named, documented limitation
 for adversarial evaluation specifically.
 
-## 9. Network dimensionality — capacity/fragility trade-off (new objective)
+## 8. Network dimensionality — capacity/fragility trade-off (new objective)
 
 > Network dimensionaility implies the capabilities of the network and its exclusive structure integirty on soliving complex problems. SNNs presnet the feature of being capable of extracting sptail and temporal features, from event-driven applictaions. Modelling a larger network to evalaute what makes SNNs to extrcat the highest amount of features and retain emergence behaviour under a growing arhcietcture. Dissecting the bottleneck of a small network and the structural fragility of a large network that is shaped to resolve SNN complexity on a varing setup. Elavating the capabiltes of each structure and its purpose relavent to event-driven applications and inclusive of hardware constriants, mapping the trade-off curve, pinpointing the exact transition point where a small network's information bottleneck yields to a large network's criticality and structural fragility.
 
@@ -204,7 +192,7 @@ for adversarial evaluation specifically.
 3. Log per config: task accuracy, spike-train MI (or a cheaper proxy if MI estimation is too costly), branching-ratio/avalanche stat, peak VRAM, step time, and fragility under a fixed perturbation.
 4. Plot the trade-off curve; the "transition point" is read off where the fragility/criticality metric crosses the point where the bottleneck metric stops improving.
 
-This plugs into the phased plan as **Phase 4** in §7, added without altering the status or scope of Phases 1-3.
+This plugs into the phased plan as **Phase 4** in §6, added without altering the status or scope of Phases 1-3.
 
 ## Presentation note
 

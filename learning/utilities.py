@@ -64,18 +64,17 @@ def firing_window_seconds(cfg, wf) -> float | None:
     Returning None rather than a guess is the point. This previously read a config
     attribute that does not exist (`TEMPORAL_SLICE_DURATION_US` -- the real name has no
     `_US`), so `getattr` silently supplied its 15000 default and EVERY reported Hz figure
-    was computed against a fixed 15 ms window. With `n_time_bins` framing a sample spans
+    was computed against a fixed 15 ms window. With `n_time_bins` binning a sample spans
     the whole recording -- roughly 300 ms for N-MNIST -- so the published numbers were
     about 20x too high. It was a constant factor across frameworks, so relative
     comparisons survived; the absolute values did not.
 
     Three cases are genuinely derivable, and one is not:
 
-      temporal slicing by TIME   one slice = wf.SLICE_DURATION_US microseconds
-      time_window framing        T frames x time_window_ms each
-      framing.sample_duration_us stated explicitly by whoever knows the dataset
-      otherwise                  None -- n_time_bins divides a recording of unknown
-                                 length, and slicing by EVENT COUNT spans no fixed time
+      temporal slicing by TIME    one slice = wf.SLICE_DURATION_US microseconds
+      time_window binning         T frames x time_window_ms each
+      binning.sample_duration_us  stated explicitly by whoever knows the dataset
+      otherwise                   None -- n_time_bins divides a recording of unknown length
 
     When this returns None, report `spikes_per_neuron_per_inference` (rate x T) instead:
     it needs no time unit, cannot be wrong, and is the unit the SNN literature uses.
@@ -85,9 +84,6 @@ def firing_window_seconds(cfg, wf) -> float | None:
         return stated / 1e6
 
     if getattr(wf, "TEMPORAL_SLICING_ENABLED", False):
-        # Slicing by event count covers a variable, unknown span of time.
-        if getattr(wf, "EVENTS_PER_SLICE", None) or getattr(wf, "CALIBRATE_EVENTS_PER_SLICE", False):
-            return None
         duration_us = getattr(wf, "SLICE_DURATION_US", None)
         return duration_us / 1e6 if duration_us else None
 

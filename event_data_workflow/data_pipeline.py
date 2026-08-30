@@ -14,7 +14,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
 logger = logging.getLogger(__name__)
-import numpy as np
 import psutil
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -137,40 +136,17 @@ def create_sliced_dataset(
     dataset: Dataset,
     slice_duration_ms: float = 15.0,
     overlap_ms: float = 0.0,
-    events_per_slice: Optional[int] = None,
     transform=None,
     metadata_path: Optional[str] = None,
 ) -> tonic.SlicedDataset:
     """Wrap dataset with tonic's SlicedDataset. metadata_path, if given,
     stores the slice index as HDF5 so it isn't rebuilt on later runs."""
-    if events_per_slice is not None:
-        slicer = slicers.SliceByEventCount(event_count=events_per_slice)
-    else:
-        slicer = slicers.SliceByTime(
-            time_window=slice_duration_ms * 1000,
-            overlap=overlap_ms * 1000,
-        )
+    slicer = slicers.SliceByTime(
+        time_window=slice_duration_ms * 1000,
+        overlap=overlap_ms * 1000,
+    )
 
     return tonic.SlicedDataset(dataset, slicer=slicer, transform=transform, metadata_path=metadata_path)  # type: ignore[arg-type]
-
-
-def calibrate_events_per_slice(dataset: Dataset, target_bins_per_recording: int = 8,
-                                min_events_per_slice: int = 100, sample_recordings: int = 200) -> int:
-    """Picks events_per_slice for SliceByEventCount from this dataset's own
-    event-rate statistics, instead of a guessed constant.
-
-    Anchors on the 10th percentile of sampled per-recording event counts
-    (not the median), so a below-typical-length recording still clears
-    target_bins_per_recording slices. SliceByEventCount itself clamps
-    event_count = min(event_count, n_events), so a too-large constant
-    doesn't drop a short recording, it just returns one whole-recording
-    slice with no subdivision -- the failure mode this anchor avoids."""
-    sample_size = min(sample_recordings, len(dataset))
-    indices = torch.randperm(len(dataset))[:sample_size]
-    event_counts = [len(dataset[int(i)][0]) for i in indices]
-
-    anchor = int(np.percentile(event_counts, 10))
-    return max(min_events_per_slice, anchor // target_bins_per_recording)
 
 # Show progress bars for large downloads in bytes instead of raw item counts.
 orig_tqdm_init = t.tqdm.__init__
@@ -216,7 +192,7 @@ class PrefetchedLoader:
 class NeuromorphicEncoder:
     """Loads a dataset, caches it, and builds the train/test DataLoaders used by training."""
 
-    def __init__(self, cfg: DatasetAwareConfig, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None, events_per_slice: int | None = None, calibrate_events_per_slice: bool | None = None):
+    def __init__(self, cfg: DatasetAwareConfig, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None):
 
         self.cfg = cfg
         self.wf  = WorkflowSettings()
@@ -239,10 +215,6 @@ class NeuromorphicEncoder:
 
         self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else self.wf.TEMPORAL_SLICING_ENABLED
         self.slice_duration_ms = slice_duration_ms or (self.wf.SLICE_DURATION_US / 1000.0)
-        self.events_per_slice = events_per_slice if events_per_slice is not None else self.wf.EVENTS_PER_SLICE
-        self.calibrate_events_per_slice = (
-            calibrate_events_per_slice if calibrate_events_per_slice is not None else self.wf.CALIBRATE_EVENTS_PER_SLICE
-        )
         self.train_loader: PrefetchedLoader
         self.test_loader: PrefetchedLoader
         self.build()
@@ -391,23 +363,17 @@ class NeuromorphicEncoder:
 
         if self.use_temporal_slicing:
 
-            if self.calibrate_events_per_slice:
-                self.events_per_slice = calibrate_events_per_slice(raw_train)
-                logger.info(f"[PIPELINE] Case A calibration: events_per_slice={self.events_per_slice} (from raw_train)")
-
             # Cache raw recordings first — slicing needs the raw timestamps.
             cached_train = controller.determine_dataset_strategy(raw_train, split=f"{dataset_prefix}/train", num_workers=worker_estimate, manifest=self.cache_manifest)
             cached_test  = controller.determine_dataset_strategy(raw_test,  split=f"{dataset_prefix}/test", num_workers=worker_estimate, manifest=self.cache_manifest)
 
             metadata_dir = str(PROJECT_ROOT / "metadata" / dataset_prefix)
             train_data = create_sliced_dataset(cached_train,
-                slice_duration_ms=self.slice_duration_ms,
-                events_per_slice=self.events_per_slice, transform=train_tf,
+                slice_duration_ms=self.slice_duration_ms, transform=train_tf,
                 metadata_path=f"{metadata_dir}/train",
             )
             test_data = create_sliced_dataset(cached_test,
-                slice_duration_ms=self.slice_duration_ms,
-                events_per_slice=self.events_per_slice, transform=test_tf,
+                slice_duration_ms=self.slice_duration_ms, transform=test_tf,
                 metadata_path=f"{metadata_dir}/test",
             )
             logger.info(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")

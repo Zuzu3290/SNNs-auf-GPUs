@@ -1,4 +1,19 @@
-framing:
+# Optional: splits ONE recording into several independent samples (tonic
+# SliceByTime), before binning ever runs. Off by default -- each recording is
+# then one sample, and binning below runs on the whole thing.
+temporal:
+  enabled: true                # true | false
+
+  # Slice length in MICROSECONDS, used when slicing by time. Also what turns a spike
+  # rate into Hz (see utilities.firing_window_seconds). Moved here from
+  # SNN_module.yaml's architecture block, where it was separated from the rest of the
+  # slicing settings.
+  slice_duration_us: 15000
+
+# Always runs: turns ONE sample (one recording, or one slice above if temporal
+# slicing is on) into its T frames (tonic ToFrame). Independent of `temporal`
+# above -- it is not conditional on slicing being enabled.
+binning:
   mode: n_time_bins       # "n_time_bins" (fixed T per sample, no padding — recommended for Conv-SNN)
                           # "time_window" (variable T, different samples span different durations — for analysis)
   n_time_bins: 16
@@ -12,9 +27,9 @@ framing:
   # (rate x T), which needs no time unit, cannot be wrong, and is the unit the SNN
   # literature reports -- so nothing is lost by leaving this null.
   #
-  # It is only knowable per dataset: with `n_time_bins` framing a sample is cut into T
+  # It is only knowable per dataset: with `n_time_bins` binning a sample is cut into T
   # bins spanning the WHOLE recording, and recordings differ (N-MNIST is roughly
-  # 300000 us / 300 ms). With `time_window` framing it is derived automatically from
+  # 300000 us / 300 ms). With `time_window` binning it is derived automatically from
   # time_window_ms x T and this key is ignored. With temporal slicing enabled it is
   # derived from the slice duration.
   #
@@ -25,7 +40,7 @@ framing:
   # MICROSECONDS. Event cameras emit a lot of isolated noise events and removing them is
   # standard practice; the snnTorch/Tonic N-MNIST tutorial this architecture comes from
   # uses 10000. Lower filters more aggressively. null disables it.
-  # Runs BEFORE framing and changes which events exist, so it is part of the cache
+  # Runs BEFORE binning and changes which events exist, so it is part of the cache
   # identity -- changing it builds a separate, reusable cache.
   denoise_filter_time_us: 10000
 
@@ -45,18 +60,6 @@ framing:
   # because test gets no augmentation -- so the two splits stop meaning the same thing.
   # For a genuine 0/1 input: binarize true AND random_rotation_enabled false.
   binarize: false
-
-temporal_slicing:
-  enabled: false                # true | false
-
-  # Slice length in MICROSECONDS, used when slicing by time. Also what turns a spike
-  # rate into Hz (see utilities.firing_window_seconds). Moved here from
-  # SNN_module.yaml's architecture block, where it was separated from the rest of the
-  # slicing settings.
-  slice_duration_us: 15000
-
-  events_per_slice: null        # null = slice by time; a number = slice by event count
-  calibrate_events_per_slice: false   # true = derive the event count from the dataset
 
 # Train-only augmentation. Applied after ToFrame, on the dense frame — a
 # rotated frame interpolates, so spike counts on an augmented sample become

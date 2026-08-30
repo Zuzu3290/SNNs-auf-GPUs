@@ -29,11 +29,11 @@ dataset:
   name: N-MNIST
 
 # ---------------------------------------------------------------------------
-# Framing and recipe: pinned to match SNNs_2 Experiment 1, NOT part of ex2's
+# Binning and recipe: pinned to match SNNs_2 Experiment 1, NOT part of ex2's
 # question. This pipeline's base files differ from that reference run, so they are
 # stated here to keep ex2's numbers comparable with ex1's.
 # ---------------------------------------------------------------------------
-framing:
+binning:
   n_time_bins: 20               # base is 16; ex1 ran at 20. Changing T rebuilds the cache.
 
 training:

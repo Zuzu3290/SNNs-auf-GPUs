@@ -134,26 +134,22 @@ def cache_identity(wf, denoise_filter_time_us) -> tuple[str, dict]:
     only has to be unique and recognisable; what actually guarantees you never read
     16-bin frames when you asked for 20 is the manifest, checked on load.
 
-    Framing and denoising were previously absent from the cache path entirely -- it was
+    Binning and denoising were previously absent from the cache path entirely -- it was
     just <dataset>/<split> -- so changing n_time_bins reused frames built under the old
     setting. Measured on an earlier branch: after 16 -> 20 the cache still served
     (16, 2, 34, 34) samples while the config said 20. A stale-cache bug produces
     plausible-looking results from the wrong data, which is worse than a crash.
     """
     if wf.FRAME_MODE == "n_time_bins":
-        framing = {"mode": "n_time_bins", "n_time_bins": wf.N_TIME_BINS}
+        binning = {"mode": "n_time_bins", "n_time_bins": wf.N_TIME_BINS}
         hint = f"bins{wf.N_TIME_BINS}"
     else:
-        framing = {"mode": "time_window", "time_window_us": wf.TIME_WINDOW_US}
+        binning = {"mode": "time_window", "time_window_us": wf.TIME_WINDOW_US}
         hint = f"win{wf.TIME_WINDOW_US}"
 
-    identity = {"framing": framing, "denoise_filter_time_us": denoise_filter_time_us}
+    identity = {"binning": binning, "denoise_filter_time_us": denoise_filter_time_us}
     if wf.TEMPORAL_SLICING_ENABLED:
-        identity["slicing"] = {
-            "events_per_slice": wf.EVENTS_PER_SLICE,
-            "calibrate_events_per_slice": wf.CALIBRATE_EVENTS_PER_SLICE,
-            "slice_duration_us": (None if wf.EVENTS_PER_SLICE else wf.SLICE_DURATION_US),
-        }
+        identity["slicing"] = {"slice_duration_us": wf.SLICE_DURATION_US}
         hint += "_sliced"
 
     digest = hashlib.sha256(
