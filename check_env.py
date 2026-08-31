@@ -228,13 +228,18 @@ def norse_build() -> dict[str, str]:
     }
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Module level so tests can assert the advertised flag set matches HOW_TO_RUN.md."""
     parser = argparse.ArgumentParser(description=__doc__,
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--strict", action="store_true",
                         help="also exit non-zero when an installed version differs from "
                              "the pin in requirements.txt")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main() -> int:
+    args = parse_args()
 
     print("=" * 68)
     print("ENVIRONMENT")

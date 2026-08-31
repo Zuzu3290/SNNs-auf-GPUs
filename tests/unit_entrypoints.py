@@ -316,6 +316,9 @@ def test_each_script_advertises_exactly_the_flags_it_can_act_on() -> None:
         # mounted Drive on Colab) and formats. No cache_root -- it touches no dataset.
         # Builds all four, so no framework; the poisson pattern carries its own seed.
         "equivalence_check": {"config", "experiment", "results_root", "formats"},
+        # Reads the environment and requirements.txt only. No config, no experiment,
+        # no roots -- it writes nothing and knows nothing about a run.
+        "check_env": {"strict"},
     }
     for module_name, flags in expected.items():
         module = importlib.import_module(module_name)

@@ -28,6 +28,88 @@ runs unchanged on a laptop and on Colab.
 ---
 ---
 
+# Step 0 — check the environment first
+
+Run this once on every new machine — your laptop, a fresh Colab runtime, a colleague's
+GPU box — **before** spending time on a run.
+
+```bash
+python check_env.py
+```
+
+It prints the version of every dependency, the CPU and RAM, the GPU and whether NVML can
+read power from it, then a verdict comparing what is installed against the `==` pins in
+`requirements.txt`.
+
+```
+====================================================================
+VERDICT
+====================================================================
+OK: all packages import, and every pinned version matches requirements.txt
+```
+
+**Why this is not optional here.** This pipeline compares SNN *frameworks*. If Colab
+resolves `snntorch` to a different version than the laptop did, part of the difference
+between two runs is a difference between versions — and nothing in `runs.csv` says which
+part. So a drift is reported loudly:
+
+```
+version mismatches against requirements.txt:
+  snntorch             wanted 1.0.0        got 0.9.1  RESULT-CRITICAL
+```
+
+`RESULT-CRITICAL` marks the seven pins that decide the numbers: the four frameworks plus
+`torch`, `tonic` and `numpy`. The rest may drift without changing a result.
+
+### The same command, with every flag it accepts
+
+```bash
+python check_env.py --strict
+```
+
+| arg | possible values | default | what it does |
+|---|---|---|---|
+| `--strict` | flag | off | exit non-zero on a version **mismatch** too, not only on a missing package |
+| `-h`, `--help` | — | — | print this list |
+
+Exit codes, so it can gate a script or a notebook cell:
+
+| situation | plain | `--strict` |
+|---|---|---|
+| everything matches | `0` | `0` |
+| a package is missing | `1` | `1` |
+| all present, a version differs | `0` | `1` |
+
+Two lines in its output are worth reading beyond the verdict:
+
+- **`cpu_cores_physical`** — a Colab runtime with 1 physical core has been measured
+  holding GPU utilisation near 11%, the loader unable to keep up. A run in that state
+  times the data pipeline rather than the framework, so the script warns at ≤ 2 cores.
+- **`nvml_power_readable`** — if this says `NO`, the energy columns in `runs.csv` will be
+  empty on this machine. Better to know before the run than after it.
+
+`samna` is read from pip metadata and deliberately never imported: importing it makes
+sinabs try to install it from a private index. It is only needed to drive real Speck
+hardware, so `not installed (optional)` is the normal answer.
+
+## Installing from scratch
+
+```bash
+pip install torch==2.13.0 torchvision==0.28.0        # CPU
+# ...or, for CUDA 12.8:
+pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu128
+
+pip install -r requirements.txt
+python check_env.py
+```
+
+torch is installed first and separately because its build differs per machine.
+`requirements.txt` pins the **version** (`2.13.0`), not the wheel tag (`+cpu`, `+cu128`),
+so one file serves both; `check_env.py` compares the same way and ignores the tag.
+
+---
+---
+
 # Flow A — the original way, unchanged
 
 ## A1. Train and evaluate
@@ -153,7 +235,7 @@ session needs no display.
 python tests/run_all.py
 ```
 
-761 checks across 8 suites, CPU-only, no dataset, about 90 seconds. Exits non-zero if
+917 checks across 9 suites, CPU-only, no dataset, about a minute. Exits non-zero if
 anything fails, so it works as a pre-push gate.
 
 | arg | possible values | default | what it does |
@@ -220,16 +302,18 @@ otherwise leave the run on base values and the experiment quietly would not happ
 
 ## B2. Verify the config before spending GPU time
 
-Run these two first, in this order. Both are CPU-only and take seconds.
+Run these three first, in this order. All are CPU-only and take seconds.
 
 ```bash
+python check_env.py
 python check_network.py --config experiments/ex2/config.yaml --all
 python equivalence_check.py --config experiments/ex2/config.yaml --experiment ex2
 ```
 
-The first confirms all four frameworks start from **byte-identical weights** under one
-seed — if they do not, no accuracy comparison between them means anything. The second
-reports how far apart the four neurons actually are.
+The first proves this machine's library versions match the ones every other run used —
+see Step 0. The second confirms all four frameworks start from **byte-identical weights**
+under one seed; if they do not, no accuracy comparison between them means anything. The
+third reports how far apart the four neurons actually are.
 
 ## B3. Run the experiment
 
@@ -281,7 +365,17 @@ the same `--framework` and a different `--seed` to get replicates.
 
 ## B4. On Colab
 
-Two things differ on Colab, and both are command-line flags — the config never changes.
+A Colab runtime is a **new machine every session**, so it starts with Step 0:
+
+```bash
+!pip install -r requirements.txt
+!python check_env.py --strict
+```
+
+`--strict` is worth it here: Colab ships its own torch and numpy, and a silent
+resolution to a different version is exactly the drift that makes two runs
+incomparable. Then two things differ from a laptop run, and both are command-line
+flags — the config never changes.
 
 ```bash
 python learning/main.py \
@@ -319,6 +413,7 @@ Add `--cache-root` if the default cache location is short of space.
 | `--cache-root` | any path with space | `/content` is small and ephemeral |
 | `--experiment` | any name | required before `--results-root` will be accepted |
 | `dataset.name` *(config, not a flag)* | see the table below | a cell cannot answer a prompt |
+| `check_env.py --strict` *(a cell, not a flag)* | — | the runtime is new, so its versions are unproven |
 
 ## B5. Choosing the dataset
 
