@@ -1,71 +1,85 @@
-# ============================================================
-# Event Camera SNN Pipeline — Python Dependencies
-# ============================================================
-# Install all at once:
-#   pip install -r requirements.txt
+# Dependencies, pinned to the environment the pipeline is actually validated against.
 #
-# GPU-specific:
-#   CUDA 12.x:  pip install cupy-cuda12x
-#   CUDA 11.x:  pip install cupy-cuda11x
-#   PyTorch CUDA: https://pytorch.org/get-started/locally/
+# WHY EXACT PINS AND NOT FLOORS
+# -----------------------------
+# This project compares SNN FRAMEWORKS. A floor like `snntorch>=0.9.1` lets Colab and a
+# laptop resolve to different library versions, and then the comparison is between
+# versions rather than between frameworks -- with nothing in the output saying so. The
+# four framework libraries, tonic and numpy therefore carry `==`. Verify with:
+#
+#     python check_env.py
+#
+# runs.csv records `framework_version` per row, so a drift is recoverable after the
+# fact -- but only if someone notices. Pinning is the cheaper half of that.
+#
+# Versions below are what `python tests/run_all.py` (9 suites) passes against.
 
-# Core scientific stack
-# numpy<=2.4, not a bare >=2.0 : numba (below) refuses to import against numpy>=2.5 (raises
-# ImportError at import time, not a warning) -- confirmed against numba 0.66.0. Bump the
-# ceiling only alongside a numba release that raises its own numpy support window.
-numpy>=2.0,<=2.4
-scipy>=1.10
-# JIT for event_data_workflow/fast_denoise.py -- replaces tonic's pure-Python Denoise loop
-# (~93% of N-Caltech101 preprocessing cost), ~72x faster, verified byte-identical output.
-numba>=0.66.0
-# Pinned, not >= : sinabs>=3.1.3 requires nir<=1.0.4, but nirtorch>=2.0.3 requires nir>=1.0.6 --
-# unresolvable together, so pin the last confirmed-working pairing exactly.
-nir==1.0.4
-nirtorch==2.0.2
-matplotlib>=3.7
-PyYAML>=6.0
-psutil>=5.9
-# Deep learning (CPU or CUDA — install the correct wheel for your GPU)
-torch>=2.1.0         # install via https://pytorch.org
-torchvision>=0.16.0  # install the matching CUDA build alongside torch, same page
+# ---------------------------------------------------------------------------
+# PyTorch -- install FIRST, and pick the build that matches your machine.
+#
+# The pin is the version, not the build. A local wheel tag differs per platform
+# (2.13.0+cpu here, 2.13.0+cu128 on Colab) and pinning it would make this file
+# unusable anywhere else.
+#
+#   CPU:   pip install torch==2.13.0 torchvision==0.28.0
+#   CUDA:  pip install torch==2.13.0 torchvision==0.28.0 \
+#              --index-url https://download.pytorch.org/whl/cu128
+#
+# On Linux, torch pulls `triton` itself; it does not need declaring here.
+# ---------------------------------------------------------------------------
+torch==2.13.0
+torchvision==0.28.0
 
-# torch.compile's inductor backend needs Triton for CUDA kernel codegen. `triton` has no
-# Windows wheel at all -- triton-windows is the maintained fork that does; exactly one line installs per platform.
-triton; sys_platform != "win32"
-triton-windows; sys_platform == "win32"
+# ---------------------------------------------------------------------------
+# The four frameworks under comparison. These decide the RESULTS, so they are the
+# pins that matter most.
+#
+# sinabs additionally pulls nir, nirtorch and samna (SynSense's chip SDK) -- it will
+# not import without them. None is used by this pipeline directly, so they are not
+# listed here, but check_env.py reports their versions because they belong in the
+# write-up's environment appendix.
+# ---------------------------------------------------------------------------
+snntorch==1.0.0
+norse==1.1.0
+spikingjelly==0.0.0.0.14
+sinabs==3.1.3
 
-# Spiking Neural Network frameworks (choose one or both)
-snntorch>=0.9.1          # primary SNN library
-norse>=0.0.7             # Norse SNN framework
-spikingjelly>=0.0.0.0.14 # SpikingJelly SNN framework
-sinabs>=3.1.3            # DVS-first SNN framework, exports to SynSense Speck chip
+# ---------------------------------------------------------------------------
+# Event data
+#
+# numpy is pinned at 1.26.4, NOT >=2.0 as this file previously said. That range
+# contradicted the environment every test and every run so far has used, so a clean
+# install from it would have produced a DIFFERENT environment than the validated one.
+# 1.26.4 is what the SNNs_2 comparison pipeline pins and what everything here is
+# tested against; numba 0.66 and tonic 1.6 are both happy with it.
+# ---------------------------------------------------------------------------
+tonic==1.6.0
+numpy==1.26.4
+numba==0.66.0        # compiles fast_denoise -- see event_data_workflow/fast_denoise.py
+h5py==3.16.0         # reads .h5 event files (3ET Eyetracking, DSEC)
 
-# Upgraded for protobuf 7.x compatibility (sinabs/bindsnet pull a newer protobuf than
-# the legacy tensorboard 2.10.1 that shipped here supported).
-tensorboard>=2.20.0
+# ---------------------------------------------------------------------------
+# Metrics, monitoring, output
+# ---------------------------------------------------------------------------
+nvidia-ml-py==13.610.43   # imported as `pynvml` -- GPU power, clocks, utilisation
+psutil==7.2.2             # RAM/CPU probing for the cache tier and worker sizing
+pandas==3.0.5             # plots/ -- the F0-F6 comparison figures
+matplotlib==3.11.1
+PyYAML==6.0.3
+tqdm==4.70.0
 
-# Event camera drivers (uncomment the one matching your hardware)
-# pyaer>=0.1.2           # iniVation DAVIS / DVS cameras
-# metavision-sdk-core    # Prophesee cameras (install from Prophesee website)
-# metavision-sdk-driver  # Prophesee driver
-
-# GPU kernel execution (choose based on your CUDA version)
-# cupy-cuda12x           # CUDA 12.x
-# cupy-cuda11x           # CUDA 11.x
-# pycuda>=2022.1         # alternative to CuPy
-
-# Visualisation (optional but recommended)
-matplotlib>=3.7
-Pillow>=10.0
-tonic>=0.3.0           # for event data handling and visualization
-# Utilities
-tqdm>=4.65
-
-# Phase B regression dataset — DSEC (event_data_workflow/regression_datasets.py, dataset_registry.py)
-h5py>=3.0               # reads DSEC's .h5 event files
-hdf5plugin>=4.0         # codec plugin h5py needs for DSEC's compressed .h5 files
-imageio>=2.31           # decodes DSEC's optical-flow PNG targets
-
-# GPU/NVML stats. nvidia-ml-py, not pynvml: pynvml is deprecated in favor of this,
-# NVIDIA's maintained package -- still installs the same importable `pynvml` module.
-nvidia-ml-py
+# ---------------------------------------------------------------------------
+# REMOVED, and why -- so nobody adds them back by reflex:
+#
+#   nir, nirtorch     sinabs pulls both; nothing here imports them
+#   tensorboard       imported nowhere in this pipeline
+#   scipy, Pillow     transitive (tonic, matplotlib) -- not imported directly
+#   triton            torch pulls it on Linux; a no-op entry on Windows
+#   hdf5plugin        was declared "needed for DSEC's compressed .h5" but is imported
+#                     NOWHERE, and it only registers its codecs when imported -- so it
+#                     was never doing the job it was listed for. It is also not
+#                     installed in the validated environment. Add it back WITH an
+#                     import if DSEC support is ever finished.
+#   imageio           same story: listed for DSEC's PNG flow targets, imported nowhere,
+#                     not installed.
+# ---------------------------------------------------------------------------
