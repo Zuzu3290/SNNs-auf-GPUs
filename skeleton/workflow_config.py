@@ -1,5 +1,12 @@
-import yaml
+"""The data_workflow.yaml settings: framing, slicing, augmentation, cache, resources.
+
+Every value is read through skeleton/strict.py -- see that module for why. In short: a
+misspelled key used to fall through to a literal in this file, so `n_time_bin: 40` (one
+character short) silently ran the experiment at the base file's 16 and said nothing.
+"""
 from pathlib import Path
+
+from skeleton.strict import section
 
 DEFAULT_YAML = Path(__file__).parent.parent / "configuration" / "data_workflow.yaml"
 
@@ -15,69 +22,71 @@ class WorkflowSettings:
         experiment overlay override framing, slicing, cache or resource_policy the same
         way it overrides anything else -- previously this class read its own file, so
         an overlay could not reach it.
+
+        PASS `config` WHENEVER ONE EXISTS. Constructing this with no argument inside a
+        run that HAS a merged config silently reverts every key here to the base files.
+        That is exactly what happened in event_data_workflow/data_pipeline.py: an ex2
+        run asking for framing.n_time_bins = 20 was framed at the base file's 16, with
+        nothing in the output saying so.
         """
         from skeleton.config_loader import load_config
 
         if config is not None and overlay is not None:
             raise ValueError("pass either `config` or `overlay`, not both")
         config = config if config is not None else load_config(overlay)
+        self.config = config
 
-        framing = config.get("framing", {})
-        self.FRAME_MODE     = framing.get("mode", "time_window")
-        self.N_TIME_BINS    = int(framing.get("n_time_bins", 16))
-        self.TIME_WINDOW_US = int(framing.get("time_window_ms", 15.0) * 1000)
+        framing = section(config, "framing")
+        self.FRAME_MODE     = framing.require_choice("mode", ["n_time_bins", "time_window"])
+        self.N_TIME_BINS    = framing.require_int("n_time_bins")
+        self.TIME_WINDOW_US = int(framing.require_float("time_window_ms") * 1000)
         # null = "not known"; Hz is then reported as unavailable rather than guessed.
-        sample_duration = framing.get("sample_duration_us", None)
+        self.SAMPLE_DURATION_US = framing.optional_int("sample_duration_us")
         # Part of the cache identity: it changes which events exist. null disables.
-        _denoise = framing.get("denoise_filter_time_us", 10000)
-        self.DENOISE_FILTER_TIME_US = None if _denoise is None else int(_denoise)
+        self.DENOISE_FILTER_TIME_US = framing.optional_int("denoise_filter_time_us")
         # Applied AFTER the cache, so toggling it needs no rebuild and it is NOT part of
         # the cache identity.
-        self.BINARIZE               = bool(framing.get("binarize", False))
-        self.SAMPLE_DURATION_US = int(sample_duration) if sample_duration is not None else None
+        self.BINARIZE = framing.require_bool("binarize")
 
-        slicing = config.get("temporal_slicing", {})
-        self.TEMPORAL_SLICING_ENABLED = bool(slicing.get("enabled", False))
-        # null (default) -> SliceByTime, using SLICE_DURATION_US below. An int here
-        # switches to SliceByEventCount instead. See CALIBRATE_EVENTS_PER_SLICE for
-        # the third strategy.
-        events_per_slice = slicing.get("events_per_slice", None)
-        self.EVENTS_PER_SLICE = int(events_per_slice) if events_per_slice is not None else None
-        # true -> SliceByEventCount with a value calibrated from the dataset's
-        # own recordings (Case A) instead of a guessed constant; overrides
-        # EVENTS_PER_SLICE above whenever both are set.
-        self.CALIBRATE_EVENTS_PER_SLICE = bool(slicing.get("calibrate_events_per_slice", False))
+        slicing = section(config, "temporal_slicing")
+        self.TEMPORAL_SLICING_ENABLED = slicing.require_bool("enabled")
+        # null -> SliceByTime, using SLICE_DURATION_US below. An int here switches to
+        # SliceByEventCount instead. See CALIBRATE_EVENTS_PER_SLICE for the third strategy.
+        self.EVENTS_PER_SLICE = slicing.optional_int("events_per_slice")
+        # true -> SliceByEventCount with a value calibrated from the dataset's own
+        # recordings (Case A) instead of a guessed constant; overrides EVENTS_PER_SLICE
+        # above whenever both are set.
+        self.CALIBRATE_EVENTS_PER_SLICE = slicing.require_bool("calibrate_events_per_slice")
         # Slice length in microseconds, used when slicing by TIME. Deliberately not
         # called TEMPORAL_SLICE_DURATION_US: that spelling was read by code while never
         # existing, so getattr silently supplied 15 ms and every Hz figure came out ~20x
         # high. Tests assert that name stays absent.
-        self.SLICE_DURATION_US          = int(slicing.get("slice_duration_us", 15000))
+        self.SLICE_DURATION_US = slicing.require_int("slice_duration_us")
 
-        augmentation = config.get("augmentation", {})
-        self.RANDOM_ROTATION_ENABLED = bool(augmentation.get("random_rotation_enabled", True))
+        augmentation = section(config, "augmentation")
+        self.RANDOM_ROTATION_ENABLED = augmentation.require_bool("random_rotation_enabled")
 
-        cache = config.get("cache", {})
-        self.CACHE_PATH = cache.get("path", "./cache")
+        self.CACHE_PATH = section(config, "cache").require_str("path")
 
-        rp = config.get("resource_policy", {})
-        self.MEMORY_SAFETY_MARGIN_GB   = float(rp.get("memory_safety_margin_gb", 2.0))
-        self.MEMORY_CACHE_THRESHOLD_GB = float(rp.get("memory_cache_threshold_gb", 6.0))
-        self.GPU_PRESSURE_THRESHOLD    = float(rp.get("gpu_pressure_threshold", 0.75))
-        self.BATCH_VRAM_FRACTION       = float(rp.get("batch_vram_fraction", 0.35))
-        self.BATCH_VRAM_BAND_MIN       = float(rp.get("batch_vram_band_min", 0.30))
-        self.BATCH_VRAM_BAND_MAX       = float(rp.get("batch_vram_band_max", 0.35))
-        self.MAX_BATCH_SIZE            = int(rp.get("max_batch_size", 256))
-        self.CALIBRATE_PREFETCH_DEPTH  = bool(rp.get("calibrate_prefetch_depth", True))
-        self.PREFETCH_DEPTH_FALLBACK   = int(rp.get("prefetch_depth_fallback", 8))
-        self.PREFETCH_VRAM_FRACTION    = float(rp.get("prefetch_vram_fraction", 0.10))
-        self.PREFETCH_DEPTH_MIN        = int(rp.get("prefetch_depth_min", 1))
-        self.PREFETCH_DEPTH_MAX        = int(rp.get("prefetch_depth_max", 32))
-        self.MEMORY_TIER_HEADROOM_FRACTION = float(rp.get("memory_tier_headroom_fraction", 0.7))
-        self.DISK_TIER_HEADROOM_MULTIPLE   = float(rp.get("disk_tier_headroom_multiple", 1.2))
-        self.WORKER_RAM_FRACTION           = float(rp.get("worker_ram_fraction", 0.25))
-        self.DATALOADER_WORKER_TIMEOUT_S   = float(rp.get("dataloader_worker_timeout_s", 60.0))
-        self.CALIBRATE_WORKERS             = bool(rp.get("calibrate_workers", True))
-        self.WORKER_COUNT_FALLBACK         = int(rp.get("worker_count_fallback", 4))
+        rp = section(config, "resource_policy")
+        self.MEMORY_SAFETY_MARGIN_GB   = rp.require_float("memory_safety_margin_gb")
+        self.MEMORY_CACHE_THRESHOLD_GB = rp.require_float("memory_cache_threshold_gb")
+        self.GPU_PRESSURE_THRESHOLD    = rp.require_float("gpu_pressure_threshold")
+        self.BATCH_VRAM_FRACTION       = rp.require_float("batch_vram_fraction")
+        self.BATCH_VRAM_BAND_MIN       = rp.require_float("batch_vram_band_min")
+        self.BATCH_VRAM_BAND_MAX       = rp.require_float("batch_vram_band_max")
+        self.MAX_BATCH_SIZE            = rp.require_int("max_batch_size")
+        self.CALIBRATE_PREFETCH_DEPTH  = rp.require_bool("calibrate_prefetch_depth")
+        self.PREFETCH_DEPTH_FALLBACK   = rp.require_int("prefetch_depth_fallback")
+        self.PREFETCH_VRAM_FRACTION    = rp.require_float("prefetch_vram_fraction")
+        self.PREFETCH_DEPTH_MIN        = rp.require_int("prefetch_depth_min")
+        self.PREFETCH_DEPTH_MAX        = rp.require_int("prefetch_depth_max")
+        self.MEMORY_TIER_HEADROOM_FRACTION = rp.require_float("memory_tier_headroom_fraction")
+        self.DISK_TIER_HEADROOM_MULTIPLE   = rp.require_float("disk_tier_headroom_multiple")
+        self.WORKER_RAM_FRACTION           = rp.require_float("worker_ram_fraction")
+        self.DATALOADER_WORKER_TIMEOUT_S   = rp.require_float("dataloader_worker_timeout_s")
+        self.CALIBRATE_WORKERS             = rp.require_bool("calibrate_workers")
+        self.WORKER_COUNT_FALLBACK         = rp.require_int("worker_count_fallback")
 
     @property
     def worker_count_override(self) -> int | None:

@@ -162,6 +162,83 @@ def check_overlay_sections(overlay: dict[str, Any], config_dir: Path | str = CON
         )
 
 
+# Sub-blocks whose keys legitimately depend on a sibling value, so "not in the base"
+# does not imply a typo. sinabs' surrogate is the case: its parameters differ per
+# surrogate TYPE (single_exponential takes grad_width/grad_scale, gaussian takes
+# mu/sigma/grad_scale), so the base file can only show one set. These are not
+# unchecked -- frameworks/adapters/sinabs_lif.py reads them through SURROGATE_PARAMS
+# and raises on a wrong or missing one.
+KEY_CHECK_EXEMPT = ("neuron.*.surrogate",)
+
+
+def _paths(node: Any, prefix: str = "") -> list[str]:
+    """Every leaf path in a nested config dict, dotted. A dict-valued leaf (an empty
+    mapping) counts as a leaf itself."""
+    if not isinstance(node, dict) or not node:
+        return [prefix] if prefix else []
+    out: list[str] = []
+    for key, value in node.items():
+        out.extend(_paths(value, f"{prefix}.{key}" if prefix else str(key)))
+    return out
+
+
+def _exempt(path: str) -> bool:
+    for pattern in KEY_CHECK_EXEMPT:
+        parts, want = path.split("."), pattern.split(".")
+        if len(parts) >= len(want) and all(
+            w == "*" or w == p for w, p in zip(want, parts)
+        ):
+            return True
+    return False
+
+
+def _has_path(node: Any, path: str) -> bool:
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def check_overlay_keys(overlay: dict[str, Any], config_dir: Path | str = CONFIG_DIR) -> None:
+    """An overlay KEY that exists nowhere in the base config is a typo.
+
+    check_overlay_sections above catches a misspelled SECTION. This catches the far more
+    likely mistake -- a misspelled key inside a section that does exist:
+
+        convolution:
+          conv1_ou: 64        # one character short of conv1_out
+
+    deep_merge simply adds it, nothing reads it, the base value stands, and the run
+    reports success having ignored the thing the experiment was about. MEASURED: with
+    the two typos above, CONV1_OUT stayed 12 and N_TIME_BINS stayed 16, silently.
+
+    An overlay may only OVERRIDE what the base config already defines. A genuinely new
+    setting belongs in the base file first, with its default and its comment -- that is
+    what makes the base files a complete description of what is configurable.
+    """
+    unknown = sorted(
+        path for path in _paths(overlay)
+        if not _has_path(load_base(config_dir), path) and not _exempt(path)
+    )
+    if not unknown:
+        return
+    lines = []
+    for path in unknown:
+        section_path, _, key = path.rpartition(".")
+        siblings = load_base(config_dir)
+        for part in section_path.split("."):
+            siblings = siblings.get(part, {}) if isinstance(siblings, dict) else {}
+        near = [k for k in siblings if k.startswith(key[:4]) or key.startswith(str(k)[:4])]
+        lines.append(f"    {path}" + (f"   did you mean: {sorted(near)}?" if near else ""))
+    raise ConfigError(
+        "--config sets key(s) that do not exist in the base config:\n"
+        + "\n".join(lines)
+        + "\n  An overlay may only override existing keys. Nothing reads an unknown "
+          "key, so the run would have used the base value and reported success."
+    )
+
+
 def load_config(
     overlay_path: Path | str | None = None, config_dir: Path | str = CONFIG_DIR
 ) -> dict[str, Any]:
@@ -171,4 +248,5 @@ def load_config(
         return base
     overlay = load_overlay(overlay_path)
     check_overlay_sections(overlay, config_dir)
+    check_overlay_keys(overlay, config_dir)
     return deep_merge(base, overlay)

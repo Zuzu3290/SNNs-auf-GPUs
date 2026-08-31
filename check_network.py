@@ -36,6 +36,12 @@ from skeleton.snn_config import FW_TO_CFG_KEY
 
 FRAMEWORKS = list(FW_TO_CFG_KEY)
 
+# Used ONLY when no dataset.name is set, so the conv block can still be walked with no
+# data present. N-MNIST's shape, because it is the smallest and the one every example
+# here refers to. Stated as this script's own constant rather than read from a config,
+# because the config no longer carries a sensor shape -- the dataset registry owns it.
+PROBE_SHAPE = {"sensor_h": 34, "sensor_w": 34, "in_channels": 2, "num_classes": 10}
+
 
 def apply_shape_without_download(cfg) -> str:
     """Give cfg the selected dataset's real sensor size and class count.
@@ -48,11 +54,14 @@ def apply_shape_without_download(cfg) -> str:
     from event_data_workflow.dataset_registry import lookup_dataset
 
     if not cfg.DATASET_NAME:
-        # Settings.NUM_CLASSES has no default -- this script's own placeholder, only for
-        # inspecting the conv block's shape with no dataset picked.
-        cfg.NUM_CLASSES = 10
-        return (f"convolution: block ({cfg.SENSOR_H}x{cfg.SENSOR_W}, "
-                f"{cfg.NUM_CLASSES} classes) -- no dataset.name set")
+        # THIS SCRIPT'S placeholder, not a config default. The sensor shape and class
+        # count live in the dataset registry, and Settings raises rather than inventing
+        # them -- but the whole point of check_network is to inspect the conv block on a
+        # laptop with no dataset chosen, so it supplies its own probe shape and says so
+        # in the banner. Nothing else in the pipeline may do this.
+        cfg.apply_dataset_shape(**PROBE_SHAPE)
+        return (f"probe shape {cfg.SENSOR_H}x{cfg.SENSOR_W}, {cfg.NUM_CLASSES} classes "
+                "-- no dataset.name set, so this script supplied one")
     entry = lookup_dataset(cfg.DATASET_NAME)
     width, height, channels = entry["sensor_size"]
     cfg.apply_dataset_shape(sensor_h=height, sensor_w=width, in_channels=channels,

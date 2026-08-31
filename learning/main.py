@@ -123,8 +123,6 @@ if __name__ == "__main__":
     print(f"  weight fingerprint : {params['shared_fingerprint']}   "
           f"({params['total_trainable']} trainable params)")
     print(f"\n  Model backend  : {cfg.FRAMEWORK.upper()}")
-    cfg.display()
-
     results_dir, _, plots_dir = run_info["results_dir"], run_info["equivalence_dir"], run_info["plots_dir"]
 
     # ---- one folder per run, for everything with a fixed filename -----------------
@@ -147,12 +145,34 @@ if __name__ == "__main__":
     if run_info["routed"]:
         print(f"  run_id         : {run_id}   -> {run_results_dir}")
 
+    # After the run directories exist, so the OUTPUT section can name the paths this
+    # run will actually write to rather than the config's unrouted defaults.
+    cfg.display(output_dirs={
+        "Results dir": run_results_dir,
+        "Plots dir":   run_plots_dir,
+        "Shared CSVs": f"{results_dir}   (runs.csv, epochs.csv, layers.csv)",
+    } if run_info["routed"] else None)
+
     trainer = SNNTrainer(model, train_loader, cfg, device)
     results = trainer.train(csv_path=str(run_results_dir / "training_results.csv"))
+    # The last EPOCH, not the last batch. loss_history/accuracy_history are per-BATCH
+    # series, so [-1] was one batch of 256 samples -- noisy, and it disagreed with the
+    # "Epoch 5/5" block printed directly above it (0.9414 against 93.23%) for no reason
+    # a reader could see. These now restate the final epoch, which is also what
+    # epochs.csv and runs.csv record.
     print("\n Training complete!")
-    print(f"  Final loss      : {results['loss_history'][-1]:.4f}")
-    print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}")
-    print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
+    final_epoch = results["epoch_log"][-1] if results.get("epoch_log") else None
+    if final_epoch:
+        print(f"  Final loss      : {final_epoch['train_loss']:.4f}   (epoch "
+              f"{final_epoch['epoch']} mean)")
+        print(f"  Final accuracy  : {final_epoch['train_accuracy']:.4f}   (epoch "
+              f"{final_epoch['epoch']} mean)")
+        print(f"  Final spike rate: {final_epoch['spike_rate']:.4f}   (epoch "
+              f"{final_epoch['epoch']} mean)")
+    else:
+        print(f"  Final loss      : {results['loss_history'][-1]:.4f}   (last batch)")
+        print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}   (last batch)")
+        print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}   (last batch)")
 
     trainer.plot_training(save_dir=str(run_plots_dir))
     trainer.plot_iteration_metrics(save_dir=str(run_plots_dir))

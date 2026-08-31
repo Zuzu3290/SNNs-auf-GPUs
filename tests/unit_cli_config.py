@@ -397,6 +397,150 @@ def test_output_dirs_directly() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 7. fail-loud config: no silent defaults, no silent typos
+# ---------------------------------------------------------------------------
+def test_a_missing_key_raises_instead_of_defaulting() -> None:
+    """The pattern being replaced was conv.get("conv1_out", 12): delete the key from the
+    YAML and the code quietly supplied a literal, so the file stopped describing the
+    run. Every key is now required."""
+    from skeleton.strict import ConfigKeyError
+
+    for section_name, key in [("convolution", "conv1_out"), ("training", "epochs"),
+                              ("training", "seed"), ("framing", "n_time_bins"),
+                              ("resource_policy", "max_batch_size")]:
+        broken = load_base()
+        broken[section_name] = {k: v for k, v in broken[section_name].items() if k != key}
+        suite.expect_raises(
+            f"a missing {section_name}.{key} raises", ConfigKeyError,
+            lambda b=broken: (Settings(config=b), WorkflowSettings(config=b)),
+            must_mention=[key])
+
+
+def test_a_missing_section_raises() -> None:
+    """An overlay that dropped a whole section would otherwise take every value in it
+    from the code."""
+    from skeleton.strict import ConfigKeyError
+
+    for section_name in ("convolution", "training", "framing", "resource_policy"):
+        broken = {k: v for k, v in load_base().items() if k != section_name}
+        suite.expect_raises(
+            f"a missing '{section_name}:' section raises", ConfigKeyError,
+            lambda b=broken: (Settings(config=b), WorkflowSettings(config=b)),
+            must_mention=[section_name])
+
+
+def test_a_quoted_number_is_not_silently_accepted() -> None:
+    """`epochs: "5"` is a string. int() would swallow it; the type check does not --
+    the same strictness the neuron block has always had."""
+    from skeleton.strict import ConfigKeyError
+
+    broken = load_base()
+    broken["training"] = {**broken["training"], "epochs": "5"}
+    suite.expect_raises("a quoted epochs raises", ConfigKeyError,
+                        lambda: Settings(config=broken), must_mention=["unquote"])
+
+    broken = load_base()
+    broken["training"] = {**broken["training"], "use_amp": "true"}
+    suite.expect_raises("a quoted boolean raises", ConfigKeyError,
+                        lambda: Settings(config=broken), must_mention=["true or false"])
+
+
+def test_null_is_a_stated_choice_but_the_key_must_exist() -> None:
+    """null has a documented meaning for a few keys (no denoising, duration unknown, ask
+    for the dataset). An ABSENT key does not -- that distinction is the point."""
+    from skeleton.strict import ConfigKeyError
+
+    ok = load_base()
+    ok["framing"] = {**ok["framing"], "denoise_filter_time_us": None}
+    suite.check("framing.denoise_filter_time_us: null is accepted",
+                WorkflowSettings(config=ok).DENOISE_FILTER_TIME_US is None)
+
+    broken = load_base()
+    broken["framing"] = {k: v for k, v in broken["framing"].items()
+                         if k != "denoise_filter_time_us"}
+    suite.expect_raises("but removing the key entirely raises", ConfigKeyError,
+                        lambda: WorkflowSettings(config=broken),
+                        must_mention=["denoise_filter_time_us"])
+
+
+def test_a_misspelled_overlay_key_raises_with_a_suggestion() -> None:
+    """The failure this whole change exists for. MEASURED before the fix: `conv1_ou: 64`
+    left CONV1_OUT at 12 and `n_time_bin: 40` left N_TIME_BINS at 16, with no error --
+    the run reported success having ignored the thing the experiment was about."""
+    with tempfile.TemporaryDirectory() as tmp:
+        overlay = write_overlay(Path(tmp), "typo.yaml",
+                                "convolution:\n  conv1_ou: 64\n"
+                                "framing:\n  n_time_bin: 40\n")
+        suite.expect_raises("a misspelled overlay key raises", ConfigError,
+                            lambda: load_config(overlay),
+                            must_mention=["conv1_ou", "n_time_bin", "conv1_out"])
+
+
+def test_a_correct_overlay_key_is_accepted() -> None:
+    """The check must not block real overrides -- including a deeply nested one."""
+    with tempfile.TemporaryDirectory() as tmp:
+        overlay = write_overlay(Path(tmp), "fine.yaml",
+                                "convolution:\n  conv1_out: 64\n"
+                                "framing:\n  n_time_bins: 40\n"
+                                "training:\n  optimizer:\n    lr: 0.01\n")
+        merged = load_config(overlay)
+        suite.check("conv1_out override applied", Settings(config=merged).CONV1_OUT == 64)
+        suite.check("n_time_bins override applied",
+                    WorkflowSettings(config=merged).N_TIME_BINS == 40)
+        suite.check("a nested optimizer.lr override applied",
+                    Settings(config=merged).LEARNING_RATE == 0.01)
+
+
+def test_the_shipped_experiment_overlays_all_pass_the_key_check() -> None:
+    """A guard against this check being stricter than the configs it has to accept."""
+    shipped = sorted(REPO_ROOT.glob("experiments/*/config.yaml"))
+    suite.check("there is at least one experiment overlay to check", bool(shipped))
+    for path in shipped:
+        try:
+            load_config(path)
+            ok, detail = True, ""
+        except ConfigError as exc:
+            ok, detail = False, str(exc)
+        suite.check(f"{path.parent.name}/config.yaml passes the key check", ok, detail)
+
+
+def test_dataset_owned_shape_refuses_to_guess() -> None:
+    """sensor_h/sensor_w/in_channels/num_classes were removed from
+    network_architecture.yaml because apply_dataset_shape() overwrote all four on every
+    real run. Reading one before a dataset is applied must raise, not hand back a stale
+    34 that produces a plausible-looking but wrong network."""
+    cfg = Settings()
+    for name in ("SENSOR_H", "SENSOR_W", "IN_CHANNELS", "NUM_CLASSES", "FC_IN"):
+        suite.expect_raises(f"cfg.{name} raises before a dataset is applied",
+                            AttributeError, lambda n=name: getattr(cfg, n),
+                            must_mention=["apply_dataset_shape"])
+
+    cfg.apply_dataset_shape(sensor_h=128, sensor_w=128, in_channels=2, num_classes=11)
+    suite.check("after apply_dataset_shape the sensor is set", cfg.SENSOR_H == 128)
+    suite.check("classes come from the registry value", cfg.NUM_CLASSES == 11)
+    suite.check("FC_IN is recomputed for the new shape", cfg.FC_IN == 26912, str(cfg.FC_IN))
+
+    base = load_base()
+    for key in ("sensor_h", "sensor_w", "in_channels", "num_classes"):
+        suite.check(f"convolution.{key} is gone from the base config",
+                    key not in base["convolution"])
+
+
+def test_display_survives_an_unset_shape() -> None:
+    """A REPORT must never be the thing that stops a run: display() is called before the
+    dataset is known in some paths, and it guards every dataset-owned value."""
+    import contextlib
+    import io
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        Settings().display()
+    text = buffer.getvalue()
+    suite.check("display() does not raise with no dataset applied", "ARCHITECTURE" in text)
+    suite.check("and says the sensor is not known yet", "not set yet" in text, text[:400])
+
+
+# ---------------------------------------------------------------------------
 # 6. config hash and banner
 # ---------------------------------------------------------------------------
 def test_config_hash_tracks_content() -> None:
@@ -531,6 +675,15 @@ def main() -> int:
         test_shipped_ex2_overlay_is_valid,
         test_experiment_configs_live_in_their_experiment_folder,
         test_generated_experiment_output_is_ignored,
+        test_a_missing_key_raises_instead_of_defaulting,
+        test_a_missing_section_raises,
+        test_a_quoted_number_is_not_silently_accepted,
+        test_null_is_a_stated_choice_but_the_key_must_exist,
+        test_a_misspelled_overlay_key_raises_with_a_suggestion,
+        test_a_correct_overlay_key_is_accepted,
+        test_the_shipped_experiment_overlays_all_pass_the_key_check,
+        test_dataset_owned_shape_refuses_to_guess,
+        test_display_survives_an_unset_shape,
         test_no_argument_construction_still_works,
         test_config_and_overlay_are_mutually_exclusive,
         test_defaults_reproduce_the_original_behaviour,

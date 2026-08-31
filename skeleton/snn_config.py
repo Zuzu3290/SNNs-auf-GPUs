@@ -1,6 +1,8 @@
 import yaml
 from pathlib import Path
 
+from skeleton.strict import ConfigKeyError, section
+
 DEFAULT_YAML      = Path(__file__).parent.parent / "configuration" / "SNN_module.yaml"
 NETWORK_ARCH_YAML = Path(__file__).parent.parent / "configuration" / "network_architecture.yaml"
 
@@ -32,9 +34,12 @@ class Settings:
         self.overlay_path = overlay
         self.yaml_path = str(DEFAULT_YAML)  # kept: some callers print it
 
-        training     = self.config.get("training", {})
-        dataset      = self.config.get("dataset", {})
-        output       = self.config.get("output", {})
+        # Every block below is read through skeleton/strict.py: the key must be present
+        # and the right type, or the run stops. See that module for the typo that
+        # motivated it.
+        training     = section(self.config, "training")
+        dataset      = section(self.config, "dataset")
+        output       = section(self.config, "output")
         # NOTE: the old `frameworks:` block is gone -- neuron params moved to
         # network_architecture.yaml, optimizer/loss became one shared training setting.
 
@@ -42,31 +47,31 @@ class Settings:
         # sections do not collide), so the conv-SNN architecture is read from the same
         # dict as everything else rather than from a second file read here.
         network_arch = self.config
-        conv = network_arch.get("convolution", {})
+        conv = section(self.config, "convolution")
 
+        # The conv-SNN architecture: ONLY the network internals. Filter counts, kernel
+        # sizes and the pool size are yours to choose; the input shape and the class
+        # count are not -- see the properties below.
+        self.CONV1_OUT    = conv.require_int("conv1_out")
+        self.CONV1_KERNEL = conv.require_int("conv1_kernel")
+        self.CONV2_OUT    = conv.require_int("conv2_out")
+        self.CONV2_KERNEL = conv.require_int("conv2_kernel")
+        self.POOL_KERNEL  = conv.require_int("pool_kernel")
 
-        # Conv-SNN architecture (from network_architecture.yaml)
-        self.SENSOR_H     = int(conv.get("sensor_h",     34))
-        self.SENSOR_W     = int(conv.get("sensor_w",     34))
-        self.IN_CHANNELS  = int(conv.get("in_channels",  2))
-        self.CONV1_OUT    = int(conv.get("conv1_out",    12))
-        self.CONV1_KERNEL = int(conv.get("conv1_kernel", 5))
-        self.CONV2_OUT    = int(conv.get("conv2_out",    32))
-        self.CONV2_KERNEL = int(conv.get("conv2_kernel", 5))
-        self.POOL_KERNEL  = int(conv.get("pool_kernel",  2))
-
-        # Auto-compute flattened size after both conv+pool stages
-        self.FC_IN = self.compute_fc_in(self.SENSOR_H, self.SENSOR_W)
-
-        # Output classes belong to the DATASET REGISTRY, not to this config: the input
-        # sensor shape and the class count both arrive via apply_dataset_shape() from the
-        # registry entry (learning/main.py, data_pipeline). Only the network INTERNALS --
-        # filter counts, kernel sizes, pool size, hidden layers -- are configured here.
+        # Input shape and output classes belong to the DATASET REGISTRY, not to this
+        # config. sensor_h / sensor_w / in_channels / num_classes were removed from
+        # network_architecture.yaml because apply_dataset_shape() overwrote all four on
+        # every real run -- they read like settings while changing nothing, and a reader
+        # editing sensor_h to 128 would have seen it silently ignored.
         #
-        # No placeholder value: unset until apply_dataset_shape() runs, so building a
-        # network before a dataset is picked fails loudly instead of silently getting a
-        # wrong class count. See the NUM_CLASSES property below.
+        # No placeholder values: unset until apply_dataset_shape() runs, so building a
+        # network before a dataset is picked fails loudly instead of quietly getting the
+        # wrong input shape or output width. FC_IN follows from all of them.
+        self._sensor_h = None
+        self._sensor_w = None
+        self._in_channels = None
         self._num_classes = None
+        self._fc_in = None
 
         self.NEURON_TYPES = network_arch.get("neuron_types", {})
 
@@ -77,99 +82,145 @@ class Settings:
         self.NEURON = network_arch.get("neuron", {})
 
         # Training parameters
-        self.EPOCHS                   = int(training.get("epochs", 10))
+        self.EPOCHS                   = training.require_int("epochs")
         # null (or 0) = auto: one epoch is a full pass, derived from dataset size and
         # batch size. A number caps the epoch at that many batches (never more than a
         # full pass). Resolved once the loader exists -- see resolve_iterations().
-        _itera                        = training.get("iterations_per_epoch", None)
-        self.ITERA                    = None if _itera in (None, 0) else int(_itera)
-        self.BATCH_SIZE               = int(training.get("batch_size", 128))
+        _itera                        = training.optional_int("iterations_per_epoch")
+        self.ITERA                    = None if _itera in (None, 0) else _itera
+        self.BATCH_SIZE               = training.require_int("batch_size")
         # When False, BATCH_SIZE above is used as-is and calibrate_batch_size()
         # is never called — see docs/functions.md for why this exists.
-        self.CALIBRATE_BATCH_SIZE     = bool(training.get("calibrate_batch_size", True))
+        self.CALIBRATE_BATCH_SIZE     = training.require_bool("calibrate_batch_size")
         # Untimed forward+backward passes before the timed epochs -- see the YAML comment.
-        self.WARMUP_ITERATIONS        = int(training.get("warmup_iterations", 5))
+        self.WARMUP_ITERATIONS        = training.require_int("warmup_iterations")
         # Samples for the batch-size-1 latency pass; 0 skips it entirely.
-        self.LATENCY_SAMPLES          = int(training.get("latency_samples", 100))
+        self.LATENCY_SAMPLES          = training.require_int("latency_samples")
 
         # Fixes weight init AND batch order. Without it, any measured difference
         # between two frameworks is confounded with initialisation noise -- there was
         # no seeding anywhere in this pipeline before.
-        self.SEED                     = int(training.get("seed", 0))
+        self.SEED                     = training.require_int("seed")
 
         # ONE optimizer and ONE loss, shared by every framework -- not per-framework.
         # These are plain torch; none of the four SNN libraries supplies them, so giving
         # a framework its own would mean comparing training recipes, not frameworks.
-        optimizer_cfg                 = training.get("optimizer", {})
-        self.OPTIMIZER                = str(optimizer_cfg.get("type", "nadam"))
-        self.LEARNING_RATE            = float(optimizer_cfg.get("lr", 0.002))
+        optimizer_cfg                 = training.sub("optimizer")
+        self.OPTIMIZER                = optimizer_cfg.require_str("type")
+        self.LEARNING_RATE            = optimizer_cfg.require_float("lr")
         # 0.0 is this pipeline's value. The pre-merge default here was 1e-4, applied to
         # every framework -- a real recipe difference, recorded in docs/merge_decisions.md.
-        self.WEIGHT_DECAY             = float(optimizer_cfg.get("weight_decay", 0.0))
-        self.SGD_MOMENTUM             = float(optimizer_cfg.get("momentum", 0.0))
-        self.LOSS_FN                  = str(training.get("loss", "cross_entropy"))
-        self.DEVICE                    = training.get("device", "cuda")
-        self.DDP                      = training.get("DDP", "OFF")
-        self.USE_AMP                  = bool(training.get("use_amp", True))
-        self.GRAD_ACCUM_STEPS         = max(1, int(training.get("grad_accum_steps", 1)))
+        self.WEIGHT_DECAY             = optimizer_cfg.require_float("weight_decay")
+        self.SGD_MOMENTUM             = optimizer_cfg.require_float("momentum")
+        self.LOSS_FN                  = training.require_str("loss")
+        self.DEVICE                   = training.require_str("device")
+        self.USE_AMP                  = training.require_bool("use_amp")
+        self.GRAD_ACCUM_STEPS         = max(1, training.require_int("grad_accum_steps"))
         # Validated, not compared loosely: the use site tested `== "cosine"`, so any
         # unrecognised string (a typo like "cosinne") silently meant NO scheduler --
         # a training-recipe change with no error.
-        self.LR_SCHEDULER             = str(training.get("lr_scheduler", "none")).lower()
-        if self.LR_SCHEDULER not in ("none", "cosine"):
-            raise ValueError(
-                f"training.lr_scheduler={self.LR_SCHEDULER!r} is not supported. "
-                "Options: none (constant lr), cosine (anneal to ~0 by the last epoch)."
-            )
+        self.LR_SCHEDULER             = training.require_choice("lr_scheduler",
+                                                                 ["none", "cosine"])
 
-        self.TRADES_ENABLED           = bool(training.get("trades_enabled", False))
-        self.TRADES_EPSILON           = float(training.get("trades_epsilon", 0.05))
-        self.TRADES_LAMBDA            = float(training.get("trades_lambda", 6.0))
-        self.TRADES_STEPS             = int(training.get("trades_steps", 10))
+        self.TRADES_ENABLED           = training.require_bool("trades_enabled")
+        self.TRADES_EPSILON           = training.require_float("trades_epsilon")
+        self.TRADES_LAMBDA            = training.require_float("trades_lambda")
+        self.TRADES_STEPS             = training.require_int("trades_steps")
 
-        self.ACTIVITY_REG_ENABLED     = bool(training.get("activity_reg_enabled", False))
-        self.ACTIVITY_REG_MIN_RATE    = float(training.get("activity_reg_min_rate", 0.01))
-        self.ACTIVITY_REG_MAX_RATE    = float(training.get("activity_reg_max_rate", 0.50))
-        self.ACTIVITY_REG_LAMBDA_LOW  = float(training.get("activity_reg_lambda_low", 0.1))
-        self.ACTIVITY_REG_LAMBDA_HIGH = float(training.get("activity_reg_lambda_high", 0.1))
+        self.ACTIVITY_REG_ENABLED     = training.require_bool("activity_reg_enabled")
+        self.ACTIVITY_REG_MIN_RATE    = training.require_float("activity_reg_min_rate")
+        self.ACTIVITY_REG_MAX_RATE    = training.require_float("activity_reg_max_rate")
+        self.ACTIVITY_REG_LAMBDA_LOW  = training.require_float("activity_reg_lambda_low")
+        self.ACTIVITY_REG_LAMBDA_HIGH = training.require_float("activity_reg_lambda_high")
 
         # Framework selector
-        self.FRAMEWORK = training.get("framework", "norse")
+        self.FRAMEWORK = training.require_choice("framework", sorted(FW_TO_CFG_KEY))
 
 
         # Dataset control
-        # None (the default) means "ask" -- the interactive prompt, as this pipeline
-        # has always worked. Set dataset.name in the config to skip it, which anything
-        # non-interactive (a Colab cell, a scripted sweep) needs. An unrecognised name
-        # raises at startup rather than falling back; see dataset_registry.lookup_dataset.
-        self.DATASET_NAME = dataset.get("name", dataset.get("dataset_name", None))
+        # null means "ask" -- the interactive prompt, as this pipeline has always
+        # worked. The KEY must still be present: `dataset.name: null` is a stated
+        # choice, an absent key is a mistake. Set a name to skip the prompt, which
+        # anything non-interactive (a Colab cell, a scripted sweep) needs. An
+        # unrecognised name raises at startup rather than falling back; see
+        # dataset_registry.lookup_dataset.
+        self.DATASET_NAME = dataset.optional_str("name")
         self.TASK_TYPE    = "classification"  # overwritten by NeuromorphicEncoder.load_raw() once a dataset is picked
 
-        # Output control
-        self.OUTPUT_DIR = output.get("output_dir", "./outputs")
-        self.PLOT_DIR   = output.get("plot_dir",   "./outputs/plots")
-        self.DATA_DIR   = output.get("data_dir",   "./outputs/data")
+        # Output control -- the ./outputs layout, used when no --experiment routes the
+        # run elsewhere. See learning/main.py for the routed case.
+        self.OUTPUT_DIR = output.require_str("output_dir")
+        self.PLOT_DIR   = output.require_str("plot_dir")
+        self.DATA_DIR   = output.require_str("data_dir")
 
+
+    # ---- shape, owned by the dataset registry -----------------------------------
+    #
+    # All five raise AttributeError (not a made-up default) when read before
+    # apply_dataset_shape() has run. A network built off a guessed input shape or class
+    # count would be silently wrong rather than absent, and every downstream number --
+    # parameter count, FC width, accuracy -- would look plausible.
+    #
+    # AttributeError specifically, so getattr(cfg, "NUM_CLASSES", None) in display()
+    # still gets its intended "not set yet" None rather than the exception itself.
+    @staticmethod
+    def _unset(name: str, what: str) -> AttributeError:
+        return AttributeError(
+            f"cfg.{name} read before apply_dataset_shape() ran -- {what} comes from the "
+            "dataset registry, not from network_architecture.yaml."
+        )
+
+    @property
+    def SENSOR_H(self) -> int:
+        if self._sensor_h is None:
+            raise self._unset("SENSOR_H", "sensor height")
+        return self._sensor_h
+
+    @SENSOR_H.setter
+    def SENSOR_H(self, value: int) -> None:
+        self._sensor_h = int(value)
+
+    @property
+    def SENSOR_W(self) -> int:
+        if self._sensor_w is None:
+            raise self._unset("SENSOR_W", "sensor width")
+        return self._sensor_w
+
+    @SENSOR_W.setter
+    def SENSOR_W(self, value: int) -> None:
+        self._sensor_w = int(value)
+
+    @property
+    def IN_CHANNELS(self) -> int:
+        if self._in_channels is None:
+            raise self._unset("IN_CHANNELS", "the channel count")
+        return self._in_channels
+
+    @IN_CHANNELS.setter
+    def IN_CHANNELS(self, value: int) -> None:
+        self._in_channels = int(value)
 
     @property
     def NUM_CLASSES(self) -> int:
-        """Class count from the dataset registry, set once by apply_dataset_shape().
-
-        Raises AttributeError (not a made-up default) when read before that -- a network
-        built off a guessed class count would silently have the wrong output layer.
-        AttributeError specifically, so getattr(cfg, "NUM_CLASSES", None) (display(),
-        below) still gets its intended "not set yet" None rather than the error itself.
-        """
         if self._num_classes is None:
-            raise AttributeError(
-                "cfg.NUM_CLASSES read before apply_dataset_shape() ran -- class count "
-                "comes from the dataset registry, not a config default."
-            )
+            raise self._unset("NUM_CLASSES", "the class count")
         return self._num_classes
 
     @NUM_CLASSES.setter
     def NUM_CLASSES(self, value: int) -> None:
-        self._num_classes = value
+        self._num_classes = int(value)
+
+    @property
+    def FC_IN(self) -> int:
+        """Flattened width into the classifier. Derived from the sensor shape and the
+        conv/pool sizes, never configured -- see compute_fc_in()."""
+        if self._fc_in is None:
+            raise self._unset("FC_IN", "the flattened width (it follows from the sensor)")
+        return self._fc_in
+
+    @FC_IN.setter
+    def FC_IN(self, value: int) -> None:
+        self._fc_in = int(value)
 
     @property
     def active_fw_cfg(self) -> dict:
@@ -234,7 +285,17 @@ class Settings:
         with open(yaml_path, "r") as file:
             return yaml.safe_load(file)
 
-    def display(self):
+    def display(self, output_dirs: dict | None = None):
+        """Print the configuration this run is about to use.
+
+        `output_dirs` overrides the OUTPUT section. The config's own OUTPUT_DIR /
+        PLOT_DIR / DATA_DIR describe the unrouted layout, so on a run started with
+        --experiment (and, on Colab, --results-root pointing at mounted Drive) they
+        name a directory nothing was written to. Left to itself this block said
+        `./outputs` while every artefact went to Drive. Callers that route output pass
+        the real destinations; callers that do not still get the config's own values,
+        so the original flow is unchanged.
+        """
         W      = 76
         fw     = self.FRAMEWORK.upper()
         fw_cfg = self.active_fw_cfg
@@ -253,12 +314,24 @@ class Settings:
         print(f"{'Framework : ' + fw + '   |   Device : ' + self.DEVICE:^{W}}")
         print("=" * W)
 
+        # The four dataset-owned values raise until apply_dataset_shape() has run, and a
+        # REPORT must never be the thing that stops a run -- so each is read through
+        # getattr and shown as "not set yet" instead. The rest of the block is config,
+        # always present by the time Settings exists.
+        def shape(name: str) -> str:
+            value = getattr(self, name, None)
+            return "not set yet" if value is None else str(value)
+
+        sensor_h, sensor_w = shape("SENSOR_H"), shape("SENSOR_W")
         section("ARCHITECTURE")
-        row("Sensor",          f"{self.SENSOR_H} × {self.SENSOR_W}   ({self.IN_CHANNELS} channels)")
+        if "not set yet" in (sensor_h, sensor_w):
+            row("Sensor", "not set yet -- comes from the dataset registry")
+        else:
+            row("Sensor", f"{sensor_h} × {sensor_w}   ({shape('IN_CHANNELS')} channels)")
         row("Conv1",           f"{self.CONV1_OUT} filters   {self.CONV1_KERNEL}×{self.CONV1_KERNEL} kernel")
         row("Conv2",           f"{self.CONV2_OUT} filters   {self.CONV2_KERNEL}×{self.CONV2_KERNEL} kernel")
         row("Pool",            f"{self.POOL_KERNEL}×{self.POOL_KERNEL} MaxPool   (applied twice)")
-        row("FC input (auto)", str(self.FC_IN))
+        row("FC input (auto)", shape("FC_IN"))
         num_classes = getattr(self, "NUM_CLASSES", None)
         row("Output classes",  str(num_classes) if num_classes is not None else "N/A (regression target)")
 
@@ -306,9 +379,13 @@ class Settings:
         row("Dataset",   self.DATASET_NAME)
 
         section("OUTPUT")
-        row("Output dir", self.OUTPUT_DIR)
-        row("Plot dir",   self.PLOT_DIR)
-        row("Data dir",   self.DATA_DIR)
+        if output_dirs:
+            for label, value in output_dirs.items():
+                row(label, value)
+        else:
+            row("Output dir", self.OUTPUT_DIR)
+            row("Plot dir",   self.PLOT_DIR)
+            row("Data dir",   self.DATA_DIR)
 
         print()
         print("=" * W)

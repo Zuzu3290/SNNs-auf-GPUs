@@ -92,7 +92,11 @@ def fresh_cfg() -> Settings:
     cfg = Settings()
     cfg.NEURON = copy.deepcopy(cfg.NEURON)
     cfg.NEURON_TYPES = copy.deepcopy(cfg.NEURON_TYPES)
-    cfg.NUM_CLASSES = 10
+    # The sensor shape and class count come from the dataset registry, and Settings
+    # raises rather than inventing them -- so a test that builds a network without
+    # naming a dataset has to supply them, the same way check_network.PROBE_SHAPE does.
+    # N-MNIST's shape, because it is what the fixtures and expected values assume.
+    cfg.apply_dataset_shape(sensor_h=34, sensor_w=34, in_channels=2, num_classes=10)
     cfg.DEVICE = "cpu"
     return cfg
 

@@ -219,7 +219,17 @@ class NeuromorphicEncoder:
     def __init__(self, cfg: DatasetAwareConfig, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None, events_per_slice: int | None = None, calibrate_events_per_slice: bool | None = None):
 
         self.cfg = cfg
-        self.wf  = WorkflowSettings()
+        # cfg.config is the MERGED config -- the three base files with the experiment
+        # overlay already applied. Constructing WorkflowSettings() bare here re-read the
+        # base files from disk and threw the overlay away, so every framing, cache,
+        # augmentation, temporal_slicing and resource_policy key an experiment set was
+        # silently ignored by the data pipeline while the rest of the run honoured it.
+        #
+        # MEASURED: an ex2 run asking for framing.n_time_bins = 20 was framed at the
+        # base file's 16. Nothing in the output said so -- the batch-size calibration
+        # had already sized itself for T=20, so the two halves of the same run
+        # disagreed about the tensor shape.
+        self.wf  = WorkflowSettings(config=cfg.config)
 
         # Configure the shared SystemResourceMonitor once, early, now that
         # the run's device and cache path are both known — every consumer
