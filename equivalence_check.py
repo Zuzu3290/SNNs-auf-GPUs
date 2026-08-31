@@ -211,8 +211,12 @@ def main() -> int:
     args = parse_args()
     cfg, _wf, info = build(args)
     make_cfg(cfg)
-    # device already shows as cpu in the banner -- make_cfg pinned it, see its docstring
-    print(run_banner("equivalence_check.py", cfg, info, writes_results=False))
+    # framework/seed/dataset are omitted ON PURPOSE: this script builds all four
+    # frameworks (reference below), the poisson pattern carries its own fixed seed, and
+    # no dataset is touched. Printing cfg's values for them would state three things
+    # about the run that are not true. `device` stays -- make_cfg really did pin it.
+    print(run_banner("equivalence_check.py", cfg, info, writes_results=False,
+                     omit=("framework", "seed", "dataset")))
 
     print("=" * 78)
     print("NEURON EQUIVALENCE CHECK".center(78))

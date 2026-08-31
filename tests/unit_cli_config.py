@@ -218,15 +218,64 @@ def test_experiment_configs_live_in_their_experiment_folder() -> None:
             suite.check(f"{folder.name}/config.yaml parses", isinstance(load_config(config), dict))
 
 
+def _git_ignored(paths: list[str]) -> set[str] | None:
+    """Which of `paths` git would ignore. None when git cannot answer (no git on PATH,
+    or the tree was unpacked from a zip rather than cloned).
+
+    NUL-separated bytes, not text mode: on Windows `text=True` rewrites every "\\n" the
+    pipe carries into "\\r\\n", git takes the "\\r" as part of the pathname, and then
+    nothing matches. -z also stops git quoting paths it finds unusual.
+    """
+    import subprocess
+
+    try:
+        done = subprocess.run(
+            ["git", "check-ignore", "-z", "--stdin"], cwd=REPO_ROOT,
+            input=b"\0".join(p.encode("utf-8") for p in paths),
+            capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode not in (0, 1):  # 128 = not a git repository
+        return None
+    return {p for p in done.stdout.decode("utf-8").split("\0") if p}
+
+
 def test_generated_experiment_output_is_ignored() -> None:
-    """Runs and equivalence output are generated, not source. A Colab run and a laptop
-    run must not fight over the same files, and config.yaml/README.md must stay tracked
-    -- they describe the experiment."""
-    rules = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
-    for pattern in ["experiments/*/results/runs/", "experiments/*/equivalence/"]:
-        suite.check(f".gitignore covers {pattern}", pattern in rules)
-    suite.check("config.yaml is NOT ignored", "experiments/*/config.yaml" not in rules)
-    suite.check("README.md is NOT ignored", "experiments/*/README.md" not in rules)
+    """What a RUN writes is generated; what DESCRIBES the experiment is source.
+
+    Asked of git itself rather than of the .gitignore text. A pattern can read correctly
+    and still not do the job: `experiments/*/*/` looks equivalent to the rule actually
+    used but excludes the parent DIRECTORY, and git cannot re-include a file underneath
+    an excluded directory -- so the .gitkeep exception would silently stop working and
+    a fresh clone would come without the folders. Only check-ignore knows.
+    """
+    run = "20260831_norse_seed0"
+    generated = [
+        f"experiments/ex2/results/runs.csv",          # the append-only schema
+        f"experiments/ex2/results/{run}/test.csv",    # per-run CSVs
+        f"experiments/ex2/results/runs/{run}.json",
+        "experiments/ex2/plots/EQ_poisson.png",       # equivalence figures
+        f"experiments/ex2/plots/{run}/loss.png",      # per-run diagnostics
+        "experiments/ex2/figures/F1_accuracy.png",    # make_plots.py comparisons
+        "experiments/ex2/equivalence/EQ_poisson.png",
+        "experiments/ex9/some_future_folder/x.npz",   # a subfolder nobody has invented
+    ]
+    source = [
+        "experiments/ex2/config.yaml",
+        "experiments/ex2/README.md",
+        "experiments/ex2/ex2_design.md",
+        "experiments/ex2/plots/.gitkeep",             # holds the folder in a fresh clone
+        "experiments/ex2/results/.gitkeep",
+    ]
+    ignored = _git_ignored(generated + source)
+    if ignored is None:
+        suite.check("git cannot answer here -- .gitignore left unchecked", True, "skipped")
+        return
+    for path in generated:
+        suite.check(f"generated, so ignored: {path}", path in ignored)
+    for path in source:
+        suite.check(f"source, so tracked: {path}", path not in ignored)
 
 
 def test_no_argument_construction_still_works() -> None:
@@ -372,6 +421,28 @@ def test_banner_states_what_decides_the_run() -> None:
     suite.check("banner says when the dataset will be prompted", "will prompt" in text)
 
 
+def test_banner_omits_rows_a_script_does_not_use() -> None:
+    """A banner that reports a framework, a seed and a dataset the run never touched is
+    worse than one that stays quiet -- the reader cannot tell the values that were used
+    from the ones that were merely present in the config. equivalence_check builds ALL
+    FOUR frameworks, the poisson pattern carries its own fixed seed, and no dataset is
+    ever loaded, so it drops all three."""
+    cfg, _, info = build(parse(["--experiment", "ex2"]))
+
+    full = run_banner("x.py", cfg, info, writes_results=False)
+    for label in ("framework", "seed", "dataset"):
+        suite.check(f"by default the banner still prints {label}", f"  {label:<14}" in full)
+
+    trimmed = run_banner("x.py", cfg, info, writes_results=False,
+                         omit=("framework", "seed", "dataset"))
+    for label in ("framework", "seed", "dataset"):
+        suite.check(f"omit drops the {label} row", f"  {label:<14}" not in trimmed)
+    suite.check("what identifies the run survives -- config hash",
+                info["config_hash"] in trimmed)
+    suite.check("the experiment survives", "ex2" in trimmed)
+    suite.check("device survives: make_cfg really does pin it", "device" in trimmed)
+
+
 # ---------------------------------------------------------------------------
 # 7. dataset selection (D17)
 # ---------------------------------------------------------------------------
@@ -473,6 +544,7 @@ def main() -> int:
         test_output_dirs_directly,
         test_config_hash_tracks_content,
         test_banner_states_what_decides_the_run,
+        test_banner_omits_rows_a_script_does_not_use,
         test_dataset_defaults_to_prompt,
         test_dataset_name_from_config_skips_the_prompt,
         test_lookup_accepts_the_forms_people_actually_write,

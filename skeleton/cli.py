@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -177,17 +178,27 @@ def build(args: argparse.Namespace) -> tuple[Settings, WorkflowSettings, dict[st
 
 
 def run_banner(script: str, cfg: Settings, info: dict[str, Any], *,
-               extra: dict[str, Any] | None = None, writes_results: bool = True) -> str:
+               extra: dict[str, Any] | None = None, writes_results: bool = True,
+               omit: Iterable[str] = ()) -> str:
     """The identity block every entry point prints before doing anything.
 
     One shared formatter so every script announces the same facts the same way. The
     point is that a scrolled-back terminal, or a snippet pasted into a lab notebook,
     still says WHICH config and WHICH experiment produced what follows -- the two
     things that decide whether a number means anything.
+
+    `omit` drops rows a particular script does not act on. A banner that states a
+    framework, a seed and a dataset the run never used is worse than one that stays
+    quiet: the reader has no way to tell the reported values from the ignored ones.
+    equivalence_check.py omits all three -- it builds ALL FOUR frameworks, the poisson
+    pattern carries its own fixed seed, and no dataset is ever loaded.
     """
+    skip = set(omit)
     lines = ["=" * 74, script]
 
     def row(label: str, value: Any) -> None:
+        if label in skip:
+            return
         lines.append(f"  {label:<14}{value}")
 
     row("config", f"{info['config_path'] or 'base only (configuration/)'}"
