@@ -8,8 +8,53 @@ norse 1.1.0.
 from __future__ import annotations
 
 import logging
+import sys
+import types
 import warnings
 from typing import Any
+
+
+def _block_tensorboard_import() -> None:
+    """Stop `import norse.torch` from dragging in TensorFlow.
+
+    norse.torch's __init__ checks `importlib.util.find_spec("tensorboard")` and, if
+    tensorboard is installed, imports its own tensorboard helpers. Those do
+    `from torch.utils.tensorboard import SummaryWriter`, torch's writer probes
+    `tf.io.gfile` at import time, tensorboard's lazy loader imports TensorFlow, and
+    TensorFlow imports jax. On Colab -- where tensorboard and TensorFlow are both
+    preinstalled -- that chain ends the run before it starts:
+
+        AttributeError: module 'numpy.dtypes' has no attribute 'StringDType'
+
+    jax expects numpy >= 2.0; tonic 1.6.0 declares numpy < 2.0 and this pipeline cannot
+    do without tonic. Both cannot hold, so the chain is cut at its first link instead: a
+    stub registered under `torch.utils.tensorboard` satisfies norse's import and is
+    never called, because nothing here writes tensorboard logs (it is not in
+    requirements.txt either). Calling it raises rather than writing nothing silently.
+
+    Local machines without tensorboard never take norse's branch at all, so this is a
+    no-op there -- which is exactly why the failure only ever appeared on Colab.
+    """
+    name = "torch.utils.tensorboard"
+    if name in sys.modules:
+        return  # something imported the real one first; leave it alone
+
+    def _refuse(*_args: Any, **_kwargs: Any):
+        raise RuntimeError(
+            "tensorboard is not a dependency of this pipeline -- frameworks/adapters/"
+            "norse_lif.py replaced it with a stub so that importing norse cannot pull "
+            "in TensorFlow. Remove that stub if you genuinely need tensorboard."
+        )
+
+    stub = types.ModuleType(name)
+    stub.SummaryWriter = _refuse
+    stub.FileWriter = _refuse
+    stub.__all__ = ["SummaryWriter", "FileWriter"]
+    stub.__spec__ = types.SimpleNamespace(name=name, loader=None)
+    sys.modules[name] = stub
+
+
+_block_tensorboard_import()
 
 with warnings.catch_warnings():
     # Importing norse re-registers LIFParameters/LIFBoxParameters -- both namedtuple

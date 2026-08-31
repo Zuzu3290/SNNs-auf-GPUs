@@ -20,6 +20,10 @@ import torch
 
 from _harness import FRAMEWORKS, Suite, fresh_cfg, single_neuron
 
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 suite = Suite("unit_adapters")
 
 # What every framework's neuron must be, per network_architecture.yaml's `neuron:` block.
@@ -565,6 +569,97 @@ def test_sinabs_decay_gain_is_derived_from_the_module() -> None:
                 decay_gain.startswith("0.95"), f"got {decay_gain}")
 
 
+# The Colab runtime this failed on, reconstructed: tensorboard installed (so norse takes
+# its tensorboard branch) and a torch.utils.tensorboard whose import raises the way
+# jax's does against numpy < 2.0. Neither package is installed in the test environment,
+# so both are faked precisely enough to walk the same path. Run in a SUBPROCESS because
+# the thing under test is what happens at first import.
+_COLAB_SIM = """
+import importlib, importlib.abc, importlib.machinery, sys, types
+sys.path.insert(0, {repo!r})
+
+tb = types.ModuleType("tensorboard")
+tb.__spec__ = importlib.machinery.ModuleSpec("tensorboard", loader=None)
+tb.__path__ = []
+sys.modules["tensorboard"] = tb          # norse's find_spec("tensorboard") now succeeds
+
+TARGET = "torch.utils.tensorboard"
+
+class _Exploding(importlib.abc.Loader):
+    def create_module(self, spec): return None
+    def exec_module(self, module):
+        raise AttributeError(
+            "module 'numpy.dtypes' has no attribute 'StringDType'. Did you mean: 'StrDType'?")
+
+class _Finder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == TARGET:
+            return importlib.machinery.ModuleSpec(fullname, _Exploding())
+        return None
+
+sys.meta_path.insert(0, _Finder())
+
+if {guarded}:
+    import frameworks.adapters.norse_lif as adapter
+    print("IMPORTED_OK", hasattr(adapter, "NorseLIF"),
+          getattr(sys.modules.get(TARGET), "__all__", None))
+else:
+    import norse.torch
+    importlib.import_module(TARGET)      # what norse does when tensorboard is present
+    print("NO_FAILURE")
+"""
+
+
+def test_importing_norse_cannot_drag_in_tensorflow() -> None:
+    """The Colab crash this guards against, end to end.
+
+    norse.torch imports its tensorboard helpers whenever tensorboard is installed, and
+    those reach TensorFlow -> jax -> numpy.dtypes.StringDType, which does not exist
+    below numpy 2.0. tonic 1.6.0 declares numpy < 2.0 and this pipeline cannot do
+    without tonic, so the import chain is cut instead of the numpy pin moved.
+
+    MEASURED on Colab (python 3.13, tensorboard + TensorFlow preinstalled):
+        AttributeError: module 'numpy.dtypes' has no attribute 'StringDType'
+    raised from learning/main.py before the first batch.
+    """
+    import subprocess
+    import sys as _sys
+
+    repo = str(REPO_ROOT)
+
+    # 1. the failure is real: without the guard, this exact path dies.
+    unguarded = subprocess.run([_sys.executable, "-c",
+                                _COLAB_SIM.format(repo=repo, guarded=False)],
+                               capture_output=True, text=True, cwd=repo, timeout=180)
+    suite.check("without the guard the simulated Colab import fails",
+                unguarded.returncode != 0 and "StringDType" in unguarded.stderr,
+                (unguarded.stdout + unguarded.stderr)[-200:])
+
+    # 2. importing through the adapter survives it.
+    guarded = subprocess.run([_sys.executable, "-c",
+                              _COLAB_SIM.format(repo=repo, guarded=True)],
+                             capture_output=True, text=True, cwd=repo, timeout=180)
+    suite.check("the adapter imports norse anyway", guarded.returncode == 0,
+                (guarded.stdout + guarded.stderr)[-300:])
+    suite.check("and the adapter is fully built", "IMPORTED_OK True" in guarded.stdout,
+                guarded.stdout.strip()[-120:])
+    suite.check("torch.utils.tensorboard was replaced by the stub",
+                "SummaryWriter" in guarded.stdout, guarded.stdout.strip()[-120:])
+
+
+def test_the_tensorboard_stub_refuses_to_be_used_silently() -> None:
+    """A stub that quietly accepted writes would lose logs someone thought they had."""
+    import sys as _sys
+
+    stub = _sys.modules.get("torch.utils.tensorboard")
+    suite.check("the stub is installed by importing the norse adapter", stub is not None)
+    if stub is None:
+        return
+    suite.expect_raises("calling SummaryWriter raises", RuntimeError,
+                        lambda: stub.SummaryWriter(),
+                        must_mention=["not a dependency"])
+
+
 def main() -> int:
     return suite.run([
         test_input_gain_is_one,
@@ -598,6 +693,8 @@ def main() -> int:
         test_a_module_that_drifts_from_its_config_is_flagged,
         test_an_untouched_module_is_never_flagged,
         test_sinabs_decay_gain_is_derived_from_the_module,
+        test_importing_norse_cannot_drag_in_tensorflow,
+        test_the_tensorboard_stub_refuses_to_be_used_silently,
     ])
 
 

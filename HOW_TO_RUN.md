@@ -235,7 +235,7 @@ session needs no display.
 python tests/run_all.py
 ```
 
-1,013 checks across 9 suites, CPU-only, no dataset, about a minute. Exits non-zero if
+1,019 checks across 9 suites, CPU-only, no dataset, about a minute. Exits non-zero if
 anything fails, so it works as a pre-push gate.
 
 | arg | possible values | default | what it does |
