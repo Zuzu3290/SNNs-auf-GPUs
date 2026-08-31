@@ -26,7 +26,7 @@ from sinabs.activation import (
     MultiSpike, PeriodicExponential, SingleExponential, SingleSpike,
 )
 
-from frameworks.adapters.base import BaseLIF
+from frameworks.adapters.base import BaseLIF, reconcile, scalar
 from skeleton.neuron_spec import (
     NeuronSpecError, neuron_cfg, optional_float, require_bool, require_choice,
     require_float,
@@ -99,6 +99,24 @@ def build_surrogate(n: dict) -> Any:
             grad_scale=param("grad_scale"),
         )
     return Heaviside(window=param("window"))
+
+
+SURROGATE_CLASSES = {
+    "single_exponential": SingleExponential, "periodic_exponential": PeriodicExponential,
+    "gaussian": Gaussian, "multi_gaussian": MultiGaussian, "heaviside": Heaviside,
+}
+
+
+def _live_surrogate_description(fn: Any) -> str:
+    """The same string _surrogate_description produces, built from the OBJECT the module
+    holds so the two can be compared directly. Falls back to the class name for a
+    surrogate this adapter does not build."""
+    for kind, cls in SURROGATE_CLASSES.items():
+        if type(fn) is cls:
+            shown = ", ".join("{}={}".format(name, getattr(fn, name, "?"))
+                              for name in SURROGATE_PARAMS[kind])
+            return "{}({})".format(kind, shown)
+    return type(fn).__name__
 
 
 def _surrogate_description(n: dict) -> str:
@@ -217,29 +235,48 @@ class SinabsLIF(BaseLIF):
         return self.lif.v_mem.squeeze(1) if self.lif.v_mem.dim() > 1 else self.lif.v_mem
 
     def describe(self) -> dict[str, Any]:
+        """Read off the BUILT sl.LIF -- these are the values training will use."""
         n = neuron_cfg(self.cfg, "sinabs")
-        tau_mem = require_float(n, "tau_mem")
-        norm_input = require_bool(n, "norm_input")
+        lif = self.lif
+        reset_key = require_choice(n, "reset_mechanism", sorted(RESETS))
+        spike_key = require_choice(n, "spike_fn", sorted(SPIKE_FNS))
+        # From the module, so the decay/gain pair below describes the neuron that will
+        # actually run rather than the one the file asked for.
+        tau_mem = float(scalar(lif.tau_mem))
+        norm_input = bool(lif.norm_input)
         decay = float(torch.exp(torch.tensor(-1.0 / tau_mem)))
         gain = (1.0 - decay) if norm_input else 1.0
         return {
             "framework": "sinabs",
-            "tau_mem": tau_mem,
-            "tau_syn": optional_float(n, "tau_syn"),
-            "spike_threshold": require_float(n, "spike_threshold"),
-            "spike_fn": require_choice(n, "spike_fn", sorted(SPIKE_FNS)),
-            "reset_mechanism": require_choice(n, "reset_mechanism", sorted(RESETS)),
-            "v_reset": require_float(n, "v_reset"),
-            "min_v_mem": optional_float(n, "min_v_mem"),
-            "norm_input": norm_input,
-            "train_alphas": require_bool(n, "train_alphas"),
+            "tau_mem": reconcile(lif.tau_mem, require_float(n, "tau_mem")),
+            "tau_syn": reconcile(lif.tau_syn, optional_float(n, "tau_syn")),
+            "spike_threshold": reconcile(lif.spike_threshold,
+                                         require_float(n, "spike_threshold")),
+            # sinabs holds CLASSES and OBJECTS where the config holds keys, so these
+            # three compare identity against this adapter's own tables.
+            "spike_fn": reconcile(lif.spike_fn.__name__, spike_key,
+                                  agrees=lif.spike_fn is SPIKE_FNS[spike_key]),
+            "reset_mechanism": reconcile(type(lif.reset_fn).__name__, reset_key,
+                                         agrees=type(lif.reset_fn) is RESETS[reset_key]),
+            # Only MembraneReset carries a reset LEVEL. Under 'subtract' sinabs builds
+            # MembraneSubtract(subtract_value=None), which has no such field, so the
+            # neuron genuinely does not contain this number -- and this report claims
+            # to show the neuron that was BUILT. Reporting v_reset unconditionally read
+            # as "the built neuron resets to 0.0", which under subtract it does not.
+            "v_reset": (reconcile(getattr(lif.reset_fn, "reset_value", None),
+                                  require_float(n, "v_reset")) if reset_key == "zero"
+                        else "n/a -- subtract reset has no reset level"),
+            "min_v_mem": reconcile(lif.min_v_mem, optional_float(n, "min_v_mem")),
+            "norm_input": reconcile(lif.norm_input, require_bool(n, "norm_input")),
+            "train_alphas": reconcile(lif.train_alphas, require_bool(n, "train_alphas")),
             # Always False here, by the freeze in __init__. Recorded rather than
             # assumed: sinabs makes the time constant trainable by default, so "we
             # switched it off" is a fact about the run, not about the config.
             "tau_mem_trainable": any(p.requires_grad for p in self.lif.parameters()),
             # Named with its real parameters rather than a fictional `alpha`, since
             # sinabs uses none of the other frameworks' surrogate naming.
-            "surrogate": _surrogate_description(n),
+            "surrogate": reconcile(_live_surrogate_description(lif.surrogate_grad_fn),
+                                   _surrogate_description(n)),
             # Derived, for reading only -- on the same decay/gain scale as the other
             # three adapters so all four can be compared at a glance.
             "effective_decay_gain": f"{decay:.4f}/{gain:.4f}",

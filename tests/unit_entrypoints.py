@@ -372,6 +372,106 @@ def test_check_network_has_no_output_roots() -> None:
         suite.check(f"check_network rejects {flag}", code != 0, f"exit {code}")
 
 
+def _banner_rows(output: str) -> dict[str, str]:
+    """The `  label   value` rows of the LEADING banner only, as a dict.
+
+    Scoped to the region between the banner's own two `===` rules. The neuron blocks
+    further down print `      framework   snntorch` in the same shape, so a parser that
+    just scanned indented lines would report a framework row the banner never printed.
+    """
+    lines = output.splitlines()
+    rules = [i for i, line in enumerate(lines) if set(line.strip()) == {"="} and line.strip()]
+    if len(rules) < 2:
+        return {}
+    rows = {}
+    for line in lines[rules[0] + 1:rules[1]]:
+        if not line.startswith("  "):
+            continue
+        parts = line[2:].split(None, 1)
+        if len(parts) == 2:
+            rows.setdefault(parts[0], parts[1].strip())
+    return rows
+
+
+def test_check_network_banner_claims_only_what_it_uses() -> None:
+    """A banner row is a claim about the run, and a wrong claim is worse than silence.
+
+    check_network builds on the CPU whatever `training.device` says (see the module
+    docstring: "no download, no GPU"), and under --all it builds EVERY framework rather
+    than cfg.FRAMEWORK. The `shape` row already names the dataset, with its size, class
+    count and provenance.
+    """
+    code, out = run_script("check_network", ["--config", "experiments/ex2/config.yaml", "--all"])
+    suite.check("--all still passes", code == 0, f"exit {code}")
+    rows = _banner_rows(out)
+    for absent in ("device", "dataset", "framework"):
+        suite.check(f"--all banner does not claim a {absent}", absent not in rows,
+                    f"found {absent}={rows.get(absent)!r}")
+    for present in ("config", "seed", "shape"):
+        suite.check(f"--all banner still states the {present}", present in rows)
+    suite.check("the shape row carries the dataset name", "N-MNIST" in rows.get("shape", ""))
+
+    # Without --all exactly one framework IS inspected, so naming it is correct.
+    code, out = run_script("check_network",
+                           ["--config", "experiments/ex2/config.yaml", "--framework", "sinabs"])
+    suite.check("single-framework run passes", code == 0, f"exit {code}")
+    rows = _banner_rows(out)
+    suite.check("without --all the framework IS named", rows.get("framework") == "sinabs",
+                f"got {rows.get('framework')!r}")
+    suite.check("device stays absent -- it is still CPU-only", "device" not in rows)
+
+
+def test_norse_warning_is_not_repeated_per_layer() -> None:
+    """ex2 selects norse's own 'super' surrogate, whose alpha norse 1.1.0 ignores. The
+    warning is worth printing; printing it once per LIF layer, four networks over, read
+    as a dozen separate problems."""
+    from frameworks.adapters import norse_lif
+
+    norse_lif.reset_alpha_warning()
+    _code, out = run_script("check_network",
+                            ["--config", "experiments/ex2/config.yaml", "--all"])
+    hits = out.count("IGNORES alpha")
+    suite.check("the whole --all run warns at most once", hits <= 1, f"{hits} times")
+    suite.check("torch's namedtuple pytree noise is filtered at the norse import",
+                "is a subclass of `collections.namedtuple`" not in out)
+
+
+def test_check_network_fails_when_a_neuron_drifts_from_its_config() -> None:
+    """The inline MISMATCH marker has to reach the exit code, or a CI step and a reader
+    skimming the last line would both call a broken neuron spec green."""
+    import torch
+
+    import frameworks.adapters.snntorch_lif as snntorch_lif
+
+    real_build = snntorch_lif.build_lif
+
+    def drifting(cfg):
+        lif = real_build(cfg)
+        lif.beta = torch.tensor(0.123)   # as if the constructor had ignored the argument
+        return lif
+
+    snntorch_lif.build_lif = drifting
+    try:
+        code, out = run_script("check_network",
+                               ["--config", "experiments/ex2/config.yaml", "--all"])
+    finally:
+        snntorch_lif.build_lif = real_build
+
+    suite.check("a drifted neuron fails the run", code != 0, f"exit {code}")
+    suite.check("the verdict names the neuron check",
+                "every neuron holds the value its config asked for" in out)
+    suite.check("OVERALL is FAIL", "OVERALL: FAIL" in out)
+    suite.check("the offending value is named", "torch.beta" in out, out[-600:])
+    suite.check("weights still pass -- only the neuron drifted",
+                "PASS  every framework starts from identical weights" in out)
+
+    # And the clean config must still pass, so the check above is not just noise.
+    code, out = run_script("check_network",
+                           ["--config", "experiments/ex2/config.yaml", "--all"])
+    suite.check("the unmodified config still passes", code == 0, f"exit {code}")
+    suite.check("both checks report PASS", out.count("  PASS  ") == 2, out[-400:])
+
+
 def main() -> int:
     return suite.run([
         test_each_script_advertises_exactly_the_flags_it_can_act_on,
@@ -384,6 +484,9 @@ def main() -> int:
         test_check_network_all_passes_and_reports,
         test_check_network_single_framework_shows_shapes,
         test_check_network_honours_the_overlay,
+        test_check_network_banner_claims_only_what_it_uses,
+        test_norse_warning_is_not_repeated_per_layer,
+        test_check_network_fails_when_a_neuron_drifts_from_its_config,
         test_equivalence_pins_cpu,
         test_equivalence_takes_no_framework_or_seed_flag,
         test_input_patterns_stay_below_threshold,

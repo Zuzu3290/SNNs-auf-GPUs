@@ -8,13 +8,21 @@ norse 1.1.0.
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any
 
-import norse.torch as norse
+with warnings.catch_warnings():
+    # Importing norse re-registers LIFParameters/LIFBoxParameters -- both namedtuple
+    # subclasses -- with torch's pytree registry, which torch >= 2.4 warns about twice
+    # on every import. It says nothing about this pipeline and nothing the reader can
+    # act on, and it buries the one norse warning that DOES matter (see build_lif).
+    warnings.filterwarnings("ignore", message=r".*is a subclass of `collections\.namedtuple`.*")
+    import norse.torch as norse
+
 import torch
 from norse.torch.functional.reset import reset_subtract, reset_value
 
-from frameworks.adapters.base import BaseLIF
+from frameworks.adapters.base import BaseLIF, reconcile, scalar
 from skeleton.neuron_spec import (
     neuron_cfg, require_choice, require_float, require_surrogate,
 )
@@ -24,19 +32,36 @@ logger = logging.getLogger(__name__)
 RESETS = {"value": reset_value, "subtract": reset_subtract}
 SURROGATES = ("circ", "super", "heaviside", "tanh", "triangle", "heavi_erfc")
 
+# Guards the SuperSpike alpha warning below -- see build_lif for why once per process.
+_ALPHA_WARNING_SHOWN = False
+
+
+def reset_alpha_warning() -> None:
+    """Re-arm the once-per-process SuperSpike warning. For tests only: a suppression
+    that cannot be cleared is a suppression nothing can prove still fires."""
+    global _ALPHA_WARNING_SHOWN
+    _ALPHA_WARNING_SHOWN = False
+
 
 def build_lif(cfg) -> norse.LIFBoxCell:
+    global _ALPHA_WARNING_SHOWN
     n = neuron_cfg(cfg, "norse")
     require_choice(n, "cell", ["lif_box"])
 
     stype, salpha = require_surrogate(n)
     if stype not in SURROGATES:
         raise ValueError(f"neuron.norse.surrogate.type = {stype!r}; options {sorted(SURROGATES)}")
-    if stype == "super":
+    if stype == "super" and not _ALPHA_WARNING_SHOWN:
         # MEASURED against norse 1.1.0: SuperSpike's backward never references
         # ctx.alpha, so every alpha gives byte-identical gradients -- it behaves as
         # alpha=1, whose fat tails measured 6.03x the gradient norm of the other
         # frameworks. Allowed, but never silently.
+        #
+        # Once per process, not once per layer. The network builds one of these per
+        # LIF layer and check_network builds the whole network four times over, so an
+        # unguarded warning printed the same three lines repeatedly and read as three
+        # separate problems. It is one fact about the config.
+        _ALPHA_WARNING_SHOWN = True
         logger.warning(
             "[NORSE] surrogate 'super' IGNORES alpha in norse 1.1.0. It behaves as "
             "alpha=1 and measured 6.03x the gradient norm of the other frameworks. "
@@ -90,17 +115,35 @@ class NorseLIF(BaseLIF):
         return None if self.state is None else self.state.v
 
     def describe(self) -> dict[str, Any]:
+        """Read off the BUILT LIFBoxCell -- these are the values training will use.
+
+        Everything except dt lives in `p`, the LIFBoxParameters namedtuple the cell was
+        constructed with, so the values below are the ones its forward step reads.
+        """
         n = neuron_cfg(self.cfg, "norse")
         stype, salpha = require_surrogate(n)
+        p = self.lif.p
+        reset_key = require_choice(n, "reset_method", sorted(RESETS))
         return {
             "framework": "norse",
-            "cell": "lif_box",
-            "dt": require_float(n, "dt"),
-            "tau_mem_inv": require_float(n, "tau_mem_inv"),
-            "v_th": require_float(n, "v_th"),
-            "v_reset": require_float(n, "v_reset"),
-            "v_leak": require_float(n, "v_leak"),
-            "reset_method": require_choice(n, "reset_method", sorted(RESETS)),
+            # Not reconciled: this adapter builds exactly one cell type, and build_lif
+            # already rejects any other value for `cell`.
+            "cell": type(self.lif).__name__,
+            "dt": reconcile(self.lif.dt, require_float(n, "dt")),
+            "tau_mem_inv": reconcile(p.tau_mem_inv, require_float(n, "tau_mem_inv")),
+            "v_th": reconcile(p.v_th, require_float(n, "v_th")),
+            "v_reset": reconcile(p.v_reset, require_float(n, "v_reset")),
+            "v_leak": reconcile(p.v_leak, require_float(n, "v_leak")),
+            # norse stores the reset as a FUNCTION, so the check is identity against the
+            # one this adapter's table maps the config key to, not a name comparison.
+            "reset_method": reconcile(getattr(p.reset_method, "__name__", p.reset_method),
+                                      reset_key,
+                                      agrees=p.reset_method is RESETS[reset_key]),
+            # Applied by this adapter on the way in, not by norse -- see the class
+            # docstring. Live by construction: forward() multiplies by this attribute.
             "input_scale": self.input_scale,
-            "surrogate": f"{stype}(alpha={salpha})",
+            # p.alpha is stored faithfully; norse 1.1.0 simply never reads it back for
+            # 'super'. That is the warning build_lif raises, not a wiring mismatch.
+            "surrogate": reconcile(f"{p.method}(alpha={scalar(p.alpha)})",
+                                   f"{stype}(alpha={salpha})"),
         }

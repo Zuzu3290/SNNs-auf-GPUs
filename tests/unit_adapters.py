@@ -377,6 +377,194 @@ def test_changing_the_config_changes_the_neuron() -> None:
                     abs(decay - 0.5) < 1e-5, f"measured {decay:.9f}")
 
 
+def test_sinabs_v_reset_is_only_reported_when_the_reset_uses_it() -> None:
+    """This report claims to show the neuron that was BUILT.
+
+    sinabs takes a reset LEVEL only for MembraneReset. Under 'subtract' it builds
+    MembraneSubtract(subtract_value=None), which has no such field -- so printing
+    `v_reset 0.0` there named a number the built object does not contain, and read as
+    "resets to 0.0" when it resets by subtracting the threshold.
+    """
+    cfg = fresh_cfg()
+    cfg.NEURON["sinabs"]["reset_mechanism"] = "subtract"
+    described = single_neuron("sinabs", cfg).describe()
+    suite.check("under subtract, v_reset is not reported as a number",
+                not isinstance(described["v_reset"], (int, float)),
+                f"got {described['v_reset']!r}")
+    suite.check("and it says why", "subtract" in str(described["v_reset"]))
+
+    cfg = fresh_cfg()
+    cfg.NEURON["sinabs"]["reset_mechanism"] = "zero"
+    cfg.NEURON["sinabs"]["v_reset"] = 0.0
+    described = single_neuron("sinabs", cfg).describe()
+    suite.check("under zero, the real reset level IS reported",
+                described["v_reset"] == 0.0, f"got {described['v_reset']!r}")
+
+    # The live object is the authority on both branches.
+    layer = single_neuron("sinabs", cfg)
+    suite.check("sinabs really has no v_reset attribute of its own",
+                not hasattr(layer.lif, "v_reset"))
+    suite.check("the reset object is what actually carries it",
+                type(layer.lif.reset_fn).__name__ == "MembraneReset")
+
+
+def test_norse_alpha_warning_fires_once_per_process() -> None:
+    """The finding is real and must not be silenced -- but it is ONE fact about the
+    config, not one per layer. The network builds a LIF per layer and check_network
+    builds the whole network four times over, so an unguarded warning printed the same
+    three lines repeatedly and read as three separate problems."""
+    import logging
+
+    from frameworks.adapters import norse_lif
+
+    class Collect(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    cfg = fresh_cfg()
+    cfg.NEURON["norse"]["surrogate"]["type"] = "super"
+    logger = logging.getLogger("frameworks.adapters.norse_lif")
+    handler = Collect()
+    logger.addHandler(handler)
+    try:
+        norse_lif.reset_alpha_warning()
+        for _ in range(4):
+            single_neuron("norse", cfg)
+        alpha_warnings = [m for m in handler.messages if "IGNORES alpha" in m]
+        suite.check("four norse layers warn exactly once", len(alpha_warnings) == 1,
+                    f"{len(alpha_warnings)} warnings")
+        suite.check("and the warning still names the measured ratio",
+                    alpha_warnings and "6.03x" in alpha_warnings[0])
+
+        # A suppression nothing can clear is a suppression nothing can prove.
+        norse_lif.reset_alpha_warning()
+        single_neuron("norse", cfg)
+        suite.check("reset_alpha_warning re-arms it",
+                    len([m for m in handler.messages if "IGNORES alpha" in m]) == 2)
+
+        # circ is the recommended alternative and must stay quiet.
+        quiet = fresh_cfg()
+        quiet.NEURON["norse"]["surrogate"]["type"] = "circ"
+        quiet.NEURON["norse"]["surrogate"]["alpha"] = 0.5
+        norse_lif.reset_alpha_warning()
+        before = len([m for m in handler.messages if "IGNORES alpha" in m])
+        single_neuron("norse", quiet)
+        suite.check("circ does not warn",
+                    len([m for m in handler.messages if "IGNORES alpha" in m]) == before)
+    finally:
+        logger.removeHandler(handler)
+        norse_lif.reset_alpha_warning()
+
+
+def test_describe_reads_the_built_module_not_the_config() -> None:
+    """A config value is a REQUEST. A framework can rename a constructor argument
+    between versions, accept one and ignore it, or clamp it on the way in -- and a
+    report that echoed the request would look correct in all three cases.
+
+    So the module is corrupted AFTER construction, exactly the way a silently-ignored
+    argument would leave it, and describe() must report the corrupted value rather than
+    the config's.
+    """
+    import torch
+
+    layer = single_neuron("torch")
+    wanted = layer.describe()["beta"]
+    layer.lif.beta = torch.tensor(0.123)
+    got = layer.describe()["beta"]
+    suite.check("snntorch beta comes from the module", str(got).startswith("0.123"),
+                f"reported {got!r}, config said {wanted!r}")
+
+    layer = single_neuron("sj")
+    layer.lif.tau = 7.5
+    suite.check("spikingjelly tau comes from the module",
+                str(layer.describe()["tau"]).startswith("7.5"))
+
+    layer = single_neuron("norse")
+    layer.lif.p = layer.lif.p._replace(v_th=torch.tensor(3.25))
+    suite.check("norse v_th comes from the LIFBoxParameters the cell holds",
+                str(layer.describe()["v_th"]).startswith("3.25"))
+
+    layer = single_neuron("sinabs")
+    layer.lif.min_v_mem = torch.nn.Parameter(torch.tensor(-4.0))
+    suite.check("sinabs min_v_mem comes from the module",
+                str(layer.describe()["min_v_mem"]).startswith("-4.0"))
+
+
+def test_a_module_that_drifts_from_its_config_is_flagged() -> None:
+    """Reading the module is only half of it: the disagreement has to be visible."""
+    import torch
+
+    from frameworks.adapters.base import MISMATCH
+
+    layer = single_neuron("torch")
+    layer.lif.beta = torch.tensor(0.123)
+    reported = layer.describe()["beta"]
+    suite.check("a drifted float is marked MISMATCH", MISMATCH in str(reported))
+    suite.check("and the marker names what the config wanted", "0.9" in str(reported),
+                f"got {reported!r}")
+
+    # Identity-based checks: the config key and the live object are spelled
+    # differently, so only the adapter's own table can tell they agree.
+    from sinabs.activation import MembraneReset, SingleSpike
+
+    # Stated, not inherited: the swap has to land on the OTHER option than the config
+    # names, and fresh_cfg() is the base config rather than ex2's.
+    cfg = fresh_cfg()
+    cfg.NEURON["sinabs"]["spike_fn"] = "multi"
+    cfg.NEURON["sinabs"]["reset_mechanism"] = "subtract"
+    layer = single_neuron("sinabs", cfg)
+    layer.lif.spike_fn = SingleSpike
+    layer.lif.reset_fn = MembraneReset(reset_value=0.0)
+    described = layer.describe()
+    suite.check("a swapped spike function is caught", MISMATCH in str(described["spike_fn"]))
+    suite.check("a swapped reset object is caught",
+                MISMATCH in str(described["reset_mechanism"]))
+
+    from norse.torch.functional.reset import reset_subtract
+
+    layer = single_neuron("norse")
+    layer.lif.p = layer.lif.p._replace(reset_method=reset_subtract)
+    suite.check("a swapped norse reset function is caught",
+                MISMATCH in str(layer.describe()["reset_method"]))
+
+
+def test_an_untouched_module_is_never_flagged() -> None:
+    """The other half: no false positives. A float32 round-trip changes the last bits of
+    a config float, and a report that called that a mismatch would train the reader to
+    ignore the marker."""
+    from frameworks.adapters.base import MISMATCH
+
+    for framework in FRAMEWORKS:
+        described = single_neuron(framework).describe()
+        flagged = [key for key, value in described.items()
+                   if isinstance(value, str) and MISMATCH in value]
+        suite.check(f"{framework} reports no spurious mismatch", not flagged,
+                    f"flagged {flagged}")
+
+
+def test_sinabs_decay_gain_is_derived_from_the_module() -> None:
+    """The decay/gain pair is what puts all four frameworks on one scale, so it has to
+    describe the neuron that will run -- not the one the file asked for."""
+    import torch
+
+    cfg = fresh_cfg()
+    cfg.NEURON["sinabs"]["tau_mem"] = float("inf")
+    cfg.NEURON["sinabs"]["norm_input"] = False
+    layer = single_neuron("sinabs", cfg)
+    suite.check("tau_mem inf means no leak, gain 1",
+                layer.describe()["effective_decay_gain"] == "1.0000/1.0000",
+                layer.describe()["effective_decay_gain"])
+
+    layer.lif.tau_mem = torch.nn.Parameter(torch.tensor(20.0))
+    decay_gain = layer.describe()["effective_decay_gain"]
+    suite.check("a changed module tau_mem changes the reported decay",
+                decay_gain.startswith("0.95"), f"got {decay_gain}")
+
+
 def main() -> int:
     return suite.run([
         test_input_gain_is_one,
@@ -404,6 +592,12 @@ def main() -> int:
         test_missing_neuron_key_raises,
         test_missing_neuron_block_raises,
         test_changing_the_config_changes_the_neuron,
+        test_sinabs_v_reset_is_only_reported_when_the_reset_uses_it,
+        test_norse_alpha_warning_fires_once_per_process,
+        test_describe_reads_the_built_module_not_the_config,
+        test_a_module_that_drifts_from_its_config_is_flagged,
+        test_an_untouched_module_is_never_flagged,
+        test_sinabs_decay_gain_is_derived_from_the_module,
     ])
 
 

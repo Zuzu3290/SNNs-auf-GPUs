@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 
 from frameworks.adapters import lif_factory
-from frameworks.adapters.base import BaseLIF
+from frameworks.adapters.base import MISMATCH, BaseLIF
 from frameworks.spiking_net import build_network
 from skeleton.cli import add_common_args, build, run_banner
 from skeleton.seeding import param_report, seed_model_init, verify_cross_framework_init
@@ -59,6 +59,16 @@ def apply_shape_without_download(cfg) -> str:
                             num_classes=entry["num_classes"])
     return (f"{entry['name']} ({cfg.SENSOR_H}x{cfg.SENSOR_W}, "
             f"{cfg.NUM_CLASSES} classes) -- from the registry, nothing downloaded")
+
+
+def is_mismatch(value) -> bool:
+    """Whether describe() flagged this value as disagreeing with the config.
+
+    describe() marks disagreement inline rather than raising, so the report can show
+    every problem at once instead of stopping at the first. This is what turns those
+    marks into an exit code.
+    """
+    return isinstance(value, str) and MISMATCH in value
 
 
 def build_one(framework: str, cfg):
@@ -136,9 +146,10 @@ def compare_all(cfg, batch: int) -> bool:
     print("=" * 74)
     print("NEURON ACTUALLY BUILT, per framework")
     print("=" * 74)
-    print("These are SUPPOSED to differ in NAMING between frameworks -- each one uses its")
-    print("own units. They must be the values THIS config asked for. Read them against")
-    print("network_architecture.yaml's neuron: block.")
+    print("Read back off the object that will train, in each framework's own naming --")
+    print("LIFBoxCell, MultiSpike, MembraneSubtract and so on. The names are SUPPOSED to")
+    print("differ; what must hold is that each value is the one network_architecture.yaml")
+    print("asked for. Any that is not is marked MISMATCH inline and fails this run.")
     print()
     for row in rows:
         print(f"  {row['framework']}")
@@ -146,16 +157,29 @@ def compare_all(cfg, batch: int) -> bool:
             print(f"      {key:<22}{value}")
         print()
 
-    passed, problems = verify_cross_framework_init(reports)
+    weights_ok, problems = verify_cross_framework_init(reports)
+    mismatches = [(row["framework"], key, value) for row in rows
+                  for key, value in row["neuron"].items() if is_mismatch(value)]
+
     print("=" * 74)
-    print(f"  {'PASS' if passed else 'FAIL'}  every framework starts from identical weights")
+    print(f"  {'PASS' if weights_ok else 'FAIL'}  every framework starts from identical weights")
     for problem in problems:
         print(f"        {problem}")
+    print(f"  {'PASS' if not mismatches else 'FAIL'}  every neuron holds the value its "
+          "config asked for")
+    for framework, key, value in mismatches:
+        print(f"        {framework}.{key} = {value}")
     print("=" * 74)
+
+    passed = weights_ok and not mismatches
     print(f"OVERALL: {'PASS' if passed else 'FAIL'}")
-    if not passed:
+    if not weights_ok:
         print("\nThe frameworks do NOT start from the same place. Any accuracy comparison")
         print("between them would be meaningless until this is fixed.")
+    if mismatches:
+        print("\nA neuron was BUILT with a value the config did not ask for. Either the")
+        print("framework ignored the argument, renamed it, or clamped it on the way in --")
+        print("in every case the run would not be the experiment the config describes.")
     return passed
 
 
@@ -182,8 +206,15 @@ def main() -> int:
     # A label, not an output path: this script writes no files, so --experiment only
     # says which experiment's config you are checking.
     shape_note = apply_shape_without_download(cfg)
+    # Rows this script must not claim:
+    #   device     build_one() never leaves the CPU -- see the module docstring, "no
+    #              GPU". Printing cfg.DEVICE would name hardware nothing here touches.
+    #   dataset    the `shape` row states it with more detail, and says where it came
+    #              from. Two rows for one fact invite the reader to look for two.
+    #   framework  under --all this builds EVERY framework, so naming one is wrong.
+    omit = ["device", "dataset"] + (["framework"] if args.all else [])
     print(run_banner("check_network.py", cfg, info, writes_results=False,
-                     extra={"shape": shape_note}))
+                     extra={"shape": shape_note}, omit=omit))
     print()
 
     if args.all:
@@ -199,10 +230,16 @@ def main() -> int:
     print(f"  trainable parameters : {report['total_trainable']:,}")
     print(f"  shared fingerprint   : {report['shared_fingerprint']}")
     print()
-    print("  neuron actually built:")
-    for key, value in net.lif_layers()[0].describe().items():
+    print("  neuron actually built (read back off the module, not the config):")
+    neuron = net.lif_layers()[0].describe()
+    for key, value in neuron.items():
         print(f"      {key:<22}{value}")
     print()
+
+    mismatches = [key for key, value in neuron.items() if is_mismatch(value)]
+    if mismatches:
+        print(f"  FAIL  built with values the config did not ask for: {', '.join(mismatches)}")
+        return 1
     print("  (run with --all to check every framework starts from identical weights)")
     return 0
 
