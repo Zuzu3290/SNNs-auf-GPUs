@@ -184,6 +184,68 @@ class SpikingNet(nn.Module):
             for name, layer in self.named_lif_layers().items()
         }
 
+    def neuron_counts(self, in_channels: int, sensor_h: int, sensor_w: int) -> dict[str, int]:
+        """Neurons per spiking layer, per sample -- MEASURED, not derived.
+
+        Slot name -> neuron count, e.g. {"lif1": 10800, "lif2": 3872, "lif_out": 10}.
+
+        Measured off a real forward pass for the same reason measure_flat_features() is:
+        the layer list is the AUTHORITY, and a formula that models the architecture can
+        silently stop matching it. This project has already been bitten by exactly that
+        -- see check_flat_features() for the case where compute_fc_in() returns a
+        plausible positive number for an architecture that cannot be built.
+
+        Counts every BaseLIF slot present, so an FC hidden layer added later is included
+        automatically without this function needing to know it exists.
+
+        WHY THIS EXISTS AT ALL: neuron count is the size axis of the scalability study.
+        Neurons scale roughly LINEARLY with conv width while parameters scale roughly
+        QUADRATICALLY, so `trainable_params` alone cannot place a run on a size ladder --
+        the two counts disagree about how much bigger a network got.
+
+        BaseLIF.neurons() cannot serve here: it reads spike_shape, which is only
+        populated while count_spikes is on, and spike counting is off in the normal run
+        path (it costs an extra GPU kernel per layer per timestep, and this project
+        measures wall-clock time).
+
+        Cost is one no-grad forward at T=1, batch 1. LIF layers preserve shape, so a
+        single timestep is enough to learn every layer's per-sample shape. Neuron state
+        is reset afterwards, so the probe leaves nothing behind.
+        """
+        named = self.named_lif_layers()
+        shapes: dict[str, tuple[int, ...]] = {}
+        handles = []
+
+        def make_hook(name: str):
+            def hook(module, inputs, output):
+                tensor = output[0] if isinstance(output, tuple) else output
+                shapes.setdefault(name, tuple(tensor.shape[1:]))  # drop the batch dim
+            return hook
+
+        for name, layer in named.items():
+            handles.append(layer.register_forward_hook(make_hook(name)))
+
+        device = next(self.parameters()).device
+        probe = torch.zeros(1, 1, in_channels, sensor_h, sensor_w, device=device)
+        try:
+            with torch.no_grad():
+                self.forward(probe)
+        finally:
+            for handle in handles:
+                handle.remove()
+            self.reset()
+
+        counts: dict[str, int] = {}
+        for name in named:
+            shape = shapes.get(name)
+            if shape is None:
+                continue
+            count = 1
+            for dimension in shape:
+                count *= int(dimension)
+            counts[name] = count
+        return counts
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() != 5:
             raise ValueError(

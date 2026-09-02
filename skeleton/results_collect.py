@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from skeleton.results import environment_info, make_run_id
 
@@ -26,6 +27,89 @@ def _pct(value: Any) -> float | None:
 
 def _last(seq) -> Any:
     return seq[-1] if seq else None
+
+
+def _architecture(model, cfg) -> dict:
+    """Every architecture fact a size-ladder row needs, read off the LIVE model.
+
+    Measured rather than read back from the config, on the same principle as
+    SpikingNet.measure_flat_features(): the built layer list is the authority, and a
+    config value only says what was *asked for*. A row that reports the request rather
+    than the result cannot be trusted to describe what actually ran.
+
+    The parameter split is three-way and the boundary matters:
+
+        conv_params        every Conv2d -- the feature extractor, what Factor A sweeps
+        fc_hidden_params   every Linear EXCEPT the last -- what Factor B adds
+        classifier_params  the LAST Linear -- flatten_width x num_classes
+
+    The classifier is separated because its size follows the SENSOR RESOLUTION, not the
+    conv widths under test. On a 180x240 sensor it reaches ~7.7M parameters against a
+    ~10k conv stack, so "we doubled the network" would be a statement about that one
+    matrix. Keeping it in its own column makes the share visible per run.
+
+    fc_hidden_layers / fc_hidden_size are counted from the model too, so they read 0 and
+    empty today and start reporting real values the moment FC hidden layers are added --
+    no schema change and no config key needed for that to work.
+
+    Everything is guarded: a model without `.net`, or one whose probe fails, yields an
+    all-None dict and the row still writes. A bookkeeping error must never cost a
+    finished run.
+    """
+    blank = {
+        "total_neurons": None, "neurons_per_layer": None,
+        "conv1_out": None, "conv2_out": None,
+        "conv1_kernel": None, "conv2_kernel": None, "pool_kernel": None,
+        "fc_hidden_layers": None, "fc_hidden_size": None, "flatten_width": None,
+        "conv_params": None, "fc_hidden_params": None, "classifier_params": None,
+    }
+
+    net = getattr(model, "net", None)
+    if net is None:
+        return blank
+
+    out = dict(blank)
+
+    # ---- neurons: the size axis, measured by a shape probe --------------------
+    try:
+        counts = model.neuron_counts()
+    except Exception:  # a diagnostic must not cost a finished run
+        counts = {}
+    if counts:
+        out["total_neurons"] = sum(counts.values())
+        # pipe-separated, never comma -- this lands in a CSV cell
+        out["neurons_per_layer"] = "|".join(f"{name}:{n}" for name, n in counts.items())
+
+    # ---- one walk of the real layer list --------------------------------------
+    convs = [layer for layer in net.layers if isinstance(layer, nn.Conv2d)]
+    linears = [layer for layer in net.layers if isinstance(layer, nn.Linear)]
+
+    if convs:
+        out["conv1_out"] = convs[0].out_channels
+        out["conv1_kernel"] = convs[0].kernel_size[0]
+        out["conv_params"] = sum(p.numel() for layer in convs for p in layer.parameters())
+    if len(convs) > 1:
+        out["conv2_out"] = convs[1].out_channels
+        out["conv2_kernel"] = convs[1].kernel_size[0]
+
+    pools = [layer for layer in net.layers if isinstance(layer, nn.MaxPool2d)]
+    if pools:
+        kernel = pools[0].kernel_size
+        out["pool_kernel"] = kernel[0] if isinstance(kernel, tuple) else kernel
+
+    if linears:
+        # The first Linear is whatever consumes the flattened feature map, whether or
+        # not hidden layers exist -- so its in_features IS the measured flatten width.
+        out["flatten_width"] = linears[0].in_features
+        out["classifier_params"] = sum(p.numel() for p in linears[-1].parameters())
+        hidden = linears[:-1]
+        out["fc_hidden_layers"] = len(hidden)
+        out["fc_hidden_size"] = hidden[0].out_features if hidden else None
+        out["fc_hidden_params"] = sum(
+            p.numel() for layer in hidden for p in layer.parameters()
+        ) if hidden else 0
+
+    return out
 
 
 def _peak_over_epochs(epoch_log: list[dict], key: str) -> float | None:
@@ -171,6 +255,10 @@ def build_run_row(
         "optimizer": getattr(cfg, "OPTIMIZER", None),
         "lr": getattr(cfg, "LEARNING_RATE", None),
         "surrogate": neuron.get("surrogate"),
+
+        # architecture / size axis (schema v2) -- see _architecture() for why each of
+        # these is measured off the live model rather than read back from the config.
+        **_architecture(model, cfg),
 
         "trainable_params": params.get("total_trainable"),
         "weight_fingerprint": params.get("shared_fingerprint"),

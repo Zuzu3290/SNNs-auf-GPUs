@@ -37,7 +37,11 @@ from typing import Any
 
 import torch
 
-SCHEMA_VERSION = 1
+# v2 added the `architecture` block below -- the size axis of the scalability study.
+# Bumped rather than appended silently because append_row() refuses to write into a
+# file whose header differs, which is what stops a schema change from misaligning every
+# row of an existing runs.csv. A v1 file must be moved aside, not appended to.
+SCHEMA_VERSION = 2
 
 
 class ResultsError(Exception):
@@ -55,6 +59,24 @@ RUN_COLUMNS: list[str] = [
     # setup
     "dataset", "time_steps", "batch_size", "num_workers", "binarize",
     "denoise_us", "epochs", "optimizer", "lr", "surrogate",
+    # ---- architecture (v2) -- the SIZE AXIS of the scalability study -------------
+    # `trainable_params` alone cannot place a run on a size ladder: over a width sweep
+    # neurons grow roughly LINEARLY while parameters grow roughly QUADRATICALLY, so the
+    # two counts disagree about how much bigger a network got. total_neurons is the
+    # agreed axis and is measured off the live network, not derived from a formula.
+    #
+    # The conv/hidden/classifier parameter split is here because the classifier's size
+    # is flatten_width x num_classes -- driven by SENSOR RESOLUTION, not by the conv
+    # widths a scaling study sweeps. On a large sensor it can dwarf the whole conv
+    # stack, so a capacity effect credited to the feature extractor would really be that
+    # one matrix. Recorded per run so the share is checkable rather than assumed.
+    #
+    # pool_kernel is recorded because it sets the spatial geometry of every later layer:
+    # two runs with different pooling are not comparable, so each row must prove its own.
+    "total_neurons", "neurons_per_layer",
+    "conv1_out", "conv2_out", "conv1_kernel", "conv2_kernel", "pool_kernel",
+    "fc_hidden_layers", "fc_hidden_size", "flatten_width",
+    "conv_params", "fc_hidden_params", "classifier_params",
     # integrity -- the fairness evidence travels WITH the numbers
     "trainable_params", "weight_fingerprint",
     # accuracy

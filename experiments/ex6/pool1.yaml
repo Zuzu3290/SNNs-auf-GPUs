@@ -1,0 +1,39 @@
+# Experiment 6, ARM A -- pool_kernel 1.
+#
+# Inherits everything from config.yaml (arm B) and changes ONE value, so the two arms
+# cannot differ in any other way. That is what makes the comparison attributable.
+#
+#   pool_kernel: 1   a 1x1 window -- NO downsampling at all, the layer is an identity
+#   pool_kernel: 2   a 2x2 window keeping the single largest of four -- discards 75%,
+#                    halves each dimension  (arm B, the base value)
+#
+# So this is not "one max value versus two". It is NO downsampling versus 4x
+# downsampling, applied twice.
+#
+# WHAT THIS ARM IS EXPECTED TO SHOW, and why it is still worth running:
+#
+# Pooling sets the spatial size, which sets the flatten width, which sets the final
+# classifier's parameter count. At 12/32 filters on N-MNIST:
+#
+#                        pool 1        pool 2
+#   spatial at flatten   26 x 26       5 x 5
+#   flatten width        21,632        800
+#   conv stack params    10,244        10,244
+#   classifier params    216,330       8,010
+#   classifier's SHARE   95.5%         43.9%
+#   total neurons        32,442        14,682
+#
+# At pool 1 the final layer is 95.5% of the whole network, so a later filter sweep
+# would barely move the total and the study would be measuring the classifier rather
+# than the feature extractor it claims to be about. That is the structural argument
+# for arm B, and it holds regardless of what accuracy comes out.
+#
+# This arm is run anyway because the decision was asked for EMPIRICALLY -- the measured
+# accuracy, VRAM and epoch time for both settings are the evidence, and the number gets
+# reported back for use in a second pipeline. A recommendation that was verified is
+# worth more than one that was asserted.
+
+extends: config.yaml
+
+convolution:
+  pool_kernel: 1

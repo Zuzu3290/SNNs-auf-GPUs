@@ -158,6 +158,32 @@ the `"loader"` alternative.
 if you dont have a neuromorphic dataset than review the working mechnaism of the tonic library and its wrapper. A discussion with Claude will be more convienent. 
 ---
 
+## Results Schema
+
+Every routed run appends to three CSVs plus one JSON per run. `runs.csv` is the
+comparison table — one row per run, 61 columns at **`schema_version: 2`**, append-only,
+with a fixed column set so an unmeasurable metric writes an empty cell rather than
+shifting the header.
+
+**Full column reference and the four guarantees: [`HOW_TO_RUN.md` §B3b](HOW_TO_RUN.md).**
+Schema definition: [`skeleton/results.py`](skeleton/results.py). Population:
+[`skeleton/results_collect.py`](skeleton/results_collect.py).
+
+Two things to know before adding a column:
+
+- **`append_row()` refuses a header mismatch.** That is deliberate — it prevents a
+  silent append that would misalign every later row. But it means a schema change
+  partway through a multi-run sweep makes the remaining runs fail *after* their training
+  finished. Settle the schema before a sweep, not during one.
+- **`schema_version: 2` added the `architecture` group** — `total_neurons`,
+  `neurons_per_layer`, the conv/hidden/classifier parameter split, `pool_kernel`,
+  `flatten_width` and the per-layer filter counts. Added for the scalability study
+  ([`scalability_tests/`](scalability_tests/)) where network size is the independent
+  variable, but useful to any run: it records what was actually **built**, measured off
+  the layer list, rather than what the config asked for. `trainable_params` alone cannot
+  place a run on a size ladder, because neuron count grows roughly linearly with width
+  while parameter count grows roughly quadratically.
+
 ## Growing Analytics
 
 Diagnostic benchmark runs across framework backends are ongoing, with results

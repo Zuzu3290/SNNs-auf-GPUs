@@ -1,0 +1,101 @@
+# Experiment 6 -- pilot and pooling viability.
+#
+# The FIRST experiment of the scalability study (Boundaries of Emergence). It decides
+# one setting -- pool_kernel -- and then that setting is frozen for every later
+# experiment in the study. Nothing downstream is comparable until it is locked, which
+# is why this runs first.
+#
+# See README.md in this folder for what is being decided and how.
+#
+# ---------------------------------------------------------------------------
+# THIS FILE IS THE SHARED RECIPE, AND IT IS ALSO RUN ARM B.
+#
+#   config.yaml    arm B -- pool_kernel 2 (inherited from the base config)
+#   pool1.yaml     arm A -- pool_kernel 1, extends this file
+#   vram_check.yaml  arm C -- top-of-ladder width, extends this file
+#
+# The two variants state ONLY the one thing they change, so the three arms cannot
+# drift apart in any other setting. That is the whole point of the `extends:` chain.
+# ---------------------------------------------------------------------------
+#
+# Overlays the three files in configuration/. States ONLY what differs from them.
+
+dataset:
+  name: N-MNIST                 # base is null (prompt). Stated so the run is
+                                # reproducible from its config alone and needs no stdin.
+
+# ---------------------------------------------------------------------------
+# framing: T is held fixed for the ENTIRE study. It multiplies runtime, memory and
+# spike counts, so a study that varied it could not attribute anything to network size.
+#
+# 16 is the base value, kept deliberately rather than ex2's 20: this study is ~25 runs,
+# and T=16 is 20% cheaper per run than T=20 with no loss to the question being asked.
+# Cross-comparability with ex1/ex2 is NOT required -- that was a framework comparison,
+# this is a size comparison.
+# ---------------------------------------------------------------------------
+framing:
+  n_time_bins: 16
+
+training:
+  # ---- one backend, held fixed --------------------------------------------------
+  # This study varies network SIZE, not framework. Any single backend answers the
+  # question; sj is the base default and is stated here so the record is unambiguous.
+  # Overridable per-run with --framework, but do NOT vary it inside the study.
+  framework: sj
+  seed: 0                       # single seed by design -- see experiment_plan.md section 6
+                                # for the three points where multi-seed IS required.
+
+  # ---- the batch size must be PINNED -------------------------------------------
+  # calibrate_batch_size probes live VRAM and picks a batch size filling ~35% of the
+  # card. That is right for a normal run and WRONG for a size ladder: a bigger network
+  # has bigger activations, so the probe returns a SMALLER batch at every rung. Batch
+  # size then changes gradient noise, wall-clock time AND the number of optimizer steps
+  # per epoch -- three variables moving while the study claims to move one.
+  #
+  # 64 x 2 accumulation = effective batch 128, matching the base config's training
+  # dynamics while halving the activation memory a single forward pass has to hold.
+  # BPTT keeps every timestep's activations live for the backward pass, so activation
+  # memory is the binding constraint at the top of the ladder, not parameter count.
+  #
+  # Arm C (vram_check.yaml) exists to prove this value survives the LARGEST planned
+  # network. If arm C runs out of memory, drop to batch_size 32 / grad_accum_steps 4
+  # and re-run EVERY arm -- all rungs of the study must share one batch size.
+  calibrate_batch_size: false
+  batch_size: 64
+  grad_accum_steps: 2
+
+  # ---- constant learning rate ---------------------------------------------------
+  # The base config's `cosine` scheduler ANNEALS the learning rate toward zero across
+  # epochs, so "constant lr" is false by default. `none` is what actually holds it
+  # constant. optimizer.lr stays at the base 0.002.
+  lr_scheduler: none
+
+  # 5 epochs: enough training for the accuracy difference between the two pooling
+  # settings to be a real signal rather than startup noise. Matches ex2's precedent.
+  epochs: 5
+
+  # null = a full pass over the training set. Not capped: an epoch that covers only
+  # part of the data would make "accuracy after 5 epochs" mean something different
+  # between arms if anything about the loader changed.
+  iterations_per_epoch: null
+
+  # false, deliberately. AMP would roughly halve activation memory, which is tempting
+  # here -- but VRAM is one of this study's COST METRICS, and mixed precision would
+  # make every VRAM reading a measure of AMP's coverage rather than of the network.
+  # It also changes numerics. Off keeps the cost axis honest.
+  use_amp: false
+
+# ---------------------------------------------------------------------------
+# convolution: NOT overridden in this file.
+#
+# Arm B deliberately inherits the base architecture unchanged -- 12/32 filters,
+# 5x5 kernels, pool_kernel 2 -- because it is the known-good reference the rest of
+# the study scales from, and because it is the cited snnTorch/Tonic N-MNIST design
+# (12C5-MP2-32C5-MP2-FC).
+#
+# Arm A changes pool_kernel and nothing else.
+# Arm C changes the filter counts and nothing else.
+# ---------------------------------------------------------------------------
+
+# neuron / neuron_types: NOT overridden. The neuron is not a variable in this study,
+# so the base spec (all four frameworks describing one shared LIF) stands unchanged.

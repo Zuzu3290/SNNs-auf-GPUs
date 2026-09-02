@@ -144,3 +144,23 @@ class SNNModel(ModelInterface, nn.Module):
 
     def spike_rates(self) -> dict:
         return self.net.spike_rates()
+
+    def neuron_counts(self) -> dict:
+        """Slot name -> neurons per sample, measured off the live network.
+
+        See SpikingNet.neuron_counts() for why this is measured rather than derived.
+        The size axis of the scalability study is the SUM of these.
+
+        Recording is paused around the probe and its prior state restored, so the
+        shape probe cannot leave a spurious timestep in the ActivityMonitor's buffers
+        for whatever reads them next.
+        """
+        was_paused = self.activity.paused
+        self.activity.pause()
+        try:
+            return self.net.neuron_counts(
+                self.cfg.IN_CHANNELS, self.cfg.SENSOR_H, self.cfg.SENSOR_W
+            )
+        finally:
+            self.activity.paused = was_paused
+            self.activity.clear()

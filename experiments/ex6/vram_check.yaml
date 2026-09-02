@@ -1,0 +1,57 @@
+# Experiment 6, ARM C -- the top-of-ladder VRAM headroom check.
+#
+# Inherits everything from config.yaml (arm B, pool_kernel 2) and changes ONLY the
+# filter counts, to the LARGEST network the study plans to build.
+#
+# WHAT THIS ARM IS FOR
+#
+# It is not a scientific arm -- it answers one engineering question:
+#
+#     does the biggest planned network fit, at the batch size every other run uses?
+#
+# Every rung of the study must share one batch size (see config.yaml for why), and that
+# shared value therefore has to be one the LARGEST rung can survive. Discovering
+# otherwise after the ladder has started means re-running everything, because a study
+# whose batch size changed halfway measures batch size as much as it measures capacity.
+#
+# So: find out now, on one run, at the cheapest possible moment.
+#
+# WHY 128 FILTERS
+#
+# The ladder in scalability.md tops out at filters=128. Read here as "both conv layers
+# get the same filter count", which is the literal reading of that document.
+#
+# At 128/128 with pool_kernel 2 on N-MNIST, per timestep:
+#
+#   lif1   128 x 30 x 30  = 115,200 neurons
+#   lif2   128 x 11 x 11  =  15,488 neurons
+#   out                   =      10 neurons
+#   TOTAL                 = 130,698 neurons
+#
+# BPTT holds every timestep's activations live for the backward pass, so the activation
+# bill scales with neurons x T x batch -- and at T=16 that is the binding constraint,
+# not the 448k parameters. This run measures it rather than predicting it.
+#
+# Also worth noting for the record: 130,698 neurons crosses into the "large scale"
+# bracket (100,000+) that scalability.md cites, while the 14,682-neuron baseline sits in
+# the "medium" bracket (10,000-50,000). The ladder therefore spans a real, named
+# transition rather than an arbitrary range.
+#
+# HOW TO READ THE RESULT
+#
+#   fits with headroom   -> batch_size 64 / grad_accum_steps 2 is confirmed for the
+#                           whole study. Proceed to ex7.
+#   fits but barely      -> drop to batch_size 32 / grad_accum_steps 4 anyway. A rung
+#                           that only just fits will fail once a metric is added later.
+#   out of memory        -> drop to 32/4, re-run ARM A AND ARM B at the new value too,
+#                           and only then proceed. All rungs share one batch size.
+#
+# NOTE ON ORDERING: this arm uses pool_kernel 2, the recommended value, because arms A
+# and B have not been read yet when it runs. If arm A unexpectedly wins, this arm has
+# to be repeated at pool_kernel 1 before the ladder starts.
+
+extends: config.yaml
+
+convolution:
+  conv1_out: 128
+  conv2_out: 128

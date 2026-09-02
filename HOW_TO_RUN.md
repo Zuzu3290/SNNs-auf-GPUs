@@ -235,7 +235,7 @@ session needs no display.
 python tests/run_all.py
 ```
 
-1,028 checks across 9 suites, CPU-only, no dataset, about a minute. Exits non-zero if
+1,048 checks across 9 suites, CPU-only, no dataset, about a minute. Exits non-zero if
 anything fails, so it works as a pre-push gate.
 
 | arg | possible values | default | what it does |
@@ -362,6 +362,112 @@ Nesting happens only when `--experiment` is given. Without it, everything stays 
 
 Repeat with a different `--framework` and the same `--seed` to compare frameworks; with
 the same `--framework` and a different `--seed` to get replicates.
+
+## B3b. Reading the result files
+
+Seven files per experiment, at two different grains. Knowing which one answers a
+question saves opening all of them.
+
+| file | one row per | read it for |
+|---|---|---|
+| `results/runs.csv` | **run** | **the comparison table.** This is what `make_plots.py` reads |
+| `results/epochs.csv` | epoch | learning curves across runs |
+| `results/layers.csv` | spiking layer | per-layer activity |
+| `results/runs/<run_id>.json` | run | full provenance — the entire merged config, verbatim |
+| `results/<run_id>/training_results.csv` | epoch | the **rich** per-epoch record: ~35 columns, all GPU/VRAM/energy detail |
+| `results/<run_id>/batch_metrics.csv` | training iteration | fine-grained series behind the per-iteration plots |
+| `results/<run_id>/test.csv` | test batch | per-batch inference detail |
+
+The first four are **append-only and share one fixed schema.** The last three carry
+fixed filenames, which is why they get a per-run subfolder.
+
+### The four guarantees
+
+Defined in [`skeleton/results.py`](skeleton/results.py), and they are what make
+one-framework-per-invocation work:
+
+1. **Fixed column set.** A metric that could not be measured writes an **empty cell**,
+   never a missing column — so a CPU run with no NVML still produces a readable row.
+2. **`schema_version` in every row.**
+3. **A header mismatch is a loud error**, not a silent append that misaligns every
+   subsequent row.
+4. **Append-only.** Rows are never rewritten, reordered or deduplicated.
+
+### ⚠️ Changing the schema
+
+`append_row()` **refuses** to write into a file whose header differs from the current
+`RUN_COLUMNS`. That is the guardrail behind guarantee 3, and it has a practical
+consequence worth knowing before you add a column:
+
+```
+   add a column while results/ is empty   ->  free
+   add one after run 1 of a 5-run sweep   ->  runs 2-5 REFUSE TO WRITE,
+                                              after training has already finished
+```
+
+So: settle the schema **before** a multi-run sweep starts, not during one. If you must
+change it mid-study, move the old `runs.csv` aside — it stays valid at its own
+`schema_version`, it just cannot be appended to any more.
+
+### `runs.csv` column groups
+
+61 columns at `schema_version: 2`. Grouped as they appear:
+
+| group | holds |
+|---|---|
+| **identity** | `run_id`, `timestamp`, `framework`, `seed`, `config_path`, `config_hash` |
+| **setup** | `dataset`, `time_steps`, `batch_size`, `num_workers`, `binarize`, `denoise_us`, `epochs`, `optimizer`, `lr`, `surrogate` |
+| **architecture** *(v2)* | `total_neurons`, `neurons_per_layer`, `conv1_out`, `conv2_out`, `conv1_kernel`, `conv2_kernel`, `pool_kernel`, `fc_hidden_layers`, `fc_hidden_size`, `flatten_width`, `conv_params`, `fc_hidden_params`, `classifier_params` |
+| **integrity** | `trainable_params`, `weight_fingerprint` |
+| **accuracy** | `test_accuracy_pct`, `train_loss_final`, `test_loss_final` |
+| **speed** | `train_time_s`, `train_time_per_epoch_s`, `inference_throughput_samples_per_s`, `inference_latency_bs1_{ms,mean_ms,p90_ms}` |
+| **activity** | `spike_rate_pct` |
+| **memory** | `peak_memory_{train,infer}_mb`, `peak_reserved_{train,infer}_mb` |
+| **energy** | `idle_power_{cold,after_train}_w`, `train_energy_{j,dynamic_j}`, `train_energy_duration_s`, `nvml_update_interval_ms`, `energy_warnings` |
+| **environment** | `gpu_name`, `driver`, `cuda`, `torch_version`, `framework_version`, `python_version`, `platform` |
+| **free text** | `notes` — the CLI overrides this run applied |
+
+### What `schema_version: 2` added, and why
+
+The **architecture** group. Added for the scalability study
+([`scalability_tests/`](scalability_tests/)), where network size is the independent
+variable — but useful to any run, since it records what was actually built rather than
+what the config asked for.
+
+**Why `trainable_params` was not enough.** Over a width sweep, **neuron count grows
+roughly linearly while parameter count grows roughly quadratically** — a middle conv
+layer costs `in_channels x out_channels`, so doubling both quadruples it. The two counts
+therefore disagree about how much bigger a network got, and a row carrying only
+`trainable_params` cannot be placed on a size ladder. `total_neurons` is the axis a
+scaling study needs.
+
+**Why the parameter split is three-way.** `classifier_params` is separated because the
+final layer's size is `flatten_width x num_classes` — driven by **sensor resolution**,
+not by the conv widths under test:
+
+| dataset | flatten | classes | classifier | conv stack |
+|---|---|---|---|---|
+| N-MNIST | 800 | 10 | 8,010 | 10,244 |
+| DVS128 Gesture | 26,912 | 11 | 296,043 | 10,244 |
+| N-Caltech101 | 76,608 | 101 | **7,737,509** | 10,244 |
+
+On a large sensor the classifier dwarfs the whole feature extractor, so "we doubled the
+network" would be a statement about that one matrix. Keeping it in its own column makes
+the share checkable per run instead of assumed. `fc_hidden_params` covers any
+fully-connected hidden layers between the two.
+
+**All of it is measured, not read back from the config.** `_architecture()` in
+[`skeleton/results_collect.py`](skeleton/results_collect.py) walks the built layer list,
+and `total_neurons` comes from `SpikingNet.neuron_counts()` — one no-grad shape probe at
+batch 1, T=1. Same principle as `measure_flat_features()`: the layer list is the
+authority, and a formula that models the architecture can silently stop matching it. It
+also means layers added later are counted automatically, with no schema change.
+
+**Note on `layers.csv`:** it carries the **hooked** layers only (`lif1`, `lif2`), not the
+output layer — `ActivityMonitor` hooks those two, and `BaseLIF`'s own spike counters stay
+off in the run path because they cost a GPU kernel per layer per timestep and this
+project measures wall-clock time. Full per-layer neuron accounting including the output
+layer lives in `runs.csv`'s `neurons_per_layer` instead.
 
 ## B4. On Colab
 
