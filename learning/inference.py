@@ -297,6 +297,12 @@ class SNNTester:
         # batches actually run. This used to divide by (n_batches x 25 x num_classes):
         # a hardcoded 25 timesteps regardless of framing, and no batch dimension at all.
         avg_spike_rate         = (total_spikes / total_possible_spikes) if total_possible_spikes else 0.0
+        # MEASURED from the data, per batch -- not framing.n_time_bins. It is carried
+        # into the summary below so runs.csv can record the T that RAN rather than the T
+        # that was asked for. Those disagreed once already: a run framed at 16 was
+        # recorded as 20 because this value never left this function, and time_steps
+        # fell back to the config. The column that should have caught the bug was
+        # reading from the same place the bug was in.
         mean_timesteps         = (sum(r["timesteps"] for r in self.batch_log) / len(self.batch_log)
                                   if self.batch_log else 0)
         avg_spikes_per_inference = spikes_per_neuron_per_inference(avg_spike_rate, mean_timesteps)
@@ -394,6 +400,9 @@ class SNNTester:
             "gpu_mem_peak_gb":           gpu.get("gpu_mem_peak_gb") if gpu else None,
             "gpu_util_avg_pct":          gpu.get("gpu_util_avg_pct") if gpu else None,
             "max_memory_reserved_gb":    gpu_diag.get("max_memory_reserved_gb"),
+            # The real BPTT unroll length, averaged over the test batches. See
+            # mean_timesteps above for why this is reported rather than the config value.
+            "timesteps":                 mean_timesteps or None,
             "gpu_temp_c":                gpu_diag.get("gpu_temp_c"),
             "sm_clock_mhz":              gpu_diag.get("sm_clock_mhz"),
             "mem_clock_mhz":             gpu_diag.get("mem_clock_mhz"),

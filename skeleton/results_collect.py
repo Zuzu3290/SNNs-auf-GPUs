@@ -28,6 +28,20 @@ def _last(seq) -> Any:
     return seq[-1] if seq else None
 
 
+def _peak_over_epochs(epoch_log: list[dict], key: str) -> float | None:
+    """The largest per-epoch value of `key`, in MB.
+
+    SNNTrainer records GPU memory once per epoch, so the run-level peak is the max over
+    those samples. Reported rather than left empty: these two columns were hardcoded
+    None with a comment saying this pipeline only measures the inference phase, which
+    stopped being true once the per-epoch GPU report was added -- the numbers were
+    already in epoch_log and were being printed every epoch.
+    """
+    values = [row.get(key) for row in (epoch_log or [])]
+    numeric = [float(v) for v in values if isinstance(v, (int, float))]
+    return max(numeric) * GB_TO_MB if numeric else None
+
+
 def build_epoch_rows(epoch_log: list[dict]) -> list[dict]:
     """One row per epoch, from SNNTrainer.epoch_log.
 
@@ -185,11 +199,17 @@ def build_run_row(
 
         "spike_rate_pct": _pct(_last(train_results.get("spike_rate_history") or [])),
 
-        # Only a peak for the inference phase is reported by this pipeline, and in GB.
-        "peak_memory_train_mb": None,
+        # Peaks for BOTH phases, in MB. The training figures are the max across the
+        # per-epoch samples in epoch_log; the inference ones come from the test run.
+        #
+        # peak_memory_*  = GPU memory in use, read from NVML
+        # peak_reserved_* = PyTorch's caching-allocator high-water mark, which includes
+        #                   memory held but not currently in use, so it is the larger
+        #                   number and the one that decides whether a batch size fits.
+        "peak_memory_train_mb": _peak_over_epochs(epoch_log, "gpu_mem_peak_gb"),
         "peak_memory_infer_mb": (test_results.get("gpu_mem_peak_gb") or 0) * GB_TO_MB
                                  if test_results.get("gpu_mem_peak_gb") else None,
-        "peak_reserved_train_mb": None,
+        "peak_reserved_train_mb": _peak_over_epochs(epoch_log, "max_memory_reserved_gb"),
         "peak_reserved_infer_mb": (test_results.get("max_memory_reserved_gb") or 0) * GB_TO_MB
                                    if test_results.get("max_memory_reserved_gb") else None,
 

@@ -571,6 +571,54 @@ def test_adversarial_evaluator_is_routed_in_main() -> None:
                 "evaluate(csv_path=" in source)
 
 
+def test_training_memory_peaks_reach_runs_csv() -> None:
+    """Both were hardcoded None with a comment saying only the inference phase is
+    measured. That stopped being true once the per-epoch GPU report was added: the
+    numbers were in epoch_log and printed every epoch, but never reached runs.csv."""
+    from skeleton.results_collect import _peak_over_epochs
+
+    # Shaped like the real thing: NVML usage flat, allocator high-water mark climbing.
+    log = [{"gpu_mem_peak_gb": 2.89, "max_memory_reserved_gb": 5.05 + 1.48 * i}
+           for i in range(5)]
+    used = _peak_over_epochs(log, "gpu_mem_peak_gb")
+    reserved = _peak_over_epochs(log, "max_memory_reserved_gb")
+    suite.check("in-use peak is the max epoch, in MB", abs(used - 2.89 * 1024) < 0.01,
+                str(used))
+    suite.check("reserved peak is the max epoch, in MB",
+                abs(reserved - (5.05 + 1.48 * 4) * 1024) < 0.01, str(reserved))
+    suite.check("reserved is the larger of the two -- it includes memory held unused",
+                reserved > used)
+
+    suite.check("no epochs means no figure, not a zero",
+                _peak_over_epochs([], "gpu_mem_peak_gb") is None)
+    suite.check("a missing key means no figure",
+                _peak_over_epochs([{"other": 1.0}], "gpu_mem_peak_gb") is None)
+    suite.check("a non-numeric value is skipped rather than crashing the row",
+                _peak_over_epochs([{"gpu_mem_peak_gb": "n/a"}], "gpu_mem_peak_gb") is None)
+    suite.check("a CPU-only run reports 0.0, which is true, not missing",
+                _peak_over_epochs([{"gpu_mem_peak_gb": 0.0}], "gpu_mem_peak_gb") == 0.0)
+
+
+def test_runs_csv_records_the_timesteps_that_ran() -> None:
+    """time_steps prefers the MEASURED value and falls back to the config. The measured
+    one was computed in SNNTester and then dropped, so the fallback always won -- and a
+    run framed at 16 was recorded as 20. The column that should have caught that bug was
+    reading from the same place the bug was in."""
+    import inspect
+
+    import learning.inference as inference
+
+    source = inspect.getsource(inference.SNNTester)
+    suite.check("SNNTester puts its measured timesteps in the summary it returns",
+                '"timesteps":                 mean_timesteps' in source
+                or '"timesteps": mean_timesteps' in source)
+
+    from skeleton.results_collect import build_run_row
+    signature = inspect.signature(build_run_row)
+    suite.check("build_run_row still takes an explicit timesteps argument",
+                "timesteps" in signature.parameters)
+
+
 def main() -> int:
     return suite.run([
         test_training_writes_every_csv_beside_the_given_path,
@@ -611,6 +659,8 @@ def main() -> int:
         test_iteration_series_lengths_line_up,
         test_epoch_row_carries_the_new_columns,
         test_training_runs_on_cpu_at_all,
+        test_training_memory_peaks_reach_runs_csv,
+        test_runs_csv_records_the_timesteps_that_ran,
     ])
 
 
