@@ -13,6 +13,26 @@ Flow B to use this pipeline.
 
 ---
 
+## The short version — what to run, in order
+
+Six commands. Every one is expanded further down; this is the map.
+
+| # | when | command |
+|---|---|---|
+| 1 | once per machine | `python check_env.py` |
+| 2 | after changing the architecture | `python check_network.py --config <cfg> --all` |
+| 3 | after changing the neuron | `python equivalence_check.py --config <cfg> --experiment exN` |
+| 4 | the run itself, once per framework | `python learning/main.py --config <cfg> --experiment exN --framework <fw> --seed 0 --inference stats` |
+| 5 | after a Colab run | `python collect_results.py --from <drive folder> --experiment exN` |
+| 6 | once every framework has run | `python make_plots.py --experiment exN` |
+
+Steps 1–3 are CPU-only and take seconds — they exist so that step 4, the expensive one,
+is never started against a config that was already wrong. Steps 5–6 need no GPU, no
+dataset and no model: run them on a laptop against results copied off Colab.
+
+Running locally with no Colab in the loop? Skip step 5; step 4 already writes where step
+6 reads.
+
 ## The one rule behind both flows
 
 |                      | decides                                                             |
@@ -237,7 +257,7 @@ session needs no display.
 python tests/run_all.py
 ```
 
-1,055 checks across 9 suites, CPU-only, no dataset, about a minute. Exits non-zero if
+1,076 checks across 9 suites, CPU-only, no dataset, about a minute. Exits non-zero if
 anything fails, so it works as a pre-push gate.
 
 | arg | possible values | default | what it does |
@@ -553,6 +573,104 @@ It never falls back to a default. The three regression datasets are recognised b
 `learning/main.py` is classification-only and will say so.
 
 ---
+
+## B6. Bring Colab results home
+
+```bash
+python collect_results.py --from "G:/My Drive/snn_results/ex2" --experiment ex2
+```
+
+Files a Colab output folder into `experiments/exN/`, **merging** rather than overwriting.
+
+**Why merging is the whole point.** `runs.csv`, `epochs.csv` and `layers.csv` are
+append-only ACROSS runs: one `runs.csv` holds every framework and every seed, which is
+what makes it a comparison table. A Colab session that restarts begins a fresh
+`runs.csv` containing only its own rows, and a second Colab account has its own from the
+start. Copying either over the local file deletes the earlier runs silently — no error,
+and nothing downstream notices that the comparison is missing half its arms.
+
+Rows are keyed per file, so re-running is always safe and never duplicates one:
+
+| file | a row is unique by |
+|---|---|
+| `runs.csv` | `run_id` |
+| `epochs.csv` | `run_id` + `epoch` |
+| `layers.csv` | `run_id` + `layer_index` |
+
+It also brings across `results/runs/*.json`, the per-run `results/<run_id>/` and
+`plots/<run_id>/` folders, and the equivalence figures. A file already there at the same
+size is skipped.
+
+**Two things it refuses to do.**
+
+- **File one experiment under another's name.** `--from <drive>/ex2 --experiment ex1`
+  would append ex2's rows to ex1's `runs.csv`. A `run_id` carries a timestamp but no
+  experiment name, so the rows do not collide — they silently coexist, and every later
+  mean, figure and conclusion is computed over a mixture of two experiments. It compares
+  `config_path` across the two sides and stops when they share none. `--force`
+  overrides, after printing exactly what it is about to ignore.
+- **Merge two schemas.** Different columns on each side means they were written by
+  different code versions, and appending would misalign every row. It names the
+  differing columns and exits non-zero.
+
+Start with `--dry-run`: it prints the same report and writes nothing.
+
+### The same command, with every flag it accepts
+
+```bash
+python collect_results.py \
+    --from "G:/My Drive/snn_results/ex2" \
+    --experiment ex2 \
+    --results-root experiments \
+    --dry-run
+```
+
+| arg | possible values | default | what it does |
+|---|---|---|---|
+| `--from` | any folder | **required** | the Colab output: a mounted Drive folder, or a manual download. A full experiment tree or a flat folder both work. |
+| `--experiment` | any name, e.g. `ex2` | **required** | which experiment folder to file into |
+| `--results-root` | any path | `experiments` | where that tree lives. Use the same value the runs used. |
+| `--dry-run` | flag | off | report what would happen, write nothing |
+| `--force` | flag | off | merge even when the rows look like a different experiment. Only when you are certain — read the message it overrides. |
+| `-h`, `--help` | — | — | print this list |
+
+## B7. Draw the figures
+
+```bash
+python make_plots.py --experiment ex2
+```
+
+Regenerates every figure for one experiment straight from its result CSVs. Figures are
+never edited by hand, so any figure can be traced back to the rows that produced it, and
+re-running after another seed arrives is a one-liner.
+
+Reads **only** `runs.csv`, `epochs.csv` and `layers.csv` — no GPU, no dataset, no model.
+
+**Seed count changes what you get.** Some figure families compare ACROSS seeds (F2's
+within-seed slopegraph, F6's effect-vs-noise). With a single seed those cannot say
+anything, so they are SKIPPED with a note rather than drawn misleadingly. One seed per
+framework is a perfectly valid run — you get the F1/F3/F4/F5 families, and the
+seed-comparison families appear once a second seed exists.
+
+### The same command, with every flag it accepts
+
+```bash
+python make_plots.py \
+    --experiment ex2 \
+    --results-root experiments \
+    --formats png,pdf \
+    --condition framework
+```
+
+| arg | possible values | default | what it does |
+|---|---|---|---|
+| `--experiment` | any name, e.g. `ex2` | *none* | reads `<results-root>/exN/results`, writes `<results-root>/exN/figures` |
+| `--results-root` | any path | `experiments` | root holding the per-experiment folders |
+| `--results-dir` | any path | *from `--experiment`* | read the three CSVs from here instead. Overrides `--experiment`. |
+| `--out-dir` | any path | `<results-dir>/../figures` | write the figures somewhere else |
+| `--formats` | `png`, `pdf`, `svg`, comma-separated | `png` | `png,pdf` gives a vector copy for a report |
+| `--condition` | any column name | `framework` | the column that separates the things being compared. Point it at another column to compare variants or datasets instead of frameworks. |
+| `-h`, `--help` | — | — | print this list |
 
 ## Reading the run banner
 

@@ -39,8 +39,16 @@ def run_script(module_name: str, argv: list[str]) -> tuple[int, str]:
     try:
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
             code = module.main()
-    except SystemExit as exit_signal:      # argparse --help / bad flag
-        code = int(exit_signal.code or 0)
+    except SystemExit as exit_signal:      # argparse --help / bad flag / SystemExit(msg)
+        code = exit_signal.code
+        if code is None:
+            code = 0
+        elif not isinstance(code, int):
+            # `raise SystemExit("message")` is Python's "print this to stderr, exit 1".
+            # The interpreter does that at top level; caught here it is ours to do, or
+            # the message never reaches the captured output the caller asserts on.
+            buffer.write(str(code))
+            code = 1
     finally:
         sys.argv = saved
     return code, buffer.getvalue()
@@ -319,11 +327,18 @@ def test_each_script_advertises_exactly_the_flags_it_can_act_on() -> None:
         # Reads the environment and requirements.txt only. No config, no experiment,
         # no roots -- it writes nothing and knows nothing about a run.
         "check_env": {"strict"},
+        # Files Colab output into an experiment tree. No --framework/--seed: it merges
+        # whatever rows it finds. No --config: it reads result CSVs, not a config.
+        "collect_results": {"source", "experiment", "results_root", "force", "dry_run"},
     }
+    # Most of these have all-optional flags, so an empty argv parses. collect_results
+    # genuinely requires two, and argparse would exit before returning a namespace.
+    required = {"collect_results": ["--from", ".", "--experiment", "ex1"]}
+
     for module_name, flags in expected.items():
         module = importlib.import_module(module_name)
         saved = sys.argv
-        sys.argv = [f"{module_name}.py"]
+        sys.argv = [f"{module_name}.py", *required.get(module_name, [])]
         try:
             actual = set(vars(module.parse_args()))
         finally:
@@ -522,6 +537,157 @@ def test_inference_mode_can_be_stated_instead_of_asked() -> None:
         sys.argv = saved_argv
 
 
+# ---------------------------------------------------------------------------
+# collect_results.py
+# ---------------------------------------------------------------------------
+RUNS_HEADER = ["schema_version", "run_id", "framework", "seed", "config_path",
+               "test_accuracy_pct"]
+EPOCHS_HEADER = ["schema_version", "run_id", "epoch", "train_loss"]
+LAYERS_HEADER = ["schema_version", "run_id", "layer_index", "layer_type"]
+
+
+def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def _fake_session(root: Path, run_ids: list[str], config="experiments/ex2/config.yaml"):
+    """A Colab output folder holding just these runs."""
+    results = root / "results"
+    _write_csv(results / "runs.csv", RUNS_HEADER,
+               [["2", rid, rid.split("_")[-2], "0", config, "95.0"] for rid in run_ids])
+    _write_csv(results / "epochs.csv", EPOCHS_HEADER,
+               [["2", rid, str(e), "0.5"] for rid in run_ids for e in (1, 2)])
+    _write_csv(results / "layers.csv", LAYERS_HEADER,
+               [["2", rid, str(i), "lif"] for rid in run_ids for i in (0, 1)])
+    (results / "runs").mkdir(parents=True, exist_ok=True)
+    for rid in run_ids:
+        (results / "runs" / f"{rid}.json").write_text("{}", encoding="utf-8")
+        _write_csv(results / rid / "test.csv", ["a"], [["1"]])
+        (root / "plots" / rid).mkdir(parents=True, exist_ok=True)
+        (root / "plots" / rid / "loss.png").write_bytes(b"png")
+    return root
+
+
+def _run_collect(argv: list[str]) -> tuple[int, str]:
+    return run_script("collect_results", argv)
+
+
+def _rows(path: Path) -> list[dict]:
+    import csv
+
+    if not path.is_file():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def test_collect_merges_a_restarted_colab_session() -> None:
+    """The failure it exists for: a Colab session that restarts writes a FRESH runs.csv
+    holding only its own rows. Copying that over the local file deletes the earlier runs
+    silently -- no error, and the comparison quietly loses half its arms."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _fake_session(root / "sessionA", ["20260101_120000_norse_seed0"])
+        _fake_session(root / "sessionB", ["20260101_130000_sj_seed0"])
+        tree = root / "tree"
+
+        code, _ = _run_collect(["--from", str(root / "sessionA"), "--experiment", "ex2",
+                                "--results-root", str(tree)])
+        suite.check("first session merges", code == 0, f"exit {code}")
+        runs = tree / "ex2" / "results" / "runs.csv"
+        suite.check("one run after the first merge", len(_rows(runs)) == 1)
+
+        code, _ = _run_collect(["--from", str(root / "sessionB"), "--experiment", "ex2",
+                                "--results-root", str(tree)])
+        suite.check("second session merges", code == 0, f"exit {code}")
+        after = _rows(runs)
+        suite.check("BOTH sessions are present, nothing overwritten", len(after) == 2,
+                    f"{len(after)} rows")
+        suite.check("and they are the two different frameworks",
+                    {r["framework"] for r in after} == {"norse", "sj"})
+        suite.check("epochs.csv merged too", len(_rows(tree / "ex2" / "results" / "epochs.csv")) == 4)
+        suite.check("layers.csv merged too", len(_rows(tree / "ex2" / "results" / "layers.csv")) == 4)
+
+
+def test_collect_is_idempotent() -> None:
+    """Re-running must never duplicate a row -- otherwise a nervous second run silently
+    doubles every mean computed downstream."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = _fake_session(root / "drive", ["20260101_120000_norse_seed0",
+                                                 "20260101_130000_sj_seed0"])
+        tree = root / "tree"
+        for attempt in range(3):
+            _run_collect(["--from", str(source), "--experiment", "ex2",
+                          "--results-root", str(tree)])
+            count = len(_rows(tree / "ex2" / "results" / "runs.csv"))
+            suite.check(f"still 2 runs after merge #{attempt + 1}", count == 2, f"{count}")
+
+
+def test_collect_dry_run_writes_nothing() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source = _fake_session(root / "drive", ["20260101_120000_norse_seed0"])
+        tree = root / "tree"
+        code, out = _run_collect(["--from", str(source), "--experiment", "ex2",
+                                  "--results-root", str(tree), "--dry-run"])
+        suite.check("dry run succeeds", code == 0, f"exit {code}")
+        suite.check("it still reports what it would add", "+1 new row" in out, out[-300:])
+        suite.check("but the target tree was never created", not tree.exists())
+
+
+def test_collect_refuses_a_different_experiment() -> None:
+    """run_ids carry a timestamp but no experiment name, so ex2's rows appended to ex1's
+    runs.csv do not collide -- they silently coexist, and every later mean and figure is
+    computed over a mixture. config_path is the signal that catches it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        tree = root / "tree"
+        _run_collect(["--from", str(_fake_session(root / "a", ["20260101_120000_norse_seed0"],
+                                                   config="experiments/ex1/config.yaml")),
+                      "--experiment", "ex1", "--results-root", str(tree)])
+
+        other = _fake_session(root / "b", ["20260101_130000_sj_seed0"],
+                              config="experiments/ex2/config.yaml")
+        code, out = _run_collect(["--from", str(other), "--experiment", "ex1",
+                                  "--results-root", str(tree)])
+        suite.check("a different experiment is refused", code != 0, f"exit {code}")
+        suite.check("the message names both configs",
+                    "ex1/config.yaml" in out and "ex2/config.yaml" in out)
+        suite.check("nothing was merged", len(_rows(tree / "ex1" / "results" / "runs.csv")) == 1)
+
+        code, _ = _run_collect(["--from", str(other), "--experiment", "ex1",
+                                "--results-root", str(tree), "--force"])
+        suite.check("--force lets it through", code == 0, f"exit {code}")
+        suite.check("and then the row IS merged",
+                    len(_rows(tree / "ex1" / "results" / "runs.csv")) == 2)
+
+
+def test_collect_refuses_a_different_schema() -> None:
+    """Different columns on each side means different code versions wrote them, and
+    appending would misalign every row."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        tree = root / "tree"
+        _run_collect(["--from", str(_fake_session(root / "a", ["20260101_120000_norse_seed0"])),
+                      "--experiment", "ex2", "--results-root", str(tree)])
+
+        short = _fake_session(root / "b", ["20260101_130000_sj_seed0"])
+        _write_csv(short / "results" / "runs.csv", RUNS_HEADER[:-1],
+                   [["2", "20260101_130000_sj_seed0", "sj", "0", "experiments/ex2/config.yaml"]])
+        code, out = _run_collect(["--from", str(short), "--experiment", "ex2",
+                                  "--results-root", str(tree)])
+        suite.check("a schema mismatch is refused", code != 0, f"exit {code}")
+        suite.check("and it names the differing column", "test_accuracy_pct" in out,
+                    out[-300:])
+
+
 def main() -> int:
     return suite.run([
         test_each_script_advertises_exactly_the_flags_it_can_act_on,
@@ -550,6 +716,11 @@ def main() -> int:
         test_main_parses_the_full_flag_set,
         test_main_has_no_device_flag,
         test_inference_mode_can_be_stated_instead_of_asked,
+        test_collect_merges_a_restarted_colab_session,
+        test_collect_is_idempotent,
+        test_collect_dry_run_writes_nothing,
+        test_collect_refuses_a_different_experiment,
+        test_collect_refuses_a_different_schema,
         test_entrypoints_follow_an_architecture_change,
     ])
 
