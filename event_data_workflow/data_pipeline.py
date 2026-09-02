@@ -198,6 +198,20 @@ class PrefetchedLoader:
         # throttles the GPU below what `depth` was chosen to sustain.
         self.queue_size = max(1, queue_size if queue_size is not None else self.depth)
         self.current: CudaPrefetcher | None = None
+        # ONE copy stream for this loader's whole life, not one per epoch.
+        #
+        # __iter__ below builds a fresh CudaPrefetcher every pass, and that used to
+        # build a fresh torch.cuda.Stream with it. PyTorch's caching allocator pools
+        # free blocks PER STREAM, so each epoch allocated its prefetch queue from CUDA
+        # again while the previous epoch's queue stayed free-but-unreachable: reserved
+        # memory climbed by one queue per epoch (measured: +1.48 GB, T=20/batch 256/
+        # depth 32) with memory actually in use flat. See CudaPrefetcher.__init__.
+        #
+        # A stream is a long-lived handle, not per-iteration state -- nothing about
+        # re-iterating invalidates it, and stop() only ends the CPU-side feeder thread.
+        # Only one iterator is ever live per loader (see __iter__), so nothing else can
+        # be issuing copies on it at the same time.
+        self.stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
 
     def __len__(self) -> int:
         return len(self.loader)
@@ -206,7 +220,8 @@ class PrefetchedLoader:
         if self.current is not None:
             self.current.stop()
         async_stage = AsyncGPUPrefetcher(self.loader, queue_size=self.queue_size)
-        self.current = CudaPrefetcher(async_stage, self.device, depth=self.depth)
+        self.current = CudaPrefetcher(async_stage, self.device, depth=self.depth,
+                                      stream=self.stream)
         try:
             yield from self.current
         finally:

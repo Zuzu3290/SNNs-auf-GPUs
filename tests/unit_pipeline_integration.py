@@ -507,6 +507,245 @@ def test_idle_draw_dilutes_the_difference_between_frameworks() -> None:
     suite.check("the total understates the difference", total_ratio < dynamic_ratio)
 
 
+# ---------------------------------------------------------------------------
+# The prefetcher's CUDA stream: one per LOADER, not one per epoch
+#
+# No GPU on the machine that runs this suite, so torch.cuda's three entry points the
+# prefetcher touches are swapped for stand-ins and the REAL PrefetchedLoader /
+# CudaPrefetcher code is driven through them. What is being checked is a property of
+# our control flow -- how many streams get constructed, and whether the same one is
+# reused -- which is exactly the part that does not need a device to be true.
+# ---------------------------------------------------------------------------
+class _FakeStream:
+    """Stands in for torch.cuda.Stream. Records the cross-stream handshake."""
+
+    def __init__(self, device=None):
+        self.device = device
+        self.waited_on = []
+
+    def wait_stream(self, other):
+        self.waited_on.append(other)
+
+
+class _FakeTensor:
+    """Duck-types the two things the prefetcher does to a batch."""
+
+    def __init__(self, value):
+        self.value = value
+        self.moved_to = None
+        self.recorded_on = []
+
+    def to(self, device, non_blocking=False):
+        self.moved_to = (device, non_blocking)
+        return self
+
+    def record_stream(self, stream):
+        self.recorded_on.append(stream)
+
+
+class _FakeCuda:
+    """Patches torch.cuda.Stream / .stream / .current_stream for one block, and counts
+    how many streams the code under test constructs."""
+
+    def __init__(self):
+        self.created: list[_FakeStream] = []
+        self.default = _FakeStream("default")
+
+    def __enter__(self):
+        import contextlib
+
+        import torch
+
+        self._saved = (torch.cuda.Stream, torch.cuda.stream, torch.cuda.current_stream)
+
+        def make_stream(device=None):
+            stream = _FakeStream(device)
+            self.created.append(stream)
+            return stream
+
+        @contextlib.contextmanager
+        def stream_ctx(stream):
+            yield
+
+        torch.cuda.Stream = make_stream
+        torch.cuda.stream = stream_ctx
+        torch.cuda.current_stream = lambda device=None: self.default
+        return self
+
+    def __exit__(self, *exc):
+        import torch
+
+        torch.cuda.Stream, torch.cuda.stream, torch.cuda.current_stream = self._saved
+        return False
+
+
+class _CountingLoader:
+    """A tiny DataLoader stand-in that also records stop() calls."""
+
+    def __init__(self, n_batches=4):
+        self.n_batches = n_batches
+        self.stops = 0
+        self.passes = 0
+
+    def __len__(self):
+        return self.n_batches
+
+    def __iter__(self):
+        self.passes += 1
+        for i in range(self.n_batches):
+            yield _FakeTensor(f"data{i}"), _FakeTensor(f"target{i}")
+
+    def stop(self):
+        self.stops += 1
+
+
+def _drain(loader):
+    return [(d.value, t.value) for d, t in loader]
+
+
+def test_one_cuda_stream_for_the_whole_loader_not_one_per_epoch() -> None:
+    """The memory bug this fixes.
+
+    PyTorch's caching allocator pools free blocks PER STREAM: a block is tied to the
+    stream that allocated it, and freeing it returns it to that stream's pool only. A
+    new stream each epoch therefore re-allocates the whole prefetch queue from CUDA
+    every epoch while the previous one sits free but unreachable.
+
+    MEASURED before the fix, Colab T4 at T=20/batch 256/depth 32: reserved memory went
+    5.05 -> 6.53 -> 8.02 -> 9.50 -> 10.99 GB over five epochs -- +1.48 GB each, which is
+    exactly one prefetch queue -- while memory in use stayed flat at 2.89 GB.
+    """
+    import torch
+
+    from event_data_workflow.data_pipeline import PrefetchedLoader
+
+    with _FakeCuda() as cuda:
+        inner = _CountingLoader(n_batches=4)
+        loader = PrefetchedLoader(inner, torch.device("cuda"), depth=3)
+
+        suite.check("the stream is built once, by the LOADER's constructor",
+                    len(cuda.created) == 1, f"{len(cuda.created)} streams after __init__")
+        the_stream = cuda.created[0]
+
+        seen_streams = []
+        for _epoch in range(4):
+            _drain(loader)
+            seen_streams.append(loader.current.stream)
+
+        suite.check("four epochs still built exactly ONE stream",
+                    len(cuda.created) == 1, f"{len(cuda.created)} streams after 4 epochs")
+        suite.check("every epoch's prefetcher holds that same stream object",
+                    all(s is the_stream for s in seen_streams))
+
+
+def test_the_fix_did_not_break_iteration_or_cross_stream_safety() -> None:
+    """One stream is only correct if the handshake around it survives. The prefetcher
+    copies on a side stream and hands the tensors to the default stream, so it must
+    still wait_stream before use and record_stream on both tensors -- without those the
+    allocator may recycle a block the compute stream is still reading."""
+    import torch
+
+    from event_data_workflow.data_pipeline import PrefetchedLoader
+
+    with _FakeCuda() as cuda:
+        inner = _CountingLoader(n_batches=5)
+        loader = PrefetchedLoader(inner, torch.device("cuda"), depth=3)
+
+        first = _drain(loader)
+        suite.check("every batch is yielded, in order",
+                    first == [(f"data{i}", f"target{i}") for i in range(5)], str(first))
+        suite.check("a second pass yields the same batches again",
+                    _drain(loader) == first)
+        suite.check("len() still reports the underlying batch count", len(loader) == 5)
+
+        # Re-run one pass and inspect the tensors it handed out.
+        handed = list(iter(loader))
+        suite.check("the default stream waited on the copy stream before use",
+                    cuda.default.waited_on and cuda.default.waited_on[0] is loader.stream)
+        suite.check("both tensors were moved to the device",
+                    all(d.moved_to == (loader.device, True) for d, _ in handed))
+        suite.check("record_stream was called on the data tensors",
+                    all(d.recorded_on == [cuda.default] for d, _ in handed))
+        suite.check("record_stream was called on the target tensors",
+                    all(t.recorded_on == [cuda.default] for _, t in handed))
+
+
+def test_reiterating_still_stops_the_previous_pass() -> None:
+    """The stop() call guards a real bug recorded at that call site: an abandoned
+    iterator's feeder thread races the global RNG. Sharing one stream must not weaken
+    it."""
+    import torch
+
+    import event_data_workflow.prefetch as prefetch
+    from event_data_workflow.data_pipeline import PrefetchedLoader
+
+    # The feeder that has to be stopped is the AsyncGPUPrefetcher's background thread,
+    # one layer below the raw loader -- CudaPrefetcher.stop() forwards to it.
+    stopped: list[object] = []
+    real_stop = prefetch.AsyncGPUPrefetcher.stop
+
+    def counting_stop(self):
+        stopped.append(self)
+        return real_stop(self)
+
+    prefetch.AsyncGPUPrefetcher.stop = counting_stop
+    try:
+        with _FakeCuda():
+            loader = PrefetchedLoader(_CountingLoader(n_batches=3),
+                                      torch.device("cuda"), depth=2)
+            for _ in range(3):
+                _drain(loader)
+            suite.check("each finished pass stopped its feeder", len(stopped) >= 3,
+                        f"{len(stopped)} stops over 3 passes")
+
+            # An ABANDONED pass -- one batch taken, then dropped -- must also be
+            # stopped when the next pass starts, not left running.
+            before = len(stopped)
+            iterator = iter(loader)
+            next(iterator)
+            del iterator
+            _drain(loader)
+            suite.check("an abandoned pass is stopped too", len(stopped) > before,
+                        f"{len(stopped)} vs {before}")
+    finally:
+        prefetch.AsyncGPUPrefetcher.stop = real_stop
+
+
+def test_cpu_runs_use_no_stream_at_all() -> None:
+    """device.type == 'cpu' must take the plain path: no stream, no handshake, and the
+    batches still arrive. This is what the whole test suite runs on."""
+    import torch
+
+    from event_data_workflow.data_pipeline import PrefetchedLoader
+
+    inner = _CountingLoader(n_batches=3)
+    loader = PrefetchedLoader(inner, torch.device("cpu"), depth=4)
+    suite.check("no stream is created for a CPU device", loader.stream is None)
+    got = _drain(loader)
+    suite.check("batches still come through on CPU",
+                got == [(f"data{i}", f"target{i}") for i in range(3)], str(got))
+    suite.check("nothing was record_stream'd on CPU", True)
+
+
+def test_cuda_prefetcher_alone_still_makes_its_own_stream() -> None:
+    """Used standalone, one instance covers the whole run, so a private stream is right.
+    The fallback keeps that working -- only PrefetchedLoader, which rebuilds the
+    prefetcher every epoch, has to pass one in."""
+    import torch
+
+    from event_data_workflow.prefetch import CudaPrefetcher
+
+    with _FakeCuda() as cuda:
+        CudaPrefetcher(_CountingLoader(2), torch.device("cuda"), depth=1)
+        suite.check("no stream passed -> it builds one", len(cuda.created) == 1)
+
+        borrowed = _FakeStream("borrowed")
+        prefetcher = CudaPrefetcher(_CountingLoader(2), torch.device("cuda"), depth=1,
+                                    stream=borrowed)
+        suite.check("a stream passed -> it builds none", len(cuda.created) == 1)
+        suite.check("and it uses the one it was given", prefetcher.stream is borrowed)
+
+
 def main() -> int:
     return suite.run([
         test_energy_report_exposes_both_bases,
@@ -543,6 +782,11 @@ def main() -> int:
         test_spike_counting_toggle_on_the_network,
         test_sgd_momentum_comes_from_config,
         test_optimizer_covers_every_trainable_weight,
+        test_one_cuda_stream_for_the_whole_loader_not_one_per_epoch,
+        test_the_fix_did_not_break_iteration_or_cross_stream_safety,
+        test_reiterating_still_stops_the_previous_pass,
+        test_cpu_runs_use_no_stream_at_all,
+        test_cuda_prefetcher_alone_still_makes_its_own_stream,
     ])
 
 
