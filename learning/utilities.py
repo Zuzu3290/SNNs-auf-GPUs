@@ -621,11 +621,25 @@ def _log_stable_batch_size(cfg, batch_size: int, peak_gb: float, total_vram_gb: 
     print(f"[CALIBRATE] {dataset}: stable batch_size={batch_size} at {pct:.1f}% VRAM ({band_note})", flush=True)
 
 
-def select_inference_mode() -> bool:
-    """Ask whether inference should show a live visualization alongside the usual
-    statistical output, or statistics only. No stdin attached (Colab, CI, batch)
-    defaults to statistics-only rather than crashing on EOFError.
-    Returns True if visualization was requested."""
+def select_inference_mode(preset: str | None = None) -> bool:
+    """Whether inference should show a live visualization alongside the usual
+    statistical output, or statistics only. Returns True for visualization.
+
+    `preset` is --inference, and skips the question entirely. Without it the prompt
+    appears exactly as it always has -- the same rule as dataset.name, where null means
+    "ask". A run that states its mode never blocks, which is what a Colab cell or a
+    scripted sweep needs; a run that does not still behaves the way this pipeline
+    always did.
+
+    No stdin attached (Colab background, CI, batch) already defaulted to
+    statistics-only rather than crashing on EOFError. That stays -- but a `!python`
+    cell DOES have stdin, so it waited at the prompt, which is what --inference fixes.
+    """
+    if preset is not None:
+        if preset not in ("stats", "visual"):
+            raise ValueError(f"--inference must be 'stats' or 'visual', got {preset!r}")
+        return preset == "visual"
+
     print("\n[MAIN] Inference output:")
     print("  1) Statistics only")
     print("  2) Statistics + live visualization (opens a window showing input frames vs. predictions)")

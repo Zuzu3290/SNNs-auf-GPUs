@@ -133,7 +133,8 @@ python learning/main.py \
     --seed 3 \
     --experiment ex2 \
     --results-root /content/drive/MyDrive/snn_runs \
-    --cache-root /content/cache
+    --cache-root /content/cache \
+    --inference stats
 ```
 
 | arg | possible values | default | what it does |
@@ -144,6 +145,7 @@ python learning/main.py \
 | `--experiment` | any folder name, e.g. `ex1` | *none* → `output:` paths | routes output into `<results-root>/<name>/` |
 | `--results-root` | any path | `experiments` | where the experiment tree lives. **Requires `--experiment`** |
 | `--cache-root` | any path | `cache.path` from config | where cached frames go |
+| `--inference` | `stats` · `visual` | *none* → ask | inference output. `stats` is statistics only; `visual` adds a live window. Omit and you are asked, as before. |
 | `-h`, `--help` | — | — | print this list |
 
 There is deliberately **no `--device`**: it stays `training.device` in the config.
@@ -235,7 +237,7 @@ session needs no display.
 python tests/run_all.py
 ```
 
-1,048 checks across 9 suites, CPU-only, no dataset, about a minute. Exits non-zero if
+1,055 checks across 9 suites, CPU-only, no dataset, about a minute. Exits non-zero if
 anything fails, so it works as a pre-push gate.
 
 | arg | possible values | default | what it does |
@@ -496,8 +498,11 @@ python learning/main.py \
 would your results. `--results-root` without `--experiment` is **refused** rather than
 ignored, so a green run can never quietly write to `./outputs` and vanish.
 
-**Set `dataset.name` in the config.** A notebook cell cannot answer a prompt. With it
-set, you can launch several cells at once — each with its own `--framework` and
+**Answer both questions up front.** A notebook cell cannot answer a prompt, and there
+are two: the dataset, and the inference output mode. Set `dataset.name` in the config
+and pass `--inference stats`. The second matters more than it looks -- it sits BETWEEN
+training and testing, so without it a cell trains for ten minutes and then waits for a
+keypress. With both settled, you can launch several cells at once — each with its own `--framework` and
 `--seed` — and none of them will block:
 
 ```bash
@@ -517,6 +522,7 @@ Add `--cache-root` if the default cache location is short of space.
 |---|---|---|
 | `--results-root` | a mounted Drive path | results survive the runtime dying |
 | `--cache-root` | any path with space | `/content` is small and ephemeral |
+| `--inference` | `stats` | skips a prompt that otherwise blocks AFTER training finishes |
 | `--experiment` | any name | required before `--results-root` will be accepted |
 | `dataset.name` *(config, not a flag)* | see the table below | a cell cannot answer a prompt |
 | `check_env.py --strict` *(a cell, not a flag)* | — | the runtime is new, so its versions are unproven |

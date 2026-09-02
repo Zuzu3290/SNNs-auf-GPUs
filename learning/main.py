@@ -48,6 +48,14 @@ def parse_args():
                "--framework sinabs --seed 1\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    # Omitted = ask, the same convention dataset.name uses. Stating it is what lets a
+    # Colab cell or a scripted sweep run start-to-finish without a person present: the
+    # prompt sits between training and testing, so it blocks after the expensive part.
+    parser.add_argument(
+        "--inference", choices=("stats", "visual"), default=None, metavar="MODE",
+        help="inference output: stats (statistics only) or visual (adds a live window). "
+             "Omit to be asked, as before.",
+    )
     return add_common_args(parser).parse_args()
 
 
@@ -191,7 +199,7 @@ if __name__ == "__main__":
     del trainer, train_loader
     safe_empty_cache()
 
-    visualize = select_inference_mode()
+    visualize = select_inference_mode(args.inference)
     tester       = SNNTester(model, test_loader, cfg, device, visualize=visualize)
     test_results = tester.run(csv_path=str(run_results_dir / "test.csv"))
     print("\n Testing complete!")

@@ -66,6 +66,60 @@ Everything not named above. Stated explicitly in `config.yaml` rather than inher
 | neuron spec | base, untouched | the neuron is not a variable in this study |
 | kernels | 5×5 | geometry stays comparable |
 
+## 5b. Running environment
+
+Every timing, memory and energy figure in this study is a property of **this machine**.
+The same code on another GPU is a different number, so the hardware is part of the
+result, not a footnote.
+
+| | |
+|---|---|
+| **Platform** | Google Colab |
+| **GPU** | **NVIDIA Tesla T4** — 15.0 GB VRAM reported (16 GB GDDR6), compute capability 7.5 |
+| **System RAM** | 12.7 GB total (~8.6 GB free at run time) |
+| **Disk** | 112.6 GB total (~55 GB free) |
+| **Frame cache** | local Colab disk (`./cache`), disk tier, **~17 GB** for N-MNIST at T=16 |
+| **Worker start method** | `fork` (Linux) — no spawn-reload RAM penalty |
+
+`runs.csv` records `gpu_name`, `driver`, `cuda`, `torch_version` and `platform` per run,
+so this is verifiable per row rather than trusted from this table.
+
+### What the hardware means for this experiment
+
+**✅ 15 GB VRAM is generous.** The memory-scaling work in
+`Scalability_RealTime_Enhancement_Plan.md` was done against an 8 GB card (it reports
+6.18 GB / 7.96 GB at 77.7%). Nearly double that headroom makes arm C's 128/128
+configuration likely to fit at the pinned batch size — but "likely" is why arm C exists.
+
+**✅ The T4 exposes power through NVML**, so the energy columns should populate rather
+than coming back empty. Board TDP is ~70 W, which sets the scale for the idle baseline.
+
+**⚠️ The cache lands on ephemeral local disk.** All three arms should run in one session:
+arm B pays the ~17 GB preprocessing cost once, arms A and C then hit a warm cache. Expect
+arm B to be noticeably the slowest for that reason alone — **not** because of pooling.
+
+**🔴 Colab gives very few physical cores, and this is the real caveat.**
+`check_env.py` warns at ≤ 2 physical cores, and a Colab runtime with 1 has been measured
+holding GPU utilisation near 11% — the loader unable to keep the card fed. In that state
+**wall-clock time measures the data pipeline, not the network.**
+
+Consequences for the cost metrics:
+
+| metric | trustworthy here? |
+|---|---|
+| `test_accuracy_pct`, spike rate, `total_neurons`, parameter counts | ✅ yes — hardware-independent |
+| `peak_memory_train_mb`, `peak_reserved_train_mb` | ✅ yes — a memory measurement, not a timing one |
+| `train_time_per_epoch_s`, throughput, GPU energy | ⚠️ **only if the GPU was not starved** |
+
+**Check `gpu_util_avg_pct` and `gpu_idle_episodes` in `training_results.csv` on arm B
+before trusting any timing comparison.** If utilisation is low and idle episodes are
+frequent, the epoch times are loader-bound and Factor A's *VRAM* stopping rule should
+carry the decision rather than the time-based one.
+
+This also puts an asterisk on `scalability.md`'s "Factory Correct" criterion *"GPU never
+idle"* — on a low-core runtime that can be violated regardless of network size, so it
+cannot be used as a size verdict here.
+
 ## 6. The decision rule
 
 The pooling winner is **not** chosen on accuracy alone. Three criteria, in priority order:

@@ -309,7 +309,7 @@ def test_each_script_advertises_exactly_the_flags_it_can_act_on() -> None:
     gains or loses a flag, this fails and the doc gets updated with it."""
     expected = {
         "learning.main": {"config", "framework", "seed", "experiment",
-                          "results_root", "cache_root"},
+                          "results_root", "cache_root", "inference"},
         "check_network": {"config", "framework", "seed", "experiment",
                           "all", "batch", "timesteps"},
         # Writes FIGURES, so it takes results_root (they must be able to land on
@@ -472,6 +472,56 @@ def test_check_network_fails_when_a_neuron_drifts_from_its_config() -> None:
     suite.check("both checks report PASS", out.count("  PASS  ") == 2, out[-400:])
 
 
+def test_inference_mode_can_be_stated_instead_of_asked() -> None:
+    """The prompt sits BETWEEN training and testing, so it blocks after the expensive
+    part -- a Colab cell would train for ten minutes and then wait for a keypress.
+    Stating the mode skips it; omitting it keeps the prompt, the same rule dataset.name
+    uses for the dataset question."""
+    from learning.utilities import select_inference_mode
+
+    suite.check("--inference stats means statistics only",
+                select_inference_mode("stats") is False)
+    suite.check("--inference visual means show the window",
+                select_inference_mode("visual") is True)
+    suite.expect_raises("an unknown mode raises rather than guessing", ValueError,
+                        lambda: select_inference_mode("graphs"),
+                        must_mention=["stats", "visual"])
+
+    # Omitted -> the prompt runs. With no stdin it must fall back, not crash: that is
+    # the path a backgrounded Colab cell or a CI job takes.
+    saved_stdin = sys.stdin
+    sys.stdin = io.StringIO("")          # empty -> input() raises EOFError
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            fallback = select_inference_mode()
+    finally:
+        sys.stdin = saved_stdin
+    suite.check("no preset and no stdin falls back to statistics only", fallback is False)
+    suite.check("and the prompt was actually printed", "Inference output" in out.getvalue())
+
+    # argparse must reject a bad value before any work starts. learning/main.py runs at
+    # module level, so it is driven through parse_args() the way the flag-set test is.
+    import learning.main as main_module
+
+    saved_argv, saved_err = sys.argv, sys.stderr
+    sys.argv = ["main.py", "--inference", "graphs"]
+    sys.stderr = io.StringIO()
+    try:
+        main_module.parse_args()
+        rejected = False
+    except SystemExit:
+        rejected = True
+    finally:
+        sys.argv, sys.stderr = saved_argv, saved_err
+    suite.check("argparse rejects an unknown --inference value", rejected)
+
+    sys.argv = ["main.py", "--inference", "visual"]
+    try:
+        suite.check("a valid value parses through", main_module.parse_args().inference == "visual")
+    finally:
+        sys.argv = saved_argv
+
+
 def main() -> int:
     return suite.run([
         test_each_script_advertises_exactly_the_flags_it_can_act_on,
@@ -499,6 +549,7 @@ def main() -> int:
         test_main_parses_no_arguments,
         test_main_parses_the_full_flag_set,
         test_main_has_no_device_flag,
+        test_inference_mode_can_be_stated_instead_of_asked,
         test_entrypoints_follow_an_architecture_change,
     ])
 
