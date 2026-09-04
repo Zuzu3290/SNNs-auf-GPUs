@@ -64,9 +64,7 @@ class SNNModel(ModelInterface, nn.Module):
         self.loss_fn = build_loss(cfg)
 
         named = self.net.named_lif_layers()
-        self.activity = ActivityMonitor(
-            {name: named[name] for name in ("lif1", "lif2") if name in named}
-        )
+        self.activity = ActivityMonitor(named)
 
     # ---- ModelInterface ---------------------------------------------------------
     def forward(self, data: torch.Tensor) -> torch.Tensor:
@@ -124,9 +122,12 @@ class SNNModel(ModelInterface, nn.Module):
 
     def synops_layer_map(self) -> dict:
         """Derived from the layer list rather than hand-written per framework, so it
-        cannot fall out of sync with the architecture."""
+        cannot fall out of sync with the architecture. Every named LIF layer is
+        considered; a layer with no downstream dense module (lif_out, since it is the
+        last layer) is correctly absent -- dense_after() returning None is what excludes
+        it, not the iteration skipping it."""
         mapping = {}
-        for name in ("lif1", "lif2"):
+        for name in self.net.named_lif_layers():
             downstream = self.net.dense_after(name)
             if downstream is not None:
                 mapping[name] = downstream

@@ -57,9 +57,36 @@ def test_one_layer_is_just_lif_out() -> None:
     suite.check("one layer: named lif_out, not lif1", list(named.keys()) == ["lif_out"])
 
 
+def test_activity_monitor_hooks_every_lif_layer() -> None:
+    """SNNModel.activity must hook ALL named LIF layers, including lif_out -- not a
+    hardcoded lif1/lif2 pair."""
+    model, cfg = build_model("sj")
+    named = model.net.named_lif_layers()
+    hooked = set(model.activity.buffers.keys())
+    suite.check("lif_out is hooked", "lif_out" in hooked,
+                f"hooked={sorted(hooked)}")
+    suite.check("every named layer is hooked", hooked == set(named.keys()),
+                f"named={sorted(named.keys())} hooked={sorted(hooked)}")
+
+
+def test_synops_layer_map_includes_every_layer_with_a_downstream_dense() -> None:
+    """synops_layer_map() must not hardcode lif1/lif2 either -- lif_out has no
+    downstream dense layer (it's the last layer), so it's correctly ABSENT from the
+    map, but that must be because dense_after() returns None for it, not because the
+    iteration never considered it."""
+    model, cfg = build_model("sj")
+    mapping = model.synops_layer_map()
+    suite.check("lif1 and lif2 are in the synops map",
+                {"lif1", "lif2"} <= set(mapping.keys()))
+    suite.check("lif_out is correctly absent (no downstream dense layer)",
+                "lif_out" not in mapping)
+
+
 if __name__ == "__main__":
     raise SystemExit(suite.run([
         test_three_layers_names_last_as_lif_out,
         test_five_layers_still_names_last_as_lif_out,
         test_one_layer_is_just_lif_out,
+        test_activity_monitor_hooks_every_lif_layer,
+        test_synops_layer_map_includes_every_layer_with_a_downstream_dense,
     ]))
