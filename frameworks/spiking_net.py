@@ -171,6 +171,26 @@ class SpikingNet(nn.Module):
                 return layer
         return None
 
+    def dense_before(self, lif_name: str) -> nn.Module | None:
+        """The nearest dense (Conv2d/Linear) module UPSTREAM of a given LIF slot -- the
+        module whose weights actually produced that layer's input.
+
+        Mirrors dense_after(), which walks forward for the SynOps estimate; this walks
+        backward, for pairing a layer's gradient norm with the LIF slot it feeds. Used
+        by SNNTrainer's gradient-norm tracking so the classifier's gradient lands on
+        lif_out's row, whatever the network's current depth.
+        """
+        target = self.named_lif_layers().get(lif_name)
+        if target is None:
+            return None
+        found = None
+        for layer in self.layers:
+            if layer is target:
+                return found
+            if isinstance(layer, (nn.Conv2d, nn.Linear)):
+                found = layer
+        return None
+
     def reset(self) -> None:
         """Clear every neuron's state, whatever framework it came from."""
         for layer in self.lif_layers():

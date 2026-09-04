@@ -82,6 +82,32 @@ def test_synops_layer_map_includes_every_layer_with_a_downstream_dense() -> None
                 "lif_out" not in mapping)
 
 
+def test_dense_before_pairs_each_lif_with_its_upstream_weight_layer() -> None:
+    """dense_before(lif_name) is the Conv2d/Linear that FEEDS that LIF -- the mirror
+    image of dense_after(), which finds the downstream one."""
+    model, cfg = build_model("sj")
+    net = model.net
+    conv1_out = net.dense_before("lif1")
+    conv2_out = net.dense_before("lif2")
+    classifier = net.dense_before("lif_out")
+    suite.check("lif1's upstream layer is a Conv2d",
+                conv1_out is not None and type(conv1_out).__name__ == "Conv2d")
+    suite.check("lif2's upstream layer is a Conv2d",
+                conv2_out is not None and type(conv2_out).__name__ == "Conv2d")
+    suite.check("lif_out's upstream layer is the classifier Linear",
+                classifier is not None and type(classifier).__name__ == "Linear")
+    suite.check("lif1 and lif2 have DIFFERENT upstream conv layers",
+                conv1_out is not conv2_out)
+
+
+def test_dense_before_returns_none_with_no_preceding_dense_layer() -> None:
+    """A LIF layer with nothing but non-dense modules before it (or nothing at all)
+    has no upstream weight layer."""
+    import torch.nn as nn
+    net = SpikingNet([_StubLIF()])
+    suite.check("no dense layer before a lone LIF", net.dense_before("lif_out") is None)
+
+
 if __name__ == "__main__":
     raise SystemExit(suite.run([
         test_three_layers_names_last_as_lif_out,
@@ -89,4 +115,6 @@ if __name__ == "__main__":
         test_one_layer_is_just_lif_out,
         test_activity_monitor_hooks_every_lif_layer,
         test_synops_layer_map_includes_every_layer_with_a_downstream_dense,
+        test_dense_before_pairs_each_lif_with_its_upstream_weight_layer,
+        test_dense_before_returns_none_with_no_preceding_dense_layer,
     ]))
