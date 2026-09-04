@@ -191,6 +191,8 @@ if __name__ == "__main__":
     # (hooked layers only) that layers.csv falls back to when spike counting was off.
     epoch_log = list(trainer.epoch_log)
     activity_snapshot = getattr(trainer, "last_activity_snapshot", None) or {}
+    capacity_metrics = getattr(trainer, "last_capacity_metrics", None) or {}
+    grad_norm_means = getattr(trainer, "grad_norm_means", None) or {}
     num_workers = getattr(getattr(train_loader, "loader", None), "num_workers", None)
 
     # train_loader has persistent_workers=True -- its worker processes stay alive
@@ -250,7 +252,7 @@ if __name__ == "__main__":
             results_dir,
             run_row=run_row,
             epoch_rows=build_epoch_rows(epoch_log),
-            layer_rows=build_layer_rows(model, activity_snapshot),
+            layer_rows=build_layer_rows(model, activity_snapshot, capacity_metrics, grad_norm_means),
             json_payload={"run": run_row, "config_path": run_info.get("config_path"),
                           "neuron": model.describe_neuron(),
                           "test": {k: v for k, v in test_results.items()

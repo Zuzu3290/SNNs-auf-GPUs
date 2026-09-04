@@ -148,21 +148,44 @@ def build_epoch_rows(epoch_log: list[dict]) -> list[dict]:
     return rows
 
 
-def build_layer_rows(model, activity_snapshot: dict | None = None) -> list[dict]:
+def build_layer_rows(
+    model, activity_snapshot: dict | None = None,
+    capacity_metrics: dict | None = None,
+    grad_norm_means: dict | None = None,
+) -> list[dict]:
     """One row per spiking layer.
 
-    Two sources, in order of preference:
+    Two sources for the base spike-rate fields, in order of preference:
 
       1. BaseLIF's own spike counters, when spike counting was switched on. Covers every
          layer including lif_out, and is the same measurement SNNs_2 records.
       2. The ActivityMonitor snapshot the trainer already collects. Free -- no extra pass
-         -- but it only covers the HOOKED layers (lif1, lif2), not the output layer.
+         -- and now covers every hooked layer including lif_out (see
+         frameworks/snn_model.py's dynamic hooking fix).
 
-    Returns an empty list when neither is available, which simply means no layers.csv
-    rows for this run rather than a failure.
+    capacity_metrics and grad_norm_means are optional, keyed by the same LIF slot
+    names -- populated only when training.compute_capacity_metrics was on for this run
+    (see learning/training.py's SNNTrainer.last_capacity_metrics / grad_norm_means).
+    Left None for every field when either dict is absent or has no entry for a given
+    layer, matching this file's "unmeasured metric writes an empty cell" convention.
+
+    Returns an empty list when neither spike-rate source is available, which simply
+    means no layers.csv rows for this run rather than a failure.
     """
+    capacity_metrics = capacity_metrics or {}
+    grad_norm_means = grad_norm_means or {}
     rows: list[dict] = []
     named = model.net.named_lif_layers() if hasattr(model, "net") else {}
+
+    def _capacity_fields(name: str) -> dict:
+        values = capacity_metrics.get(name) or {}
+        return {
+            "participation_ratio": values.get("participation_ratio"),
+            "spike_entropy": values.get("spike_entropy"),
+            "mutual_info_xz": values.get("mutual_info_xz"),
+            "mutual_info_zy": values.get("mutual_info_zy"),
+            "grad_norm_mean": grad_norm_means.get(name),
+        }
 
     for index, (name, layer) in enumerate(named.items()):
         neurons = layer.neurons() if hasattr(layer, "neurons") else 0
@@ -179,6 +202,7 @@ def build_layer_rows(model, activity_snapshot: dict | None = None) -> list[dict]
                 "total_spikes": total,
                 "opportunities": slots,
                 "spike_rate_pct": (total / slots) * 100.0 if slots else None,
+                **_capacity_fields(name),
             })
             continue
 
@@ -199,6 +223,7 @@ def build_layer_rows(model, activity_snapshot: dict | None = None) -> list[dict]
             "total_spikes": spikes,
             "opportunities": opportunities,
             "spike_rate_pct": (spikes / opportunities) * 100.0 if opportunities else None,
+            **_capacity_fields(name),
         })
     return rows
 
