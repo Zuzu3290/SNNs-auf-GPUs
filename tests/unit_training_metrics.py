@@ -619,6 +619,66 @@ def test_runs_csv_records_the_timesteps_that_ran() -> None:
                 "timesteps" in signature.parameters)
 
 
+def _capacity_test_cfg(compute_capacity_metrics: bool):
+    """A CPU-buildable Settings, via _harness.fresh_cfg() (which already calls
+    apply_dataset_shape() -- required before any model can be built, and NOT done by
+    settings_pair(), which only merges the real YAML files with no dataset chosen).
+    Training fields set directly on the object rather than through YAML overlay, since
+    these tests build a real model and need every shape-dependent field resolved."""
+    cfg = fresh_cfg()
+    cfg.COMPUTE_CAPACITY_METRICS = compute_capacity_metrics
+    cfg.EPOCHS = 1
+    cfg.ITERA = 2
+    cfg.BATCH_SIZE = 3
+    cfg.CALIBRATE_BATCH_SIZE = False
+    cfg.WARMUP_ITERATIONS = 0
+    cfg.USE_AMP = False
+    cfg.GRAD_ACCUM_STEPS = 1
+    cfg.LR_SCHEDULER = "none"
+    return cfg
+
+
+def test_gradient_norms_recorded_when_flag_is_on() -> None:
+    """With compute_capacity_metrics on, a short training run must populate
+    grad_norm_means for every named LIF slot, with non-negative float values."""
+    from learning.training import SNNTrainer
+    import torch
+
+    cfg = _capacity_test_cfg(compute_capacity_metrics=True)
+    model, _ = build_model("sj", cfg)
+    inputs = spike_input(cfg, time_steps=4, batch=3)
+    targets = torch.randint(0, cfg.NUM_CLASSES, (3,))
+    loader = [(inputs, targets), (inputs, targets)]
+
+    trainer = SNNTrainer(model, loader, cfg, torch.device("cpu"))
+    trainer.train(csv_path=str(REPO_TMP / "training_results.csv"))
+
+    means = trainer.grad_norm_means
+    suite.check("grad_norm_means is populated", len(means) > 0, f"got {means}")
+    suite.check("every value is a non-negative float",
+                all(isinstance(v, float) and v >= 0.0 for v in means.values()),
+                f"means={means}")
+    suite.check("lif_out has a recorded gradient norm (the naming/hooking fix)",
+                "lif_out" in means, f"keys={list(means.keys())}")
+
+
+def test_gradient_norms_empty_when_flag_is_off() -> None:
+    """Off by default: no gradient-norm tracking happens, no cost, empty dict."""
+    from learning.training import SNNTrainer
+    import torch
+
+    cfg = _capacity_test_cfg(compute_capacity_metrics=False)
+    model, _ = build_model("sj", cfg)
+    inputs = spike_input(cfg, time_steps=4, batch=3)
+    targets = torch.randint(0, cfg.NUM_CLASSES, (3,))
+    loader = [(inputs, targets), (inputs, targets)]
+
+    trainer = SNNTrainer(model, loader, cfg, torch.device("cpu"))
+    trainer.train(csv_path=str(REPO_TMP / "training_results_off.csv"))
+    suite.check("grad_norm_means stays empty when the flag is off",
+                trainer.grad_norm_means == {})
+
+
 def main() -> int:
     return suite.run([
         test_training_writes_every_csv_beside_the_given_path,
@@ -661,6 +721,8 @@ def main() -> int:
         test_training_runs_on_cpu_at_all,
         test_training_memory_peaks_reach_runs_csv,
         test_runs_csv_records_the_timesteps_that_ran,
+        test_gradient_norms_recorded_when_flag_is_on,
+        test_gradient_norms_empty_when_flag_is_off,
     ])
 
 

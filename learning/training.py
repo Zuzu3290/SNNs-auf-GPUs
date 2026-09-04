@@ -114,6 +114,14 @@ class SNNTrainer:
         self.fwd_events          = []  # (start, end) CUDA event pairs, or (t0, t1) perf_counter pairs on CPU
         self.bwd_events          = []
         self.dense_macs_per_layer = {}
+        # Gradient-norm tracking (opt-in, see cfg.COMPUTE_CAPACITY_METRICS): GPU-resident
+        # running sums, synced ONCE at the end of train() -- never per-iteration, per
+        # this file's deferred-sync rule (see train()'s own docstring).
+        self.compute_capacity_metrics = getattr(cfg, "COMPUTE_CAPACITY_METRICS", False)
+        self.grad_norm_sums: dict[str, torch.Tensor] = {}
+        self.grad_norm_steps: int = 0
+        self.grad_norm_means: dict[str, float] = {}
+        self.last_capacity_metrics: dict = {}
 
         self.pipeline_monitor = PipelineMonitor(enabled=getattr(cfg, "ENABLE_PIPELINE_MONITOR", True))
 
@@ -135,6 +143,37 @@ class SNNTrainer:
         if self.model.tensor_format() == "BT":
             data = data.permute(1, 0, 2, 3, 4).contiguous()
         return self.model(data)
+
+    def record_gradient_norms(self) -> None:
+        """Accumulate this optimizer step's per-layer gradient norm as a GPU-resident
+        running sum. Called only when self.compute_capacity_metrics is on, and only
+        when do_step is True (a full effective batch's gradient is complete, not a
+        partial accumulation step). No .item() here -- see finalize_gradient_norms()
+        for the one sync, at the end of the whole run.
+        """
+        net = self.model.net
+        for name in net.named_lif_layers():
+            layer = net.dense_before(name)
+            if layer is None or layer.weight.grad is None:
+                continue
+            norm = layer.weight.grad.detach().norm(2)
+            if name in self.grad_norm_sums:
+                self.grad_norm_sums[name] = self.grad_norm_sums[name] + norm
+            else:
+                self.grad_norm_sums[name] = norm
+        self.grad_norm_steps += 1
+
+    def finalize_gradient_norms(self) -> None:
+        """The one sync point for gradient norms, called once after the whole training
+        run finishes -- mirrors how loss_hist_gpu/acc_hist_gpu are read back once per
+        epoch rather than per iteration, just at run granularity since layers.csv wants
+        one mean per layer per run, not one per epoch."""
+        if self.grad_norm_steps == 0:
+            return
+        self.grad_norm_means = {
+            name: float((total / self.grad_norm_steps).item())
+            for name, total in self.grad_norm_sums.items()
+        }
 
     def measure_activity(self, probe_data: torch.Tensor, timesteps: int) -> dict:
         """One UNTIMED forward pass with spike recording ON, for the epoch's
@@ -430,6 +469,8 @@ class SNNTrainer:
                     mem_breakdown["backward_peak_gb"] = torch.cuda.max_memory_allocated(self.device) / (1024 ** 3)
                     mem_breakdown["weights_gb"] = sum(p.numel() * p.element_size() for p in self.model.parameters()) / (1024 ** 3)
                     mem_breakdown["gradients_gb"] = sum(p.grad.numel() * p.grad.element_size() for p in self.model.parameters() if p.grad is not None) / (1024 ** 3)
+                if do_step and self.compute_capacity_metrics:
+                    self.record_gradient_norms()
                 if do_step:
                     self.model.zero_grad()
                 step_count += 1
@@ -567,6 +608,7 @@ class SNNTrainer:
         # ---- Bulk transfer: the single sync point for everything
         # accumulated above, now that every epoch has finished training. ----
         self.finalize_epoch_reports(raw_epoch_records, epochs, timesteps, window_s)
+        self.finalize_gradient_norms()
 
         self.pipeline_monitor.stop()
         overall = self.pipeline_monitor.summary()
