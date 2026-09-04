@@ -41,7 +41,13 @@ import torch
 # Bumped rather than appended silently because append_row() refuses to write into a
 # file whose header differs, which is what stops a schema change from misaligning every
 # row of an existing runs.csv. A v1 file must be moved aside, not appended to.
-SCHEMA_VERSION = 2
+# v3 added 5 capacity-metric columns to LAYER_COLUMNS (grad_norm_mean,
+# participation_ratio, spike_entropy, mutual_info_xz, mutual_info_zy), for the
+# scalability study's opt-in diagnostics -- see
+# docs/superpowers/specs/2026-09-04-capacity-metrics-design.md. Bumped rather than
+# appended silently for the same reason v2 was: append_row() refuses to write into a
+# file whose header differs, so a v2 layers.csv must be moved aside, not appended to.
+SCHEMA_VERSION = 3
 
 
 class ResultsError(Exception):
@@ -112,6 +118,11 @@ EPOCH_COLUMNS: list[str] = [
 LAYER_COLUMNS: list[str] = [
     "schema_version", "run_id", "layer_index", "layer_type",
     "neurons", "total_spikes", "opportunities", "spike_rate_pct",
+    # ---- capacity metrics (v3) -- scalability-study-only, empty unless
+    # training.compute_capacity_metrics is true. See skeleton/results_collect.py's
+    # build_layer_rows() for how each is populated.
+    "grad_norm_mean", "participation_ratio", "spike_entropy",
+    "mutual_info_xz", "mutual_info_zy",
 ]
 
 
