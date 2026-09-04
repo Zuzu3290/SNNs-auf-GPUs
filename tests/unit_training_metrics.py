@@ -679,6 +679,53 @@ def test_gradient_norms_empty_when_flag_is_off() -> None:
                 trainer.grad_norm_means == {})
 
 
+def test_capacity_metrics_populated_on_final_epoch_only() -> None:
+    """With the flag on and 2 epochs, last_capacity_metrics must be populated after
+    train() returns, with one entry per hooked LIF layer including lif_out."""
+    from learning.training import SNNTrainer
+    import torch
+
+    cfg = _capacity_test_cfg(compute_capacity_metrics=True)
+    cfg.EPOCHS = 2
+    cfg.BATCH_SIZE = 4
+    model, _ = build_model("sj", cfg)
+    inputs = spike_input(cfg, time_steps=4, batch=4)
+    targets = torch.randint(0, cfg.NUM_CLASSES, (4,))
+    loader = [(inputs, targets), (inputs, targets)]
+
+    trainer = SNNTrainer(model, loader, cfg, torch.device("cpu"))
+    trainer.train(csv_path=str(REPO_TMP / "training_results_capacity.csv"))
+
+    capacity = trainer.last_capacity_metrics
+    suite.check("capacity metrics populated for every hooked layer",
+                set(capacity.keys()) == set(model.net.named_lif_layers().keys()),
+                f"got keys={list(capacity.keys())}")
+    for name, values in capacity.items():
+        suite.check(f"{name}: has all 4 capacity fields",
+                    {"participation_ratio", "spike_entropy",
+                     "mutual_info_xz", "mutual_info_zy"} <= set(values.keys()),
+                    f"{name} -> {values}")
+        suite.check(f"{name}: participation_ratio is non-negative",
+                    values["participation_ratio"] >= 0.0)
+
+
+def test_capacity_metrics_empty_when_flag_is_off() -> None:
+    from learning.training import SNNTrainer
+    import torch
+
+    cfg = _capacity_test_cfg(compute_capacity_metrics=False)
+    cfg.BATCH_SIZE = 4
+    model, _ = build_model("sj", cfg)
+    inputs = spike_input(cfg, time_steps=4, batch=4)
+    targets = torch.randint(0, cfg.NUM_CLASSES, (4,))
+    loader = [(inputs, targets), (inputs, targets)]
+
+    trainer = SNNTrainer(model, loader, cfg, torch.device("cpu"))
+    trainer.train(csv_path=str(REPO_TMP / "training_results_capacity_off.csv"))
+    suite.check("last_capacity_metrics stays empty when the flag is off",
+                trainer.last_capacity_metrics == {})
+
+
 def main() -> int:
     return suite.run([
         test_training_writes_every_csv_beside_the_given_path,
@@ -723,6 +770,8 @@ def main() -> int:
         test_runs_csv_records_the_timesteps_that_ran,
         test_gradient_norms_recorded_when_flag_is_on,
         test_gradient_norms_empty_when_flag_is_off,
+        test_capacity_metrics_populated_on_final_epoch_only,
+        test_capacity_metrics_empty_when_flag_is_off,
     ])
 
 

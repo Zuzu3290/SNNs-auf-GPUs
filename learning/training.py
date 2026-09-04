@@ -175,7 +175,9 @@ class SNNTrainer:
             for name, total in self.grad_norm_sums.items()
         }
 
-    def measure_activity(self, probe_data: torch.Tensor, timesteps: int) -> dict:
+    def measure_activity(self, probe_data: torch.Tensor, timesteps: int,
+                          probe_targets: torch.Tensor | None = None,
+                          compute_capacity: bool = False) -> dict:
         """One UNTIMED forward pass with spike recording ON, for the epoch's
         activity metrics: SynOps, CV_ISI and the sparse-vs-dense buffer report.
 
@@ -195,6 +197,13 @@ class SNNTrainer:
         epoch on one batch, rather than accumulated per iteration. The per-iteration
         SynOps series is therefore a broadcast of the epoch's value, exactly as GPU
         energy already was -- see iteration_series().
+
+        compute_capacity, when True, additionally computes Participation Ratio,
+        spike entropy, and both mutual-information variants for every hooked layer,
+        using this same probe pass -- no separate diagnostic pass, no extra forward
+        call. Only ever True on the FINAL epoch's call (see train()): the numpy-side
+        work is redundant on every other epoch since only the last value is kept,
+        exactly like last_activity_snapshot itself only keeps the last epoch's copy.
         """
         self.model.activity.resume()
         self.model.activity.clear()
@@ -210,11 +219,30 @@ class SNNTrainer:
                 if rate_t is not None:
                     synops = synops + rate_t * macs * timesteps
             snapshot = {k: (v.cpu() if v is not None else None) for k, v in recordings.items()}
+
+            capacity: dict[str, dict[str, float]] = {}
+            if compute_capacity and probe_targets is not None:
+                from learning.capacity_metrics import (
+                    firing_rate_matrix, participation_ratio, spike_entropy,
+                    mutual_information_xz, mutual_information_zy,
+                )
+                x_rates = firing_rate_matrix(probe_data)
+                labels = probe_targets.detach().cpu().numpy()
+                for name, recorded in recordings.items():
+                    if recorded is None:
+                        continue
+                    z_rates = firing_rate_matrix(recorded)
+                    capacity[name] = {
+                        "participation_ratio": participation_ratio(z_rates),
+                        "spike_entropy": spike_entropy(z_rates),
+                        "mutual_info_xz": mutual_information_xz(x_rates, z_rates),
+                        "mutual_info_zy": mutual_information_zy(z_rates, labels),
+                    }
         finally:
             # Straight back off before the next epoch's timed loop starts.
             self.model.activity.pause()
             self.model.activity.clear()
-        return {"synops": float(synops.item()), "snapshot": snapshot}
+        return {"synops": float(synops.item()), "snapshot": snapshot, "capacity": capacity}
 
     @contextmanager
     def timed(self, event_list: list):
@@ -344,7 +372,7 @@ class SNNTrainer:
 
         # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4.
         # self.train_loader is a PrefetchedLoader — probe_data is already device-resident.
-        probe_data, _ = next(iter(self.train_loader))
+        probe_data, probe_targets = next(iter(self.train_loader))
         timesteps = probe_data.shape[0]  # loader yields [T, B, C, H, W] — the real BPTT unroll length, not a config value
         self.timesteps, self.window_s = timesteps, window_s
         if self.model.tensor_format() == "BT":
@@ -557,7 +585,10 @@ class SNNTrainer:
             # ---- untimed activity pass ------------------------------------------
             # After the epoch's timer has stopped and after the energy window has
             # closed, so nothing measured above is affected by the recording hooks.
-            activity = self.measure_activity(probe_data, timesteps)
+            activity = self.measure_activity(
+                probe_data, timesteps, probe_targets,
+                compute_capacity=(self.compute_capacity_metrics and epoch == epochs - 1),
+            )
 
             if self.scheduler is not None:
                 self.scheduler.step()
@@ -592,6 +623,7 @@ class SNNTrainer:
                 # per iteration -- see measure_activity().
                 "epoch_synops":       activity["synops"],
                 "activity_snapshot":  activity["snapshot"],
+                "capacity_metrics":   activity["capacity"],
                 "epoch_duration":     epoch_duration,
                 "gpu":                gpu,
                 "gpu_diag":           gpu_diag,
@@ -671,6 +703,7 @@ class SNNTrainer:
             # from the measurement this epoch already took, instead of paying for an
             # extra pass. Hooked layers only -- lif_out is not hooked.
             self.last_activity_snapshot = record["activity_snapshot"]
+            self.last_capacity_metrics = record["capacity_metrics"]
 
             cv_isi      = compute_cv_isi(record["activity_snapshot"])
             cv_isi_mean = cv_isi.get("network_wide", 0.0)
