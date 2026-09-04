@@ -137,8 +137,8 @@ def test_hooks_record_the_same_shapes_for_every_framework() -> None:
             model(spike_input(cfg, T, B))
         recordings = model.activity.recordings()
         shapes[framework] = {k: tuple(v.shape) for k, v in recordings.items() if v is not None}
-        suite.check(f"both hidden layers recorded: {framework}",
-                    set(recordings) == {"lif1", "lif2"}, str(sorted(recordings)))
+        suite.check(f"all hooked layers recorded: {framework}",
+                    set(recordings) == {"lif1", "lif2", "lif_out"}, str(sorted(recordings)))
         for name, tensor in recordings.items():
             suite.check(f"{name} recording is time-first with T={T}: {framework}",
                         tensor is not None and tensor.shape[0] == T,
