@@ -85,6 +85,8 @@ training:
   # It also changes numerics. Off keeps the cost axis honest.
   use_amp: false
 
+  compute_capacity_metrics: true   # this study's whole point is these metrics
+
 # ---------------------------------------------------------------------------
 # convolution: NOT overridden in this file.
 #

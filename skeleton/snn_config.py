@@ -115,6 +115,10 @@ class Settings:
         self.LOSS_FN                  = training.require_str("loss")
         self.DEVICE                   = training.require_str("device")
         self.USE_AMP                  = training.require_bool("use_amp")
+        # Scalability-study-only diagnostics (Participation Ratio, mutual information,
+        # spike entropy, per-layer gradient norms). Off by default: every other
+        # experiment's runs.csv/layers.csv output is unaffected either way.
+        self.COMPUTE_CAPACITY_METRICS = training.require_bool("compute_capacity_metrics")
         self.GRAD_ACCUM_STEPS         = max(1, training.require_int("grad_accum_steps"))
         # Validated, not compared loosely: the use site tested `== "cosine"`, so any
         # unrecognised string (a typo like "cosinne") silently meant NO scheduler --

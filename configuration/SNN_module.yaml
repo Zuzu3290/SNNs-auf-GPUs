@@ -81,6 +81,10 @@ training:
   lr_scheduler: cosine
 
   use_amp: false                # true | false. Changes speed AND numerics; state it explicitly.
+  compute_capacity_metrics: false  # scalability-study-only diagnostics: Participation Ratio,
+                                    # mutual information, spike entropy, gradient norms. Off by
+                                    # default -- costs extra CPU-side computation once per run.
+                                    # See docs/superpowers/specs/2026-09-04-capacity-metrics-design.md
   grad_accum_steps: 1           # batches accumulated before an optimizer step
 
 
