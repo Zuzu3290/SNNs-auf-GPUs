@@ -138,12 +138,18 @@ class SpikingNet(nn.Module):
 
     def named_lif_layers(self) -> dict[str, BaseLIF]:
         """Slot name -> layer, using the names the rest of this pipeline expects
-        (ActivityMonitor keys, synops_layer_map): lif1, lif2, lif_out."""
+        (ActivityMonitor keys, synops_layer_map): lif1, lif2, ..., lif_out.
+
+        The LAST lif layer is always "lif_out", whatever its position -- not a fixed
+        3-slot lookup. That fixed lookup used to accidentally work only because this
+        architecture happened to have exactly 3 LIF layers; the moment a hidden LIF
+        layer is inserted before the output (a depth ladder), a positional lookup would
+        misname the new layer "lif_out" and push the real output layer to an anonymous
+        fallback name instead.
+        """
         lifs = self.lif_layers()
-        return {
-            LIF_SLOTS[i] if i < len(LIF_SLOTS) else f"lif{i + 1}": layer
-            for i, layer in enumerate(lifs)
-        }
+        names = [f"lif{i + 1}" for i in range(len(lifs) - 1)] + ["lif_out"]
+        return dict(zip(names, lifs))
 
     def dense_after(self, lif_name: str) -> nn.Module | None:
         """The first dense (Conv2d/Linear) module DOWNSTREAM of a given LIF slot.
