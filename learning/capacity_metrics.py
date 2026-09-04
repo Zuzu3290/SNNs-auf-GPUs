@@ -72,3 +72,94 @@ def spike_entropy(rates: np.ndarray) -> float:
     p = per_neuron / total
     nonzero = p[p > 0]
     return float(-(nonzero * np.log2(nonzero)).sum())
+
+
+def pca_reduce(data: np.ndarray, n_components: int = 3) -> np.ndarray:
+    """[B, N] -> [B, k]: project onto the top k principal components.
+
+    Same Gram-matrix trick as participation_ratio() -- B x B eigendecomposition
+    instead of N x N, which matters when N (neurons) far exceeds B (a diagnostic
+    batch's sample count). k is capped at B - 1 (or B if that would be non-positive)
+    since a sample set of size B cannot support more than that many meaningful
+    components.
+    """
+    b = data.shape[0]
+    k = max(1, min(n_components, b - 1 if b > 1 else 1))
+    centered = data - data.mean(axis=0, keepdims=True)
+    gram = centered @ centered.T  # [B, B]
+    eigenvalues, eigenvectors = np.linalg.eigh(gram)
+    # eigh ascends; take the top k.
+    order = np.argsort(eigenvalues)[::-1][:k]
+    top_vals = np.clip(eigenvalues[order], 1e-12, None)
+    top_vecs = eigenvectors[:, order]
+    # Recover the N-dimensional principal directions' projection via the dual trick:
+    # centered.T @ top_vecs gives directions in N-space; scaling by 1/sqrt(eigenvalue)
+    # normalizes them, then projecting `centered` back onto them gives the [B, k] score.
+    components = centered.T @ top_vecs / np.sqrt(top_vals)  # [N, k]
+    return centered @ components  # [B, k]
+
+
+def quantile_discretize(data: np.ndarray, n_bins: int = 6) -> np.ndarray:
+    """[B, k] continuous -> [B] int symbols.
+
+    Each of the k columns is independently bucketed into n_bins quantile bins (robust
+    to columns having very different scales, unlike fixed-width bins), then the k
+    per-column bin indices are combined into one joint symbol per sample via base-
+    n_bins positional encoding -- symbol = sum(bin_j * n_bins**j). This is the same
+    binning-of-activations approach the original deep-learning information-bottleneck
+    research used (Tishby et al.), adapted here to work in a PCA-reduced space so it
+    stays tractable in more than one dimension.
+    """
+    b, k = data.shape
+    symbols = np.zeros(b, dtype=np.int64)
+    for j in range(k):
+        column = data[:, j]
+        # np.quantile with n_bins+1 edges gives n_bins bins; searchsorted then clips
+        # the top edge into the last bin instead of spilling into an (n_bins)-th one.
+        edges = np.quantile(column, np.linspace(0, 1, n_bins + 1)[1:-1])
+        bin_idx = np.searchsorted(edges, column, side="right")
+        bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+        symbols += bin_idx * (n_bins ** j)
+    return symbols
+
+
+def discrete_mutual_information(a: np.ndarray, b: np.ndarray) -> float:
+    """Two integer-symbol arrays of the same length -> empirical mutual information in
+    bits, from their joint histogram: I(A;B) = sum p(a,b) log2(p(a,b) / (p(a)p(b))).
+
+    The one estimator both mutual_information_xz and mutual_information_zy call, on
+    already-discretized inputs. A finite-sample estimate: independent variables give a
+    small positive number, not exactly zero (see the test suite's bounds checks).
+    """
+    a = np.asarray(a)
+    b = np.asarray(b)
+    n = len(a)
+    a_vals, a_inv = np.unique(a, return_inverse=True)
+    b_vals, b_inv = np.unique(b, return_inverse=True)
+    joint = np.zeros((len(a_vals), len(b_vals)))
+    np.add.at(joint, (a_inv, b_inv), 1)
+    joint /= n
+    p_a = joint.sum(axis=1, keepdims=True)
+    p_b = joint.sum(axis=0, keepdims=True)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(joint > 0, joint / (p_a * p_b), 1.0)
+        terms = np.where(joint > 0, joint * np.log2(ratio), 0.0)
+    return float(terms.sum())
+
+
+def mutual_information_xz(x_rates: np.ndarray, z_rates: np.ndarray) -> float:
+    """x_rates, z_rates: both already reduced to [B, N] via firing_rate_matrix() --
+    the raw input goes through the same [T,B,...] -> [B,N] rate reduction as any
+    hooked layer's spikes before it gets here. PCA-reduces both sides, discretizes
+    both, then discrete_mutual_information."""
+    x_symbols = quantile_discretize(pca_reduce(x_rates))
+    z_symbols = quantile_discretize(pca_reduce(z_rates))
+    return discrete_mutual_information(x_symbols, z_symbols)
+
+
+def mutual_information_zy(z_rates: np.ndarray, labels: np.ndarray) -> float:
+    """z_rates: [B, N]. labels: [B] integer class labels, already discrete -- no
+    reduction needed on that side. PCA-reduces and discretizes z only, then
+    discrete_mutual_information against the raw labels."""
+    z_symbols = quantile_discretize(pca_reduce(z_rates))
+    return discrete_mutual_information(z_symbols, np.asarray(labels))
