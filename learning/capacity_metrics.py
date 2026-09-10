@@ -1,7 +1,11 @@
 """Capacity metrics for the scalability study: Participation Ratio, spike-train
-entropy, and (learning/capacity_metrics.py, extended in a later task) mutual
-information. Pure functions over tensors/arrays -- no dataset, no GPU, no model object
-required, which is what makes them unit-testable in isolation.
+entropy, and mutual information (Z;Y). Pure functions over tensors/arrays -- no
+dataset, no GPU, no model object required, which is what makes them unit-testable in
+isolation.
+
+Includes a channel-pooling rate reduction (channel_rate_matrix) so a wide conv layer's
+spatial sites don't get counted as separate units, and normalized (size-independent)
+variants of Participation Ratio and spike entropy alongside their raw values.
 
 See docs/superpowers/specs/2026-09-04-capacity-metrics-design.md for the full design,
 the formulas' sources (Scalability.pdf, the colleague's brief), and why the defaults
@@ -31,6 +35,25 @@ def firing_rate_matrix(spikes: torch.Tensor) -> np.ndarray:
     return rate.reshape(rate.shape[0], -1).cpu().numpy()
 
 
+def channel_rate_matrix(spikes: torch.Tensor) -> np.ndarray:
+    """[T, B, C, H, W] (or [T, B, C] for an already-flat layer) -> [B, C] per-sample,
+    per-CHANNEL mean firing rate -- spatial positions within a channel are pooled
+    together, not treated as separate units.
+
+    Per the study designer's correction (design doc §6c): a conv layer's raw spike
+    tensor has one "unit" per (channel, y, x) site, which for a 128-filter layer on a
+    large sensor is well over 100k units -- mostly spatial redundancy within each
+    filter, not independent capacity. Pooling each channel's spatial map into one
+    number makes the unit count equal to the filter count (12, 32, 64, 128, ...) --
+    exactly the axis a width sweep varies -- so Participation Ratio and spike entropy
+    measure feature dimensionality instead of spatial tiling.
+    """
+    rate = spikes.detach().float().mean(dim=0)  # [B, C, H, W] or [B, C]
+    if rate.dim() > 2:
+        rate = rate.mean(dim=tuple(range(2, rate.dim())))  # pool every spatial dim
+    return rate.cpu().numpy()
+
+
 def participation_ratio(rates: np.ndarray) -> float:
     """rates: [B, N] (B samples, N neurons). PR = (sum(lambda_i))**2 / sum(lambda_i**2),
     the eigenvalues of the neuron-by-neuron covariance matrix -- the exact formula from
@@ -55,6 +78,15 @@ def participation_ratio(rates: np.ndarray) -> float:
     return float((total ** 2) / (eigenvalues ** 2).sum())
 
 
+def participation_ratio_normalized(rates: np.ndarray) -> float:
+    """PR divided by the channel count N -- a size-independent reading (0 to 1-ish)
+    alongside the raw value, per design doc §6d. N = rates.shape[1]."""
+    n = rates.shape[1]
+    if n <= 0:
+        return 0.0
+    return participation_ratio(rates) / n
+
+
 def spike_entropy(rates: np.ndarray) -> float:
     """rates: [B, N]. Mean firing rate per neuron (averaged over the B samples),
     normalized into a probability distribution over neurons, Shannon entropy of that
@@ -72,6 +104,17 @@ def spike_entropy(rates: np.ndarray) -> float:
     p = per_neuron / total
     nonzero = p[p > 0]
     return float(-(nonzero * np.log2(nonzero)).sum())
+
+
+def spike_entropy_normalized(rates: np.ndarray) -> float:
+    """Entropy divided by its maximum possible value, log2(N) -- per design doc §6d.
+    N=1 has no distribution to spread across (nothing to normalize against), so this
+    returns 0.0 rather than dividing by log2(1)=0.
+    """
+    n = rates.shape[1]
+    if n <= 1:
+        return 0.0
+    return spike_entropy(rates) / np.log2(n)
 
 
 def pca_reduce(data: np.ndarray, n_components: int = 3) -> np.ndarray:
@@ -127,9 +170,9 @@ def discrete_mutual_information(a: np.ndarray, b: np.ndarray) -> float:
     """Two integer-symbol arrays of the same length -> empirical mutual information in
     bits, from their joint histogram: I(A;B) = sum p(a,b) log2(p(a,b) / (p(a)p(b))).
 
-    The one estimator both mutual_information_xz and mutual_information_zy call, on
-    already-discretized inputs. A finite-sample estimate: independent variables give a
-    small positive number, not exactly zero (see the test suite's bounds checks).
+    The one estimator mutual_information_zy calls, on already-discretized inputs. A
+    finite-sample estimate: independent variables give a small positive number, not
+    exactly zero (see the test suite's bounds checks).
     """
     a = np.asarray(a)
     b = np.asarray(b)
@@ -145,16 +188,6 @@ def discrete_mutual_information(a: np.ndarray, b: np.ndarray) -> float:
         ratio = np.where(joint > 0, joint / (p_a * p_b), 1.0)
         terms = np.where(joint > 0, joint * np.log2(ratio), 0.0)
     return float(terms.sum())
-
-
-def mutual_information_xz(x_rates: np.ndarray, z_rates: np.ndarray) -> float:
-    """x_rates, z_rates: both already reduced to [B, N] via firing_rate_matrix() --
-    the raw input goes through the same [T,B,...] -> [B,N] rate reduction as any
-    hooked layer's spikes before it gets here. PCA-reduces both sides, discretizes
-    both, then discrete_mutual_information."""
-    x_symbols = quantile_discretize(pca_reduce(x_rates))
-    z_symbols = quantile_discretize(pca_reduce(z_rates))
-    return discrete_mutual_information(x_symbols, z_symbols)
 
 
 def mutual_information_zy(z_rates: np.ndarray, labels: np.ndarray) -> float:

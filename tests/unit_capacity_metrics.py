@@ -1,5 +1,5 @@
 """Unit tests for the scalability study's capacity metrics: Participation Ratio,
-spike-train entropy, and (added in a later task) mutual information.
+spike-train entropy, and mutual information (Z;Y only -- I(X;Z) was dropped).
 
     python tests/unit_capacity_metrics.py
 
@@ -13,9 +13,10 @@ import torch
 
 from _harness import Suite
 from learning.capacity_metrics import (
-    firing_rate_matrix, participation_ratio, spike_entropy,
+    firing_rate_matrix, channel_rate_matrix, participation_ratio,
+    participation_ratio_normalized, spike_entropy, spike_entropy_normalized,
     pca_reduce, quantile_discretize, discrete_mutual_information,
-    mutual_information_xz, mutual_information_zy,
+    mutual_information_zy,
 )
 
 suite = Suite("unit_capacity_metrics")
@@ -128,23 +129,65 @@ def test_quantile_discretize_shape_and_range() -> None:
     suite.check("symbols are non-negative", symbols.min() >= 0)
 
 
-def test_mutual_information_xz_and_zy_are_bounded() -> None:
-    """End-to-end check on synthetic spike-shaped data: MI must be non-negative and
-    not absurdly large for random data -- an approximation's bounds check, not an
-    exact-value check, since PCA+binning is a lossy pipeline."""
+def test_channel_rate_matrix_pools_spatial_dims_per_channel() -> None:
+    """[T, B, C, H, W] -> [B, C], averaging over T AND over H, W per channel --
+    NOT flattening every (channel, y, x) site the way firing_rate_matrix() does."""
+    # T=2, B=3, C=2, H=2, W=2. Channel 0 is all 1s, channel 1 is all 0s.
+    spikes = torch.zeros(2, 3, 2, 2, 2)
+    spikes[:, :, 0, :, :] = 1.0
+    rates = channel_rate_matrix(spikes)
+    suite.check("shape is [B, C], not [B, C*H*W]", rates.shape == (3, 2),
+                f"got {rates.shape}")
+    suite.check("channel 0 rate is 1.0 for every sample", np.allclose(rates[:, 0], 1.0))
+    suite.check("channel 1 rate is 0.0 for every sample", np.allclose(rates[:, 1], 0.0))
+
+
+def test_channel_rate_matrix_handles_already_flat_layers() -> None:
+    """A layer with no spatial dims at all (e.g. lif_out: [T, B, C]) needs no spatial
+    pooling -- output shape is unchanged from firing_rate_matrix()'s in that case."""
+    spikes = torch.rand(4, 5, 10)  # [T, B, C], no H/W
+    rates = channel_rate_matrix(spikes)
+    suite.check("shape is [B, C] when there were no spatial dims to pool",
+                rates.shape == (5, 10), f"got {rates.shape}")
+
+
+def test_participation_ratio_normalized_is_pr_over_n() -> None:
     rng = np.random.default_rng(0)
-    x_rates = rng.random((64, 200))    # e.g. a flattened input batch
-    z_rates = rng.random((64, 50))     # e.g. a hidden layer's firing rates
+    rates = rng.normal(size=(50, 10))
+    pr = participation_ratio(rates)
+    pr_norm = participation_ratio_normalized(rates)
+    suite.check("normalized PR equals raw PR / N",
+                np.isclose(pr_norm, pr / 10), f"pr={pr}, pr_norm={pr_norm}")
+
+
+def test_spike_entropy_normalized_is_h_over_log2_n() -> None:
+    n = 8
+    rates = np.ones((10, n))  # uniform firing -> H = log2(N) exactly
+    h_norm = spike_entropy_normalized(rates)
+    suite.check("uniform firing gives normalized entropy of 1.0 (H == log2(N))",
+                np.isclose(h_norm, 1.0, atol=1e-9), f"got {h_norm}")
+
+
+def test_spike_entropy_normalized_single_channel_is_defined() -> None:
+    """N=1: log2(1) = 0, a division by zero the function must guard against --
+    a single channel has no distribution to spread across, so normalized entropy
+    is trivially 0.0 (no room for spread) rather than raising or returning NaN."""
+    rates = np.ones((10, 1))
+    h_norm = spike_entropy_normalized(rates)
+    suite.check("N=1 normalized entropy is 0.0, not NaN/inf",
+                h_norm == 0.0, f"got {h_norm}")
+
+
+def test_mutual_information_zy_is_bounded() -> None:
+    """mutual_information_xz is removed (see design doc §6e) -- only the zy variant
+    remains. Bounds check only, since PCA+binning is a lossy approximation."""
+    rng = np.random.default_rng(0)
+    z_rates = rng.random((64, 50))
     labels = rng.integers(0, 10, size=64)
-
-    mi_xz = mutual_information_xz(x_rates, z_rates)
     mi_zy = mutual_information_zy(z_rates, labels)
-
-    suite.check("I(X;Z) >= 0", mi_xz >= -1e-9, f"got {mi_xz}")
     suite.check("I(Z;Y) >= 0", mi_zy >= -1e-9, f"got {mi_zy}")
-    # Joint symbol space is at most 6**3 = 216 states; MI cannot exceed log2(216).
-    suite.check("I(X;Z) is within the joint symbol space's entropy bound",
-                mi_xz <= np.log2(6 ** 3) + 1e-6, f"got {mi_xz}")
+    suite.check("I(Z;Y) is within the joint symbol space's entropy bound",
+                mi_zy <= np.log2(6 ** 3) + 1e-6, f"got {mi_zy}")
 
 
 if __name__ == "__main__":
@@ -160,5 +203,10 @@ if __name__ == "__main__":
         test_discrete_mutual_information_is_never_negative,
         test_pca_reduce_shape_and_determinism,
         test_quantile_discretize_shape_and_range,
-        test_mutual_information_xz_and_zy_are_bounded,
+        test_channel_rate_matrix_pools_spatial_dims_per_channel,
+        test_channel_rate_matrix_handles_already_flat_layers,
+        test_participation_ratio_normalized_is_pr_over_n,
+        test_spike_entropy_normalized_is_h_over_log2_n,
+        test_spike_entropy_normalized_single_channel_is_defined,
+        test_mutual_information_zy_is_bounded,
     ]))
