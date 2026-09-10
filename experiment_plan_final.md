@@ -189,6 +189,13 @@ Two study-level outputs, built across runs rather than inside one:
 
 ### What each is for, and its stopping rule
 
+**Quick reference — don't mix these up:**
+
+| experiment | varies | stopping signal |
+|---|---|---|
+| ex7 (width) | filters | accuracy vs. **VRAM** |
+| ex8 (depth) | layers | accuracy vs. **time/params**, gradient norms watched only as a diagnostic |
+
 - **ex7 — Width ladder.** Stop a rung early if it gives **<1% accuracy gain for >10% VRAM increase** — that's the Filter Ceiling. Includes one extended-epoch arm on the *smallest* rung (train it far past the normal budget) to confirm that rung's ceiling is structural rather than "it just needed more training" — this is the first objection anyone reviewing the result will raise, so it's cheap insurance folded into ex7 rather than its own experiment.
 - **ex8 — Depth ladder.** Requires adding a configurable FC hidden layer to `frameworks/spiking_net.py` first — right now the network goes straight `Flatten → Linear(classes) → lif_out`, with no hidden FC layer to grow. (The results schema already has `fc_hidden_layers` / `fc_hidden_size` columns waiting for this.) Stop a rung early at **<1% accuracy gain for >10% time/parameter increase** — the Depth Ceiling. Gradient norms are recorded per layer throughout, but as a diagnostic, not a trigger (see §9 for why this differs from the original scalability.md design).
 - **ex9 — Combine + stress.** Three arms: (1) baseline confirmation of best-width+best-depth on N-Caltech101, (2) the same config on corrupted/perturbed input, as the robustness boundary, (3) read off the train−test gap as the generalization signal. This is also where the three named landmark configs (Stable / Unstable / Factory-Correct, §7) get their final multi-seed confirmation.

@@ -54,7 +54,7 @@ training:
                                    # `none` is what actually holds the LR constant.
                                    # optimizer.lr stays at the base 0.002.
 
-  epochs: 30                      # ASSUMPTION, not a validated number -- see README §3.
+  epochs: 15                      # ASSUMPTION, not a validated number -- see README §3.
                                    # No prior run of this pipeline on N-Caltech101 exists
                                    # to calibrate against. 30 is a starting point; check
                                    # the first rung's own training curve (is train
