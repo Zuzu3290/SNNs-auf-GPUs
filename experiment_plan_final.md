@@ -79,18 +79,21 @@ see whether each framework's scalability curve bends at the same place or not.
 
 ## 4. What gets locked before anything else runs — ex6
 
-`experiments/ex6/` already exists but **has not been run yet** (its `results/` folder is
-empty). Nothing in ex7 onward can start until it has, because it decides settings that
-every later run must share:
+**Status: complete.** ex6's three arms ran on 2026-09-02; full results and conclusions
+are in `experiments/ex6/README.md` §12. The settings every later run must share are now
+decided, not pending:
 
-| setting | decided by | why it can't vary later |
+| setting | value | decided by |
 |---|---|---|
-| `pool_kernel` (1 or 2) | ex6, criterion 1 (does the conv stack stay a meaningful share of the network) | changes flatten width → changes classifier size → changes VRAM and neuron count for every later run |
-| batch size / grad-accum | ex6 arm C (does the largest planned network fit in VRAM at this batch size) | auto-calibrated batch size would silently shrink at every rung of a size ladder, confounding the "size" comparison |
-| timesteps `T`, backend, LR schedule (`none`, constant) | already fixed in `ex6/config.yaml` | held fixed for the whole study, stated once here rather than repeated per experiment |
+| `pool_kernel` | **2** | ex6 — won on all three criteria (structural share, VRAM, and accuracy), not a close call |
+| batch size / grad-accum | **64 / 2** (effective 128) for N-MNIST | ex6 arm C — fits N-MNIST's top-of-ladder network with ~26% headroom. **ex7 onward (N-Caltech101) will calibrate their own batch size per the `calibrate_batch_size()` occupancy policy (30-35% VRAM), which will differ substantially by dataset** — N-Caltech101's much larger images will likely result in single-digit batch sizes. See design doc §6a: this is correct, dataset-dependent behavior, not a confound to control for. |
+| timesteps `T`, backend, LR schedule (`none`, constant) | fixed in `ex6/config.yaml` | held fixed for the whole study |
 
-**Action:** run ex6's three arms (A/B/C) before starting ex7. Fill in its results table
-and its "Decision: _pending_" line first.
+**Carried forward as a general caution from ex6's results:** GPU utilization was low
+(22-37%) on the smaller arms, meaning wall-clock/epoch-time comparisons were measuring
+the data loader, not the network, on this hardware. ex7's smaller rungs will likely hit
+the same regime — check `gpu_util_avg_pct` before trusting any timing comparison there,
+the same way ex6 did.
 
 ## 5. Metrics
 
@@ -105,9 +108,9 @@ documentation.
 
 | # | subject | plain English | built already? |
 |---|---|---|---|
-| 1 | **Mutual Information** I(X;Z) | how much of the input actually survives into the network's internal spike patterns | ❌ **not built** — no MI code anywhere in the repo |
-| 2 | **Participation Ratio** (effective dimension, via PCA on spike rates) | are the extra neurons doing genuinely different work, or all copying each other | ❌ **not built** |
-| 3 | **Spike-train entropy** (population coding entropy) | too orderly = the network is ignoring the input; too chaotic = noise, not information | ❌ **not built** (distinct from CV-ISI, which *is* built — CV-ISI measures firing *regularity*, not population entropy) |
+| 1 | **Mutual Information** I(Z;Y) | how much the network's internal spike patterns still retain about the task labels | ✅ **built** — `learning/capacity_metrics.py`, opt-in behind `training.compute_capacity_metrics`. **Revised:** I(X;Z) is unreliable at these sample sizes and is dropped; only I(Z;Y) remains, computed over the full test set (not one probe batch), reported raw. See design doc §6e for rationale. |
+| 2 | **Participation Ratio** (effective dimension, via PCA on spike rates) | are the extra neurons doing genuinely different work, or all copying each other | ✅ **built** — same module and flag. **Revised:** now computed over the full test set (not one probe batch), measured per-channel (not per-pixel), and reported both raw and normalized (PR/N). See design doc §6b-6d for rationale and the sample-size fix. |
+| 3 | **Spike-train entropy** (population coding entropy) | too orderly = the network is ignoring the input; too chaotic = noise, not information | ✅ **built** — same module and flag (distinct from CV-ISI, which measures firing *regularity*, not population entropy). **Revised:** now computed over the full test set (not one probe batch), measured per-channel (not per-pixel), and reported both raw and normalized (H/log₂N). See design doc §6b-6d. |
 | 4 | **Task Performance Decoherence** — accuracy vs. scale | does accuracy fall off a cliff or decline gently as the network shrinks / the task gets harder | ✅ **no new code needed** — a plot over accuracy data every run already produces |
 | 5 | **Hardware Overhead Proxy** — memory, wall-clock, spike count as an energy proxy | what does this size cost, on this GPU | ✅ **fully built** — `measure_dense_macs`/SynOps energy and VRAM calibration in `learning/utilities.py` and `learning/inference.py`; this is the "few metrics already in place" the colleague meant |
 
@@ -122,14 +125,25 @@ documentation.
 
 | item | status |
 |---|---|
-| **Per-layer gradient norms** (depth-stability diagnostic) | ❌ **not built** — `training.py` tracks gradient *memory* (for VRAM accounting), nothing tracks gradient *magnitude* per layer |
+| **Per-layer gradient norms** (depth-stability diagnostic) | ✅ **built** — deferred-sync tracking in `learning/training.py`, same opt-in flag |
 
 ### Bottom line
 
-**Four things need new code before ex7 can produce real results: Mutual Information,
-Participation Ratio, spike-train entropy, and per-layer gradient norms.** Everything
-else in this section — accuracy, memory, time, energy, spike activity, CV-ISI,
-confusion matrices — is already working, confirmed against the code. Carried into §10.
+**All four previously-missing metrics are now built** — Mutual Information,
+Participation Ratio, spike-train entropy, and per-layer gradient norms — behind the
+`training.compute_capacity_metrics` config flag, plus a correctness fix (the network's
+output layer, `lif_out`, was never measured for anything before; layer naming/hooking
+is now dynamic and depth-safe, always on). Full design and implementation record:
+`docs/superpowers/specs/2026-09-04-capacity-metrics-design.md` and
+`docs/superpowers/plans/2026-09-04-capacity-metrics.md`.
+
+**Resolved in revision 2:** a final review found that with a single probe batch,
+Participation Ratio was mathematically capped near batch_size − 1 and spike entropy
+tracked `log2(neuron count)` closely. This was addressed by: accumulating over the
+full test set (removing the cap entirely, §6b), measuring per-channel instead of
+per-pixel (focusing on the feature-dimensionality axis the width sweep varies, §6c),
+and reporting both raw and normalized versions of both metrics (PR/N and H/log₂N, §6d).
+See design doc §6b-6d for the full rationale.
 
 ### References (for the write-up, per the colleague's request to document and cite this properly)
 
@@ -251,16 +265,20 @@ recovered and a fresh call was needed:
 
 ## 10. Before ex7 can start
 
-1. Run `experiments/ex6`'s three arms, fill in its results table, lock `pool_kernel` and
-   batch size.
-2. **Build the 4 missing metrics** — Mutual Information (I(X;Z) and I(Z;Y)),
-   Participation Ratio, spike-train entropy, and per-layer gradient-norm logging. None
-   of these exist in the codebase today (see §5 for what's already built vs. not, and
-   the reference papers to implement against). These are main-event metrics starting at
-   ex7, not something deferrable to ex8.
-3. Add a configurable FC hidden layer to `frameworks/spiking_net.py` (needed for ex8;
-   worth doing alongside step 2 so the schema's `fc_hidden_layers` columns are exercised
-   before ex7 rather than discovered broken mid-study).
-4. Write `experiments/ex7/README.md` and configs the way `ex6/README.md` did — concrete
-   filter counts, epoch counts, and the extended-epoch arm — once ex6's results are in
-   hand to base the ladder's starting point on.
+1. ✅ **Done.** `experiments/ex6`'s three arms ran, results table filled in,
+   `pool_kernel: 2` and `batch_size: 64`/`grad_accum: 2` locked. See `ex6/README.md`
+   §12.
+2. ✅ **Done.** The 4 missing metrics — Mutual Information (I(X;Z) and I(Z;Y)),
+   Participation Ratio, spike-train entropy, and per-layer gradient-norm logging — are
+   implemented in `learning/capacity_metrics.py` and wired into the training pipeline
+   behind the opt-in `training.compute_capacity_metrics` flag. Also fixed along the
+   way: `lif_out` (the network's output layer) was never measured for anything before
+   this — layer hooking and naming are now dynamic and depth-safe. See
+   `docs/superpowers/specs/2026-09-04-capacity-metrics-design.md` and
+   `docs/superpowers/plans/2026-09-04-capacity-metrics.md` for the full design and
+   implementation record.
+3. **Remaining:** add a configurable FC hidden layer to `frameworks/spiking_net.py`
+   (needed for ex8).
+4. **Remaining:** write `experiments/ex7/README.md` and configs the way `ex6/README.md`
+   did — concrete filter counts, epoch counts, and the extended-epoch arm — now that
+   ex6's results are in hand to base the ladder's starting point on.

@@ -262,13 +262,77 @@ On a machine where results must survive the session, add `--results-root <path>`
 
 ## 12. Results
 
-*(to be filled in once the three arms have run)*
+All three arms ran on 2026-09-02 (Tesla T4, Colab — see §5b). Full per-run data lives in
+`results/runs.csv`, `results/epochs.csv`, `results/layers.csv`, and per-run detail under
+`results/<run_id>/`.
 
-| arm | pool | filters | neurons | params | classifier share | test acc | train−test | peak VRAM | epoch time |
+| arm | pool | filters | neurons | params | classifier share | test acc | train−test | peak VRAM (reserved) | epoch time |
 |---|---|---|---|---|---|---|---|---|---|
-| A | 1 | 12/32 | | | | | | | |
-| B | 2 | 12/32 | | | | | | | |
-| C | 2 | 128/128 | | | | | | | |
+| A | 1 | 12/32 | 32,442 | 226,574 | 95.5% | 97.75% | +0.26pp | 1,650 MB | 166.7s |
+| B | 2 | 12/32 | 14,682 | 18,254 | 43.9% | 98.56% | −0.45pp | 762 MB | 170.5s |
+| C | 2 | 128/128 | 130,698 | 448,266 | 7.1% | 98.75% | −0.05pp | 3,982 MB | 238.1s |
 
-**Decision:** _pending_
-**Batch size confirmed:** _pending_
+*(train−test = final-epoch train accuracy minus test accuracy; positive means train
+ran slightly ahead of test, negative means test came out slightly ahead — both are
+noise-sized at this pilot scale, not a memorization signal.)*
+
+**Criterion 1 (structural, arithmetic) — pool=2 wins, exactly as predicted.** Arm A's
+classifier holds 95.5% of the network's parameters; arm B's holds 43.9% — both match
+§6's prediction to within rounding. Arm C (the top of the ladder, pool=2) pushes the
+classifier's share down to 7.1%, matching the predicted "43.9% → 7.1%" endpoint almost
+exactly. `pool=1` would keep the classifier dominating through the small and mid rungs
+of every later experiment, which is exactly the failure mode this criterion exists to
+catch.
+
+**Criterion 2 (cost) — pool=2 wins on memory, but the epoch-time comparison isn't
+trustworthy and shouldn't be used.** Arm A uses roughly 2.2x arm B's reserved VRAM
+(1,650 MB vs. 762 MB) for the same 12/32 filters — a real, hardware-independent
+memory measurement, and it favors pool=2. The epoch-time column is a different story:
+checking `gpu_util_avg_pct` in arm B's `training_results.csv`, as §5b's own caveat
+says to do before trusting any timing figure, shows GPU utilization sitting at
+**22-23%** through arm B's run (arm A: 36-37%) — this is the low-core, loader-starved
+scenario §5b warned about, where wall-clock time measures the data pipeline, not the
+network. Arm C, by contrast, runs at **97-98%** utilization — its much larger network
+finally gives the GPU enough work to saturate it despite the same loader. So arm C's
+238.1s is a real measurement of that network's cost; arm A vs. B's 166.7s vs. 170.5s
+is not a real measurement of pooling's cost, and is not used as evidence here. This
+doesn't change the decision — VRAM and structural share already agree — but the raw
+epoch-time numbers above should not be read as "pool=1 trains faster."
+
+**Criterion 3 (accuracy) — pool=2 wins outright**, not just by a small margin that
+would need the criterion-1 tie-break: 98.56% vs. 97.75%. Per §9's decision table, this
+means the pooling decision isn't even a close call — pool=2 wins on every one of the
+three criteria, matching the "expected" outcome stated in §8.
+
+**VRAM (arm C) — fits with comfortable headroom.** 3,982 MB reserved out of the T4's
+15 GB (~26%), not a "just barely" fit. Per §9's decision table, this confirms the
+batch size outright — no drop to 32/4 needed.
+
+**Decision:** `pool_kernel: 2` — locked for the whole study.
+**Batch size confirmed for N-MNIST pilot:** `batch_size: 64` / `grad_accum_steps: 2` (effective 128). ex7 onward (N-Caltech101) will calibrate their own batch size via the `calibrate_batch_size()` occupancy policy — see `experiment_plan_final.md` §4 and design doc §6a for rationale.
+
+### Conclusions
+
+1. **`pool_kernel: 2` is correct, and not a close call.** It wins on the structural
+   criterion (arithmetic, not measured), on memory, and on accuracy. `pool=1`'s only
+   advantage — a slightly higher raw epoch-time reading — turned out to be a loader
+   artifact, not a real speed advantage, once GPU utilization was checked as §5b
+   requires.
+2. **Batch size 64 is confirmed for N-MNIST**, with real headroom at the top of the
+   planned ladder (arm C, ~26% of available VRAM). ex7 onward (N-Caltech101) will
+   calibrate their own batch size using the `calibrate_batch_size()` occupancy policy;
+   this is not a study-wide lock, but a dataset-specific decision. See `experiment_plan_final.md`
+   §4 and design doc §6a for rationale.
+3. **A general caution for every later experiment in this study:** GPU utilization
+   below ~40% (as seen on arms A and B here) means wall-clock/epoch-time comparisons
+   between rungs are measuring the data loader, not the network, on this hardware. Any
+   later experiment relying on training-time or throughput comparisons should check
+   `gpu_util_avg_pct` first, exactly as done here — the smaller rungs of the width
+   ladder (ex7) are likely to hit the same loader-bound regime that arms A/B did.
+4. **The three arms' train/test gaps are all within noise** (±0.5 percentage points),
+   confirming the pilot's meters read sensibly and nothing in the instrumentation is
+   obviously broken — the second thing this experiment existed to check, alongside the
+   pooling decision itself.
+
+**ex6 is complete.** No further runs needed here. Proceed to ex7 (width ladder), per
+`experiment_plan_final.md` §10.
