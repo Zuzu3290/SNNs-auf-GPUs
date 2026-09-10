@@ -1,0 +1,15 @@
+# Experiment 7, rung 4 of 4 -- filters=128 (the largest rung).
+#
+# Inherits everything from config.yaml and changes ONLY the filter counts.
+# See f16.yaml for why both conv stages share one value.
+#
+# This is the same filter count ex6's vram_check.yaml already proved fits comfortably
+# in VRAM -- but at THAT rung's own calibrated batch size, not ex6's pinned N-MNIST
+# value, and at N-Caltech101's much larger sensor. Do not assume ex6's VRAM headroom
+# number carries over; this rung re-measures it for real.
+
+extends: config.yaml
+
+convolution:
+  conv1_out: 128
+  conv2_out: 128

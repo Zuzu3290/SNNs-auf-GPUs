@@ -1,0 +1,79 @@
+# Experiment 7 -- width ladder (Factor A). Shared base for all rungs.
+#
+# THIS FILE IS NOT ITSELF A RUNNABLE RUNG. Unlike ex6's config.yaml (which doubled as
+# arm B), this file holds only what every rung of ex7 must share -- filter counts are
+# deliberately left unset here, so there is no ambiguity about "which rung is the bare
+# config." Every actual run uses one of f16.yaml / f32.yaml / f64.yaml / f128.yaml (or
+# f16_extended.yaml), each of which `extends:` this file and states only its filter
+# count (or, for the extended arm, its epoch count).
+#
+# ---------------------------------------------------------------------------
+# Overlays the three files in configuration/. States ONLY what differs from them.
+
+dataset:
+  name: N-Caltech101             # base is null (prompt). Primary dataset for the whole
+                                  # study from here on -- see experiment_plan_final.md §2.
+                                  # N-MNIST is pilot-only (ex6) and is not used again.
+
+# ---------------------------------------------------------------------------
+# framing: T is held fixed for the ENTIRE study, same value ex6 used. Changing it would
+# make "network size" and "temporal budget" both move at once between studies.
+# ---------------------------------------------------------------------------
+framing:
+  n_time_bins: 16
+
+training:
+  # framework: NOT overridden -- base default is already `sj`, and the whole study
+  # (ex6-ex9) is SpikingJelly-only by design. Stated here in prose so the record is
+  # explicit even though no line is needed.
+
+  seed: 0                        # single seed per rung by design -- see
+                                  # experiment_plan_final.md §9 (seed policy). The
+                                  # winning rung gets re-run at 2 more seeds afterward,
+                                  # once it's known which rung that is -- not before.
+
+  # ---- batch size is NOT pinned for this experiment -----------------------------
+  # This is a REVERSAL of ex6's own approach, made after the study's designer reviewed
+  # the plan (see docs/superpowers/specs/2026-09-04-capacity-metrics-design.md §6a).
+  # ex6's batch_size:64 was correct for N-MNIST's tiny frames and does not transfer to
+  # N-Caltech101's much larger ones (~37x more pixels per sample) -- forcing it here
+  # would either waste most of the VRAM budget or risk OOM outright, depending on the
+  # rung's filter count.
+  #
+  # calibrate_batch_size is NOT overridden -- base default is already `true`, and that
+  # is deliberate: calibrate_batch_size() is an occupancy policy (fill 30-35% of VRAM),
+  # not an experimental confound to eliminate. It is allowed to pick a DIFFERENT batch
+  # size at every rung of this ladder, on purpose -- a bigger network needs more memory
+  # per sample, so a bigger batch would either not fit or would waste the VRAM budget.
+  # grad_accum_steps is likewise NOT overridden (base default 1) -- calibration finds a
+  # real batch size directly; ex6's accumulation trick existed only to approximate a
+  # smaller batch under a PINNED total, which does not apply here.
+
+  lr_scheduler: none              # held fixed for the whole study, same as ex6. The
+                                   # base `cosine` scheduler anneals across epochs, so
+                                   # `none` is what actually holds the LR constant.
+                                   # optimizer.lr stays at the base 0.002.
+
+  epochs: 30                      # ASSUMPTION, not a validated number -- see README §3.
+                                   # No prior run of this pipeline on N-Caltech101 exists
+                                   # to calibrate against. 30 is a starting point; check
+                                   # the first rung's own training curve (is train
+                                   # accuracy still climbing at epoch 30?) before
+                                   # trusting the Filter Ceiling comparison across rungs.
+
+  use_amp: false                  # NOT overridden -- base default is already false.
+                                   # Stated in prose: VRAM is a cost metric this
+                                   # experiment measures, so AMP staying off is load-
+                                   # bearing here, not just inherited by accident.
+
+  compute_capacity_metrics: true  # THIS is why ex7 exists: Participation Ratio, spike
+                                   # entropy, mutual information (I(Z;Y)), and gradient
+                                   # norms are all opt-in behind this flag. base default
+                                   # is false; every ex7 config must set it true.
+
+# convolution: NOT set in this shared file -- each rung file sets its own conv1_out /
+# conv2_out. pool_kernel is NOT overridden anywhere in ex7 -- the base default is
+# already 2, which is ex6's locked decision (see experiment_plan_final.md §4).
+
+# neuron / neuron_types: NOT overridden. The neuron is not a variable in this study,
+# matching ex6.

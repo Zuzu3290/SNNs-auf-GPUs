@@ -1,0 +1,10 @@
+# Experiment 7, rung 2 of 4 -- filters=32.
+#
+# Inherits everything from config.yaml and changes ONLY the filter counts.
+# See f16.yaml for why both conv stages share one value.
+
+extends: config.yaml
+
+convolution:
+  conv1_out: 32
+  conv2_out: 32

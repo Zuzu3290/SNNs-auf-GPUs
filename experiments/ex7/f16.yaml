@@ -1,0 +1,16 @@
+# Experiment 7, rung 1 of 4 -- filters=16 (the smallest rung).
+#
+# Inherits everything from config.yaml and changes ONLY the filter counts, so every
+# rung differs in exactly one respect. Both conv stages use the SAME filter count
+# (symmetric F/F), matching ex6's own vram_check.yaml precedent (128/128) rather than
+# the base architecture's asymmetric 12/32 -- none of the four rungs is the unmodified
+# default, on purpose, so there is no ambiguity about which rung a bare config represents.
+#
+# This is also the rung the extended-epoch check (f16_extended.yaml) runs against --
+# see README.md §3 for why the SMALLEST rung is the one that needs that check.
+
+extends: config.yaml
+
+convolution:
+  conv1_out: 16
+  conv2_out: 16

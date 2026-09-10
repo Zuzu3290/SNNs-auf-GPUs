@@ -61,6 +61,7 @@ notes.txt
 scalability.md
 frameworks/regression/
 scalability_tests
+temp-folder-scalability
 
 
 # Experiment output -- produced by a run, never source.

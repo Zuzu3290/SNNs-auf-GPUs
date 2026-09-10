@@ -1,0 +1,17 @@
+# Experiment 7, extended-epoch check -- filters=16, trained far past the normal budget.
+#
+# Inherits everything from f16.yaml (which already inherits config.yaml) and changes
+# ONLY the epoch count. Purpose: prove the smallest rung's ceiling is STRUCTURAL (the
+# network genuinely can't represent more, regardless of training time) rather than
+# "it just needed more training" -- the first objection anyone reviewing the Filter
+# Ceiling result will raise. See README.md §3.
+#
+# 100 epochs = ~3.3x the standard 30. If training accuracy is still climbing
+# meaningfully at epoch 100, the standard 30-epoch budget was too short and the whole
+# ladder's epoch count needs revisiting before the Filter Ceiling conclusion can be
+# trusted. If it has clearly plateaued well before epoch 100, the ceiling is structural.
+
+extends: f16.yaml
+
+training:
+  epochs: 100
