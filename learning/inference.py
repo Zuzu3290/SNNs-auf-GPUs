@@ -54,20 +54,28 @@ class SNNTester:
 
     @contextmanager
     def timed(self, event_list: list):
-        """Brackets one operation with a CUDA event pair, queued on the stream
-        without blocking; the blocking readout (`elapsed_time()`) only happens
-        once, in run()'s post-loop bulk sync."""
-        start = torch.cuda.Event(enable_timing=True)
-        end   = torch.cuda.Event(enable_timing=True)
-        start.record()
-        yield
-        end.record()
-        event_list.append((start, end))
+        """Brackets one operation with a CUDA event pair (CPU: a perf_counter
+        pair), queued on the stream without blocking; the blocking readout
+        (`elapsed_time()` / the CPU delta) only happens once, in run()'s
+        post-loop bulk sync."""
+        if self.device.type == "cuda":
+            start = torch.cuda.Event(enable_timing=True)
+            end   = torch.cuda.Event(enable_timing=True)
+            start.record()
+            yield
+            end.record()
+            event_list.append((start, end))
+        else:
+            t0 = time.perf_counter()
+            yield
+            event_list.append((t0, time.perf_counter()))
 
     @staticmethod
     def elapsed_ms(pair) -> float:
-        start, end = pair
-        return start.elapsed_time(end)
+        a, b = pair
+        if isinstance(a, torch.cuda.Event):
+            return a.elapsed_time(b)
+        return (b - a) * 1000.0
 
     def class_metrics(self, cm: np.ndarray) -> list[dict]:
         total = cm.sum()
@@ -221,10 +229,14 @@ class SNNTester:
         # TOTAL includes idle draw and scales with runtime; DYNAMIC is above idle and
         # isolates the work. See PipelineMonitor.phase_energy_report for which answers
         # which question -- they are not interchangeable.
-        gpu_energy_j         = energy_report["gpu_energy_j"]
-        gpu_dynamic_energy_j = energy_report["gpu_dynamic_energy_j"]
-        avg_power_w          = energy_report["avg_power_w"]
-        dynamic_power_w      = energy_report["dynamic_power_w"]
+        # TOTAL/dynamic energy and power fall back to 0.0 when no GPU/NVML data is
+        # available -- same convention as SNNTrainer's analogous unpacking. Only
+        # idle_power_w stays None, since it's the sentinel the print block below
+        # branches on to say whether an idle baseline was ever measured.
+        gpu_energy_j         = energy_report["gpu_energy_j"] or 0.0
+        gpu_dynamic_energy_j = energy_report["gpu_dynamic_energy_j"] or 0.0
+        avg_power_w          = energy_report["avg_power_w"] or 0.0
+        dynamic_power_w      = energy_report["dynamic_power_w"] or 0.0
         idle_power_w         = energy_report["idle_power_w"]
         gpu_diag        = energy_report["gpu_diag"]
         credit_assignment = self.model.credit_assignment()
@@ -385,7 +397,7 @@ class SNNTester:
         if gpu.get("gpu_idle_episodes", 0) > 0:
             print(f"  • GPU Idle               : {gpu['gpu_idle_episodes']} episode(s), {gpu['gpu_idle_total_s']:.1f}s total")
         print(f"  • Max Mem Reserved        : {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB")
-        print(f"  • GPU Temp/Clock          : {gpu_diag['gpu_temp_c']}°C   SM {gpu_diag.get('sm_clock_mhz')} MHz   Mem {gpu_diag.get('mem_clock_mhz')} MHz")
+        print(f"  • GPU Temp/Clock          : {gpu_diag.get('gpu_temp_c')}°C   SM {gpu_diag.get('sm_clock_mhz')} MHz   Mem {gpu_diag.get('mem_clock_mhz')} MHz")
 
         print("\n  Per-class metrics:")
         for row in class_metrics:
