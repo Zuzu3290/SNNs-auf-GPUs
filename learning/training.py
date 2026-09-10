@@ -397,7 +397,16 @@ class SNNTrainer:
                 if i >= num_iters:
                     break
                 if i % 20 == 0:
+                    # One .item() sync here, same cadence as this print already used --
+                    # not a new per-iteration cost. Shows the last up-to-20 iterations'
+                    # accuracy (whatever has accumulated so far this epoch, or trailing
+                    # from the previous epoch at i==0), not this iteration's own -- its
+                    # accuracy hasn't been computed yet at this point in the loop.
+                    recent_n = min(20, len(self.acc_hist_gpu))
+                    acc_display = (f"{torch.stack(self.acc_hist_gpu[-recent_n:]).mean().item() * 100:.2f}%"
+                                   if recent_n else "n/a")
                     print(f"  [epoch {epoch + 1}/{epochs}] iter {i}/{num_iters}  "
+                          f"acc (last {recent_n} iter): {acc_display}  "
                           f"({time.perf_counter() - t0:.1f}s elapsed)", flush=True)
                 targets = targets.long()
                 measure_mem = i == 0 and self.device.type == "cuda"  # reset/read are host-side counters, not a stream sync -- cheap, but sampled once/epoch anyway
