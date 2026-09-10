@@ -191,7 +191,6 @@ if __name__ == "__main__":
     # (hooked layers only) that layers.csv falls back to when spike counting was off.
     epoch_log = list(trainer.epoch_log)
     activity_snapshot = getattr(trainer, "last_activity_snapshot", None) or {}
-    capacity_metrics = getattr(trainer, "last_capacity_metrics", None) or {}
     grad_norm_means = getattr(trainer, "grad_norm_means", None) or {}
     num_workers = getattr(getattr(train_loader, "loader", None), "num_workers", None)
 
@@ -204,6 +203,7 @@ if __name__ == "__main__":
     visualize = select_inference_mode(args.inference)
     tester       = SNNTester(model, test_loader, cfg, device, visualize=visualize)
     test_results = tester.run(csv_path=str(run_results_dir / "test.csv"))
+    capacity_metrics = test_results.get("capacity_metrics") or {}
     print("\n Testing complete!")
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
     print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")

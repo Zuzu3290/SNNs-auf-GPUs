@@ -181,8 +181,9 @@ def build_layer_rows(
         values = capacity_metrics.get(name) or {}
         return {
             "participation_ratio": values.get("participation_ratio"),
+            "participation_ratio_normalized": values.get("participation_ratio_normalized"),
             "spike_entropy": values.get("spike_entropy"),
-            "mutual_info_xz": values.get("mutual_info_xz"),
+            "spike_entropy_normalized": values.get("spike_entropy_normalized"),
             "mutual_info_zy": values.get("mutual_info_zy"),
             "grad_norm_mean": grad_norm_means.get(name),
         }
