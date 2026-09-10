@@ -236,3 +236,70 @@ accidental case.
   so `layers.csv` is the right grain, not `runs.csv`.
 - Making capacity metrics available for framework-comparison experiments (ex1-ex5) —
   explicitly scalability-study-only per the opt-in flag.
+
+## 6. Revision 2 — corrections from the study's original designer
+
+After ex6 ran for real, the colleague who designed the scalability study reviewed §2-3
+above and corrected five things. This section supersedes the affected parts of §2-3;
+§1 (the naming/hooking fix) and the Gram-matrix math technique are unaffected.
+
+**6a. Batch size is not a locked study parameter — §2's "sample size caveat" was
+wrong in scope.** `calibrate_batch_size()` (`learning/utilities.py`) is an occupancy
+policy — it picks whatever batch size fills 30-35% of VRAM for the dataset actually in
+use, scaling its starting guess by `128 × (34×34 / sensor_px)`. N-MNIST (ex6) gets
+~64-128; N-Caltech101 (ex7 onward) will get something in the single digits, because its
+frames are ~37x larger. **ex6's `batch_size: 64` decision applies to the N-MNIST pilot
+only — it was never meant to, and must not, carry over to ex7-ex9.** Each experiment
+calibrates its own batch size; this is not a confound to control for, it's dataset-
+dependent memory fitting.
+
+**6b. Accumulate over the full evaluation split, not one training probe batch.** §2's
+"one batch (`cfg.BATCH_SIZE` samples)" approach is replaced: capacity metrics are now
+computed from **every batch in the test set**, accumulated into one large per-layer
+rate matrix before computing PR/entropy/MI — not a single batch of whatever size
+training used. This directly removes the Gram-matrix sample-size ceiling (§ from the
+prior round, PR ≤ batch_size − 1) by making the effective sample size the whole test
+split (typically thousands, not tens).
+
+**Integration point moves accordingly:** out of `learning/training.py`'s
+`measure_activity()` (per-epoch training probe) and into `learning/inference.py`'s
+`SNNTester.run()`, which already iterates the entire test set once per run. This also
+removes the "only compute on the final epoch" guard from §2 — it's naturally computed
+once, since `run()` itself only executes once per run. `probe_targets` threading into
+`measure_activity()` is reverted; `SNNTester.run()` already sees `targets` per batch.
+
+**6c. Units are channels after spatial pooling, not every (channel, y, x) site.**
+`firing_rate_matrix()`'s N (flattening every spatial location as its own unit) is
+replaced by a new `channel_rate_matrix()`: mean over time as before, then also mean
+over any spatial dimensions per channel. For a conv layer this drops N from
+`channels × height × width` (up to ~115k) down to just the filter count (e.g. 12, 32,
+64, 128) — the exact axis the width sweep varies, measuring feature dimensionality
+instead of spatial redundancy within one filter. `firing_rate_matrix()` itself is kept
+(nothing else used it, but it's simple, tested, and harmless to leave); new code calls
+`channel_rate_matrix()` instead.
+
+**6d. Report raw and normalized together.** `participation_ratio_normalized(rates) =
+participation_ratio(rates) / rates.shape[1]` (PR/N) and `spike_entropy_normalized(rates)
+= spike_entropy(rates) / log2(rates.shape[1])` (H/log2 N), alongside the existing raw
+functions. Two new nullable `layers.csv` columns (schema v3 → v4, see below). This
+makes 6b's fix (raw PR, now computed over thousands of samples) and this fix (H, which
+was never a sample-size problem) both land, and keeps the raw numbers comparable to the
+Rigotti/Gao papers `experiment_plan_final.md` §5 cites, while the normalized ones give a
+size-independent reading.
+
+**6e. Drop `mutual_information_xz`; keep `mutual_information_zy` only.** I(X;Z)
+between a high-dimensional raw image and a high-dimensional spike representation can't
+be estimated reliably at the sample sizes available here — a broken estimator plateaus
+exactly like a real information bottleneck would, and the two are indistinguishable
+without ground truth. `mutual_information_xz()` and its `mutual_info_xz` column are
+removed rather than kept-but-unused; `mutual_information_zy()` (hidden layer vs. label)
+is unaffected and remains the sole MI metric.
+
+**6f. Schema: v3 → v4.** `mutual_info_xz` column removed; `participation_ratio_normalized`
+and `spike_entropy_normalized` added. Safe to bump directly — no v3 data exists yet
+(nothing has run since the column was added in the prior round).
+
+**Confirmed unchanged:** the Gram-matrix eigenvalue technique (§2, still M×M not N×N,
+now with M = full eval-split size instead of one batch); gradient-norm tracking (§2's
+last paragraph, entirely training-side, untouched by any of the above); fixing the
+backend to SpikingJelly (already the plan, `experiment_plan_final.md` §3).
