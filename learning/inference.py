@@ -40,6 +40,12 @@ class SNNTester:
         self.fwd_events = []  # (start, end) CUDA event pairs
         self.dense_macs_per_layer = {}
 
+        # Capacity-metrics accumulation (opt-in, see cfg.COMPUTE_CAPACITY_METRICS):
+        # populated across every batch of the FULL test set in run(), per the study
+        # designer's correction (design doc §6b) -- not a single training probe batch.
+        self.compute_capacity_metrics = getattr(cfg, "COMPUTE_CAPACITY_METRICS", False)
+        self.capacity_metrics: dict[str, dict[str, float]] = {}
+
     def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
         """Single forward pass, adapting tensor layout to what the model expects."""
         if self.model.tensor_format() == "BT":
@@ -135,6 +141,8 @@ class SNNTester:
         raw_batch_records: list[dict] = []
         last_activity_snapshot = {}
         cm = np.zeros((self.num_classes, self.num_classes), dtype=int)
+        capacity_rate_chunks: dict[str, list] = {}
+        capacity_label_chunks: list = []
 
         print("\n[TEST RUN]")
 
@@ -171,6 +179,15 @@ class SNNTester:
                 all_preds_gpu.append(preds_gpu)
                 all_targets_gpu.append(targets)
                 last_activity_snapshot = self.model.activity.recordings()
+                if self.compute_capacity_metrics:
+                    from learning.capacity_metrics import channel_rate_matrix
+                    for name, recorded in last_activity_snapshot.items():
+                        if recorded is None:
+                            continue
+                        capacity_rate_chunks.setdefault(name, []).append(
+                            channel_rate_matrix(recorded)
+                        )
+                    capacity_label_chunks.append(targets.detach().cpu().numpy())
 
                 raw_batch_records.append({
                     "batch_idx":           batch_idx,
@@ -180,6 +197,22 @@ class SNNTester:
                     "acc":                 acc_gpu,
                     "synops":              synops_gpu,
                 })
+
+        if self.compute_capacity_metrics and capacity_rate_chunks:
+            from learning.capacity_metrics import (
+                participation_ratio, participation_ratio_normalized,
+                spike_entropy, spike_entropy_normalized, mutual_information_zy,
+            )
+            labels_all = np.concatenate(capacity_label_chunks)
+            for name, chunks in capacity_rate_chunks.items():
+                rates_all = np.concatenate(chunks, axis=0)  # [full_test_set_size, C]
+                self.capacity_metrics[name] = {
+                    "participation_ratio": participation_ratio(rates_all),
+                    "participation_ratio_normalized": participation_ratio_normalized(rates_all),
+                    "spike_entropy": spike_entropy(rates_all),
+                    "spike_entropy_normalized": spike_entropy_normalized(rates_all),
+                    "mutual_info_zy": mutual_information_zy(rates_all, labels_all),
+                }
 
         t_run_elapsed = time.perf_counter() - t_run_start
         self.pipeline_monitor.stop()
@@ -410,4 +443,5 @@ class SNNTester:
             "gt_distribution":           gt_dist,
             "pred_distribution":         pred_dist,
             "confusion_matrix":          cm,
+            "capacity_metrics":          self.capacity_metrics,
         }
