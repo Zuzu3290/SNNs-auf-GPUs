@@ -13,7 +13,7 @@ Three things, in order of importance:
 | # | question | answer form |
 |---|---|---|
 | **1** | **Which `pool_kernel` value does the whole study use — 1 or 2?** | one number, then frozen |
-| **2** | Does the **largest** planned network fit in VRAM at the shared batch size? | yes / no / barely |
+| **2** | Does the **largest** planned network fit in VRAM at the N-MNIST pilot's batch size? | yes / no / barely |
 | **3** | Do all the meters read sensibly before real GPU time is spent? | pass / fail per metric |
 
 Question 1 is the deliverable. Questions 2 and 3 ride along for free on the same three runs.
@@ -24,7 +24,7 @@ Pooling controls the spatial geometry of every layer after it. Change it and the
 
 > **No two runs with different pooling are comparable to each other.** Every rung of every later experiment must share one value, so it has to be chosen before the ladder starts — not discovered midway.
 
-The batch size has the same property (see [`config.yaml`](config.yaml)), which is why arm C is here too: both settings that must be global get fixed in one experiment.
+The batch size has a similar property for this pilot's own runs (see [`config.yaml`](config.yaml)), which is why arm C is here too: pooling truly is global for the whole study, while the batch size arm C confirms is scoped to the N-MNIST pilot — later datasets (N-Caltech101 onward) calibrate their own via `calibrate_batch_size()` rather than inheriting this one.
 
 There is also an external dependency — the pooling value was requested for use in a second pipeline, so it is a reporting obligation, not just an internal choice.
 
@@ -226,9 +226,9 @@ Arm C's outcome is genuinely unknown.
 
 | outcome | action |
 |---|---|
-| fits with headroom | batch 64 / accum 2 confirmed for the study. Proceed. |
+| fits with headroom | batch 64 / accum 2 confirmed for the N-MNIST pilot. Proceed. |
 | fits but barely | drop to 32 / 4 anyway — a rung that only just fits will fail once another metric is added |
-| out of memory | drop to 32 / 4, **re-run arms A and B at the new value too**, then proceed. All rungs share one batch size. |
+| out of memory | drop to 32 / 4, **re-run arms A and B at the new value too**, then proceed. This pilot's rungs share one batch size; later datasets calibrate their own. |
 
 ## 10. How to run it
 
@@ -256,7 +256,7 @@ On a machine where results must survive the session, add `--results-root <path>`
 | # | deliverable | destination |
 |---|---|---|
 | 1 | **the pooling value + measured evidence** | reported onward for use in a second pipeline — flagged as high priority |
-| 2 | confirmed batch size for the whole study | `experiment_plan.md` |
+| 2 | confirmed batch size for the N-MNIST pilot | `experiment_plan.md` |
 | 3 | baseline reference row (arm B) | `runs.csv`, the point every later rung is compared against |
 | 4 | instrumentation pass/fail per metric | note here once known |
 

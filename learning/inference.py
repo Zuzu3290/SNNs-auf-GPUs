@@ -150,7 +150,6 @@ class SNNTester:
         last_activity_snapshot = {}
         cm = np.zeros((self.num_classes, self.num_classes), dtype=int)
         capacity_rate_chunks: dict[str, list] = {}
-        capacity_label_chunks: list = []
 
         print("\n[TEST RUN]")
 
@@ -160,67 +159,73 @@ class SNNTester:
         self.pipeline_monitor.reset_epoch_memory()
         t_run_start = time.perf_counter()
 
+        # ActivityMonitor recording must be ON for this loop to read anything real:
+        # SNNTrainer.train() pauses recording for the whole training loop and never
+        # resumes it, so self.model (constructed once and shared with the trainer, see
+        # main.py) arrives here paused more often than not. Without this resume/clear,
+        # every recordings() call below silently returns {name: None} for every layer
+        # -- CV_ISI, SynOps energy and capacity metrics all read from that same call,
+        # so all three would silently compute nothing. Mirrors the resume/restore
+        # pattern in SNNTrainer.measure_activity() and SpikingNet.neuron_counts():
+        # whatever the incoming paused state was, it is restored in the `finally`
+        # below so this method leaves the model exactly as it found it.
+        was_activity_paused = self.model.activity.paused
+        self.model.activity.resume()
+        self.model.activity.clear()
+
         # self.test_loader is a PrefetchedLoader (event_data_workflow.data_pipeline) —
         # batches arrive already device-resident.
-        with torch.no_grad():
-            for batch_idx, (data, targets) in enumerate(self.test_loader):
-                B = targets.size(0)
-                T = data.size(0)
+        try:
+            with torch.no_grad():
+                for batch_idx, (data, targets) in enumerate(self.test_loader):
+                    B = targets.size(0)
+                    T = data.size(0)
 
-                with self.timed(self.fwd_events):
-                    spk_rec = self.forward_pass(data)
+                    with self.timed(self.fwd_events):
+                        spk_rec = self.forward_pass(data)
 
-                batch_spikes_gpu       = spk_rec.sum()
-                batch_input_spikes_gpu = data.sum()
+                    batch_spikes_gpu       = spk_rec.sum()
+                    batch_input_spikes_gpu = data.sum()
 
-                logits    = aggregate_spike_output(spk_rec.float())
-                preds_gpu = logits.argmax(dim=1)
-                acc_gpu   = (preds_gpu == targets).float().mean()
+                    logits    = aggregate_spike_output(spk_rec.float())
+                    preds_gpu = logits.argmax(dim=1)
+                    acc_gpu   = (preds_gpu == targets).float().mean()
 
-                synops_gpu = torch.zeros((), device=self.device)
-                for name, macs in self.dense_macs_per_layer.items():
-                    buf = self.model.activity.buffers.get(name)
-                    rate_t = buf.firing_rate_tensor() if buf is not None else None
-                    if rate_t is not None:
-                        synops_gpu = synops_gpu + rate_t * macs * T
+                    synops_gpu = torch.zeros((), device=self.device)
+                    for name, macs in self.dense_macs_per_layer.items():
+                        buf = self.model.activity.buffers.get(name)
+                        rate_t = buf.firing_rate_tensor() if buf is not None else None
+                        if rate_t is not None:
+                            synops_gpu = synops_gpu + rate_t * macs * T
 
-                all_preds_gpu.append(preds_gpu)
-                all_targets_gpu.append(targets)
-                last_activity_snapshot = self.model.activity.recordings()
-                if self.compute_capacity_metrics:
-                    from learning.capacity_metrics import channel_rate_matrix
-                    for name, recorded in last_activity_snapshot.items():
-                        if recorded is None:
-                            continue
-                        capacity_rate_chunks.setdefault(name, []).append(
-                            channel_rate_matrix(recorded)
-                        )
-                    capacity_label_chunks.append(targets.detach().cpu().numpy())
+                    all_preds_gpu.append(preds_gpu)
+                    all_targets_gpu.append(targets)
+                    last_activity_snapshot = self.model.activity.recordings()
+                    if self.compute_capacity_metrics:
+                        for name, recorded in last_activity_snapshot.items():
+                            if recorded is None:
+                                continue
+                            # Same [T,B,...] -> [B,C] reduction as capacity_metrics.py's
+                            # channel_rate_matrix() (mean over time, then over any
+                            # spatial dims), kept as a GPU tensor here -- no .cpu()/
+                            # .numpy() inside the loop, per this method's own
+                            # deferred-sync contract (see docstring). Bulk-transferred
+                            # once, after the loop, alongside everything else.
+                            rate = recorded.detach().float().mean(dim=0)  # [B, ...]
+                            if rate.dim() > 2:
+                                rate = rate.mean(dim=tuple(range(2, rate.dim())))
+                            capacity_rate_chunks.setdefault(name, []).append(rate)
 
-                raw_batch_records.append({
-                    "batch_idx":           batch_idx,
-                    "B": B, "T": T,
-                    "batch_spikes":        batch_spikes_gpu,
-                    "batch_input_spikes":  batch_input_spikes_gpu,
-                    "acc":                 acc_gpu,
-                    "synops":              synops_gpu,
-                })
-
-        if self.compute_capacity_metrics and capacity_rate_chunks:
-            from learning.capacity_metrics import (
-                participation_ratio, participation_ratio_normalized,
-                spike_entropy, spike_entropy_normalized, mutual_information_zy,
-            )
-            labels_all = np.concatenate(capacity_label_chunks)
-            for name, chunks in capacity_rate_chunks.items():
-                rates_all = np.concatenate(chunks, axis=0)  # [full_test_set_size, C]
-                self.capacity_metrics[name] = {
-                    "participation_ratio": participation_ratio(rates_all),
-                    "participation_ratio_normalized": participation_ratio_normalized(rates_all),
-                    "spike_entropy": spike_entropy(rates_all),
-                    "spike_entropy_normalized": spike_entropy_normalized(rates_all),
-                    "mutual_info_zy": mutual_information_zy(rates_all, labels_all),
-                }
+                    raw_batch_records.append({
+                        "batch_idx":           batch_idx,
+                        "B": B, "T": T,
+                        "batch_spikes":        batch_spikes_gpu,
+                        "batch_input_spikes":  batch_input_spikes_gpu,
+                        "acc":                 acc_gpu,
+                        "synops":              synops_gpu,
+                    })
+        finally:
+            self.model.activity.paused = was_activity_paused
 
         t_run_elapsed = time.perf_counter() - t_run_start
         self.pipeline_monitor.stop()
@@ -246,6 +251,29 @@ class SNNTester:
         all_preds   = torch.cat(all_preds_gpu).cpu()   if all_preds_gpu   else torch.empty(0, dtype=torch.long)
         all_targets = torch.cat(all_targets_gpu).cpu() if all_targets_gpu else torch.empty(0, dtype=torch.long)
         np.add.at(cm, (all_targets.numpy(), all_preds.numpy()), 1)
+
+        # Capacity metrics run here -- after t_run_elapsed/pipeline_monitor.stop()
+        # above have already taken their snapshot -- so this diagnostic's own cost
+        # (accumulation + PR/entropy/MI) is never charged to the run's own
+        # timing/energy numbers. One bulk torch.cat + .cpu().numpy() per layer,
+        # matching this method's deferred-sync contract; labels reuse all_targets
+        # (already bulk-transferred just above) instead of a second, duplicate
+        # host-side accumulator.
+        if self.compute_capacity_metrics and capacity_rate_chunks:
+            from learning.capacity_metrics import (
+                participation_ratio, participation_ratio_normalized,
+                spike_entropy, spike_entropy_normalized, mutual_information_zy,
+            )
+            labels_all = all_targets.numpy()
+            for name, chunks in capacity_rate_chunks.items():
+                rates_all = torch.cat(chunks, dim=0).cpu().numpy()  # [full_test_set_size, C]
+                self.capacity_metrics[name] = {
+                    "participation_ratio": participation_ratio(rates_all),
+                    "participation_ratio_normalized": participation_ratio_normalized(rates_all),
+                    "spike_entropy": spike_entropy(rates_all),
+                    "spike_entropy_normalized": spike_entropy_normalized(rates_all),
+                    "mutual_info_zy": mutual_information_zy(rates_all, labels_all),
+                }
 
         fwd_latencies_ms = [self.elapsed_ms(p) for p in self.fwd_events]
         cv_isi            = compute_cv_isi(last_activity_snapshot)

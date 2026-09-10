@@ -7,12 +7,15 @@
 #
 # It is not a scientific arm -- it answers one engineering question:
 #
-#     does the biggest planned network fit, at the batch size every other run uses?
+#     does the biggest planned network fit, at the batch size every other run in this
+#     pilot uses?
 #
-# Every rung of the study must share one batch size (see config.yaml for why), and that
-# shared value therefore has to be one the LARGEST rung can survive. Discovering
-# otherwise after the ladder has started means re-running everything, because a study
+# Every rung of this N-MNIST pilot must share one batch size (see config.yaml for why),
+# and that shared value therefore has to be one the LARGEST rung can survive. Discovering
+# otherwise after the ladder has started means re-running everything, because a pilot
 # whose batch size changed halfway measures batch size as much as it measures capacity.
+# Later datasets (N-Caltech101 onward) are not bound by this value -- they calibrate
+# their own batch size via calibrate_batch_size() rather than inheriting this pilot's.
 #
 # So: find out now, on one run, at the cheapest possible moment.
 #
@@ -40,11 +43,12 @@
 # HOW TO READ THE RESULT
 #
 #   fits with headroom   -> batch_size 64 / grad_accum_steps 2 is confirmed for the
-#                           whole study. Proceed to ex7.
+#                           N-MNIST pilot. Proceed to ex7.
 #   fits but barely      -> drop to batch_size 32 / grad_accum_steps 4 anyway. A rung
 #                           that only just fits will fail once a metric is added later.
 #   out of memory        -> drop to 32/4, re-run ARM A AND ARM B at the new value too,
-#                           and only then proceed. All rungs share one batch size.
+#                           and only then proceed. This pilot's rungs share one batch
+#                           size; later datasets calibrate their own.
 #
 # NOTE ON ORDERING: this arm uses pool_kernel 2, the recommended value, because arms A
 # and B have not been read yet when it runs. If arm A unexpectedly wins, this arm has

@@ -7,12 +7,14 @@ Includes a channel-pooling rate reduction (channel_rate_matrix) so a wide conv l
 spatial sites don't get counted as separate units, and normalized (size-independent)
 variants of Participation Ratio and spike entropy alongside their raw values.
 
-See docs/superpowers/specs/2026-09-04-capacity-metrics-design.md for the full design,
-the formulas' sources (Scalability.pdf, the colleague's brief), and why the defaults
-below are sized for a batch-sized sample rather than a large dataset.
+See docs/superpowers/specs/2026-09-04-capacity-metrics-design.md for the full design
+and the formulas' sources (Scalability.pdf, the colleague's brief). Per the study
+designer's correction (design doc §6b), these functions are called over the FULL test
+set, not a single batch-sized sample -- see the Gram-matrix-vs-covariance choice in
+participation_ratio() and pca_reduce() below, which is sized accordingly.
 
 Opt-in only: nothing in this module is called unless
-cfg.COMPUTE_CAPACITY_METRICS is true. See learning/training.py's measure_activity()
+cfg.COMPUTE_CAPACITY_METRICS is true. See learning/inference.py's SNNTester.run()
 for the call site.
 """
 from __future__ import annotations
@@ -59,17 +61,21 @@ def participation_ratio(rates: np.ndarray) -> float:
     the eigenvalues of the neuron-by-neuron covariance matrix -- the exact formula from
     the scalability brief (Scalability.pdf p.3).
 
-    Computed via the Gram-matrix trick rather than the N x N covariance directly: for
-    B << N (a wide conv layer has far more neurons than a diagnostic batch has
-    samples), the B x B matrix rates_c @ rates_c.T has the SAME nonzero eigenvalues as
-    the N x N covariance (up to the shared normalisation the PR ratio cancels out
-    anyway), and is far cheaper to eigendecompose.
+    Computed via whichever of the B x B Gram matrix or the N x N covariance is SMALLER
+    for the shapes actually passed in, rather than always building the B x B one: the
+    two have the SAME nonzero eigenvalues (up to the shared normalisation the PR ratio
+    cancels out anyway), so which one is cheaper to eigendecompose depends on which of
+    B (sample count) and N (neuron/channel count) is larger. With rates now sampled
+    over the full test set (B possibly 10,000+) against a channel count N of a few
+    dozen to a couple hundred, N < B is the common case -- the reverse of the old
+    B << N diagnostic-batch assumption.
 
     Returns 1.0 for a degenerate all-constant input (no variance anywhere), since a
     single unchanging value is definitionally one effective dimension.
     """
     centered = rates - rates.mean(axis=0, keepdims=True)
-    gram = centered @ centered.T  # [B, B]
+    b, n = centered.shape
+    gram = centered @ centered.T if b <= n else centered.T @ centered  # [B,B] or [N,N]
     eigenvalues = np.linalg.eigvalsh(gram)
     eigenvalues = np.clip(eigenvalues, 0.0, None)  # eigvalsh can return tiny negatives
     total = eigenvalues.sum()
@@ -120,25 +126,38 @@ def spike_entropy_normalized(rates: np.ndarray) -> float:
 def pca_reduce(data: np.ndarray, n_components: int = 3) -> np.ndarray:
     """[B, N] -> [B, k]: project onto the top k principal components.
 
-    Same Gram-matrix trick as participation_ratio() -- B x B eigendecomposition
-    instead of N x N, which matters when N (neurons) far exceeds B (a diagnostic
-    batch's sample count). k is capped at B - 1 (or B if that would be non-positive)
-    since a sample set of size B cannot support more than that many meaningful
-    components.
+    Same choice as participation_ratio() -- eigendecompose whichever of the B x B
+    Gram matrix or the N x N covariance is SMALLER for the shapes actually passed in,
+    rather than always building the B x B one. Both paths give the identical [B, k]
+    projection: the Gram-matrix path recovers directions in N-space via the dual
+    trick (centered.T @ eigenvectors, rescaled), while the covariance path already
+    produces them directly as its own eigenvectors. This matters because with rates
+    now sampled over the full test set, B (10,000+) commonly exceeds N (a channel
+    count of a few dozen to a couple hundred) -- the reverse of the old B << N
+    diagnostic-batch assumption this used to hard-code. k is capped at B - 1 (or B if
+    that would be non-positive) and at N, since neither a sample set of size B nor a
+    feature space of size N can support more meaningful components than its own size.
     """
-    b = data.shape[0]
-    k = max(1, min(n_components, b - 1 if b > 1 else 1))
+    b, n = data.shape
+    k = max(1, min(n_components, b - 1 if b > 1 else 1, n))
     centered = data - data.mean(axis=0, keepdims=True)
-    gram = centered @ centered.T  # [B, B]
-    eigenvalues, eigenvectors = np.linalg.eigh(gram)
-    # eigh ascends; take the top k.
-    order = np.argsort(eigenvalues)[::-1][:k]
-    top_vals = np.clip(eigenvalues[order], 1e-12, None)
-    top_vecs = eigenvectors[:, order]
-    # Recover the N-dimensional principal directions' projection via the dual trick:
-    # centered.T @ top_vecs gives directions in N-space; scaling by 1/sqrt(eigenvalue)
-    # normalizes them, then projecting `centered` back onto them gives the [B, k] score.
-    components = centered.T @ top_vecs / np.sqrt(top_vals)  # [N, k]
+    if b <= n:
+        gram = centered @ centered.T  # [B, B]
+        eigenvalues, eigenvectors = np.linalg.eigh(gram)
+        # eigh ascends; take the top k.
+        order = np.argsort(eigenvalues)[::-1][:k]
+        top_vals = np.clip(eigenvalues[order], 1e-12, None)
+        top_vecs = eigenvectors[:, order]
+        # Recover the N-dimensional principal directions' projection via the dual
+        # trick: centered.T @ top_vecs gives directions in N-space; scaling by
+        # 1/sqrt(eigenvalue) normalizes them, then projecting `centered` back onto
+        # them gives the [B, k] score.
+        components = centered.T @ top_vecs / np.sqrt(top_vals)  # [N, k]
+    else:
+        cov = centered.T @ centered  # [N, N]
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        order = np.argsort(eigenvalues)[::-1][:k]
+        components = eigenvectors[:, order]  # [N, k] -- already orthonormal directions
     return centered @ components  # [B, k]
 
 

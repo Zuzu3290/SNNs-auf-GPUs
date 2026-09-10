@@ -165,7 +165,9 @@ def build_layer_rows(
 
     capacity_metrics and grad_norm_means are optional, keyed by the same LIF slot
     names -- populated only when training.compute_capacity_metrics was on for this run
-    (see learning/training.py's SNNTrainer.last_capacity_metrics / grad_norm_means).
+    (see learning/inference.py's SNNTester.run() for capacity_metrics -- computed over
+    the full test set, not the trainer -- and learning/training.py's SNNTrainer for
+    grad_norm_means).
     Left None for every field when either dict is absent or has no entry for a given
     layer, matching this file's "unmeasured metric writes an empty cell" convention.
 
