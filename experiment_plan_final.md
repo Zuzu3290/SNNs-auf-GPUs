@@ -241,6 +241,8 @@ re-litigated later:
   tuned per rung.
 - **Mutual information is computed both ways** — I(X;Z) and I(Z;Y) — plotted together as
   the information plane, resolving the brief vs. the Plan disagreeing on which one.
+  **Superseded by revision 2:** I(X;Z) was dropped as unreliable at these dimensions
+  and sample sizes; only I(Z;Y) is computed. See design doc §6e.
 
 New decisions made in this conversation, where the lost file's content could not be
 recovered and a fresh call was needed:
@@ -266,15 +268,20 @@ recovered and a fresh call was needed:
 ## 10. Before ex7 can start
 
 1. ✅ **Done.** `experiments/ex6`'s three arms ran, results table filled in,
-   `pool_kernel: 2` and `batch_size: 64`/`grad_accum: 2` locked. See `ex6/README.md`
-   §12.
-2. ✅ **Done.** The 4 missing metrics — Mutual Information (I(X;Z) and I(Z;Y)),
-   Participation Ratio, spike-train entropy, and per-layer gradient-norm logging — are
-   implemented in `learning/capacity_metrics.py` and wired into the training pipeline
-   behind the opt-in `training.compute_capacity_metrics` flag. Also fixed along the
-   way: `lif_out` (the network's output layer) was never measured for anything before
-   this — layer hooking and naming are now dynamic and depth-safe. See
-   `docs/superpowers/specs/2026-09-04-capacity-metrics-design.md` and
+   `pool_kernel: 2` locked for the whole study; `batch_size: 64`/`grad_accum: 2`
+   confirmed for the N-MNIST pilot specifically (ex7 onward calibrates its own, see §4).
+   See `ex6/README.md` §12.
+2. ✅ **Done.** The 4 missing metrics — Mutual Information (I(Z;Y) only, revised —
+   see below), Participation Ratio, spike-train entropy, and per-layer gradient-norm
+   logging — are implemented in `learning/capacity_metrics.py` and wired into the
+   training pipeline behind the opt-in `training.compute_capacity_metrics` flag. Also
+   fixed along the way: `lif_out` (the network's output layer) was never measured for
+   anything before this — layer hooking and naming are now dynamic and depth-safe.
+   **Revised per the study designer's feedback:** metrics now accumulate over the full
+   test set (not one probe batch), measure per-channel (not per-pixel), report raw and
+   normalized values, and I(X;Z) is dropped. See
+   `docs/superpowers/specs/2026-09-04-capacity-metrics-design.md` (§6 for the
+   revision) and
    `docs/superpowers/plans/2026-09-04-capacity-metrics.md` for the full design and
    implementation record.
 3. **Remaining:** add a configurable FC hidden layer to `frameworks/spiking_net.py`
