@@ -72,6 +72,20 @@ METADATA_ONLY: list[tuple[str, str]] = [("samna", "samna")]
 
 def package_versions() -> dict[str, str]:
     """Version string per package, or an explicit failure marker. Never raises."""
+    # A bare `import norse` below hits the exact Colab failure requirements.txt's norse
+    # comment documents: norse.torch drags in tensorboard -> TensorFlow -> jax, which
+    # raises `AttributeError: module 'numpy.dtypes' has no attribute 'StringDType'`
+    # against this project's pinned (<2.0) numpy. frameworks/adapters/norse_lif.py
+    # already stubs torch.utils.tensorboard to cut that chain -- as a MODULE-LEVEL side
+    # effect, so importing it here is enough to protect the "norse" entry in PACKAGES
+    # below, the same way the real pipeline is protected when it builds a norse model.
+    # Swallowed on failure: if norse genuinely isn't installed, the loop's own per-
+    # package try/except reports that correctly, same as it always has.
+    try:
+        import frameworks.adapters.norse_lif  # noqa: F401
+    except Exception:  # noqa: BLE001 - the loop below reports the real problem, if any
+        pass
+
     found: dict[str, str] = {}
     for import_name, pip_name in PACKAGES:
         try:
