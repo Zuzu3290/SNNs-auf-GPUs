@@ -47,7 +47,12 @@ import torch
 # docs/superpowers/specs/2026-09-04-capacity-metrics-design.md. Bumped rather than
 # appended silently for the same reason v2 was: append_row() refuses to write into a
 # file whose header differs, so a v2 layers.csv must be moved aside, not appended to.
-SCHEMA_VERSION = 3
+# v4 replaced the v3 mutual_info_xz column with mutual_info_zy-only (I(X;Z) dropped
+# per the study designer's correction -- unreliable at these dimensions/sample sizes,
+# see docs/superpowers/specs/2026-09-04-capacity-metrics-design.md §6e) and added
+# participation_ratio_normalized / spike_entropy_normalized (§6d). No v3 data exists
+# yet, so this is a straight column-set edit, not a migration.
+SCHEMA_VERSION = 4
 
 
 class ResultsError(Exception):
@@ -118,11 +123,13 @@ EPOCH_COLUMNS: list[str] = [
 LAYER_COLUMNS: list[str] = [
     "schema_version", "run_id", "layer_index", "layer_type",
     "neurons", "total_spikes", "opportunities", "spike_rate_pct",
-    # ---- capacity metrics (v3) -- scalability-study-only, empty unless
+    # ---- capacity metrics (v4) -- scalability-study-only, empty unless
     # training.compute_capacity_metrics is true. See skeleton/results_collect.py's
     # build_layer_rows() for how each is populated.
-    "grad_norm_mean", "participation_ratio", "spike_entropy",
-    "mutual_info_xz", "mutual_info_zy",
+    "grad_norm_mean",
+    "participation_ratio", "participation_ratio_normalized",
+    "spike_entropy", "spike_entropy_normalized",
+    "mutual_info_zy",
 ]
 
 

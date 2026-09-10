@@ -17,13 +17,13 @@ from skeleton.results_collect import build_layer_rows
 suite = Suite("unit_results_schema")
 
 NEW_COLUMNS = [
-    "grad_norm_mean", "participation_ratio", "spike_entropy",
-    "mutual_info_xz", "mutual_info_zy",
+    "grad_norm_mean", "participation_ratio", "participation_ratio_normalized",
+    "spike_entropy", "spike_entropy_normalized", "mutual_info_zy",
 ]
 
 
 def test_schema_version_bumped() -> None:
-    suite.check("SCHEMA_VERSION is 3", SCHEMA_VERSION == 3, f"got {SCHEMA_VERSION}")
+    suite.check("SCHEMA_VERSION is 4", SCHEMA_VERSION == 4, f"got {SCHEMA_VERSION}")
 
 
 def test_layer_columns_include_all_five_new_fields() -> None:
@@ -39,7 +39,8 @@ def test_layer_row_with_new_columns_writes_and_leaves_empty_when_none() -> None:
     row_with_values.update({
         "schema_version": SCHEMA_VERSION, "run_id": "test_run", "layer_index": 0,
         "layer_type": "lif1:Test", "grad_norm_mean": 0.5, "participation_ratio": 2.3,
-        "spike_entropy": 1.1, "mutual_info_xz": 0.2, "mutual_info_zy": 0.3,
+        "participation_ratio_normalized": 0.7, "spike_entropy": 1.1,
+        "spike_entropy_normalized": 0.4, "mutual_info_zy": 0.3,
     })
     row_without_values = {c: None for c in LAYER_COLUMNS}
     row_without_values.update({
@@ -82,10 +83,12 @@ def test_build_layer_rows_includes_capacity_and_grad_norm_when_provided() -> Non
         "lif_out": _torch.ones(2, 3, 4),
     }
     capacity_metrics = {
-        "lif1": {"participation_ratio": 1.5, "spike_entropy": 0.9,
-                 "mutual_info_xz": 0.1, "mutual_info_zy": 0.2},
-        "lif_out": {"participation_ratio": 2.5, "spike_entropy": 1.9,
-                    "mutual_info_xz": 0.3, "mutual_info_zy": 0.4},
+        "lif1": {"participation_ratio": 1.5, "participation_ratio_normalized": 0.6,
+                 "spike_entropy": 0.9, "spike_entropy_normalized": 0.5,
+                 "mutual_info_zy": 0.2},
+        "lif_out": {"participation_ratio": 2.5, "participation_ratio_normalized": 0.7,
+                    "spike_entropy": 1.9, "spike_entropy_normalized": 0.8,
+                    "mutual_info_zy": 0.4},
     }
     grad_norm_means = {"lif1": 0.05, "lif_out": 0.02}
 
