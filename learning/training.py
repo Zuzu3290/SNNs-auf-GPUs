@@ -3,6 +3,7 @@ import os
 import csv
 import time
 import logging
+import psutil
 from pathlib import Path
 from contextlib import contextmanager, nullcontext
 import torch
@@ -405,8 +406,17 @@ class SNNTrainer:
                     recent_n = min(20, len(self.acc_hist_gpu))
                     acc_display = (f"{torch.stack(self.acc_hist_gpu[-recent_n:]).mean().item() * 100:.2f}%"
                                    if recent_n else "n/a")
+                    # available_gb is psutil's estimate of memory a new process could
+                    # get without swapping -- it already treats reclaimable OS disk
+                    # cache as usable, unlike a raw "how much is used" figure. Printed
+                    # here so a live Colab run shows the one number that actually
+                    # distinguishes "healthy, just caching files" from "genuinely
+                    # running out" without needing a second cell (which Colab won't run
+                    # concurrently with this one anyway).
+                    ram_gb = psutil.virtual_memory().available / (1024 ** 3)
                     print(f"  [epoch {epoch + 1}/{epochs}] iter {i}/{num_iters}  "
                           f"acc (last {recent_n} iter): {acc_display}  "
+                          f"RAM available: {ram_gb:.2f}GB  "
                           f"({time.perf_counter() - t0:.1f}s elapsed)", flush=True)
                 targets = targets.long()
                 measure_mem = i == 0 and self.device.type == "cuda"  # reset/read are host-side counters, not a stream sync -- cheap, but sampled once/epoch anyway
