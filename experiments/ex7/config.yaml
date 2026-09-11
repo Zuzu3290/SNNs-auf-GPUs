@@ -22,6 +22,28 @@ dataset:
 framing:
   n_time_bins: 16
 
+# ---------------------------------------------------------------------------
+# resource_policy: pin the worker count to 1, everywhere this study runs.
+#
+# WHY: event_data_workflow/cache_engine.py picks memory-cache vs. disk-cache based on
+# `dataset_size_gb * num_workers` fitting in available RAM (num_workers because
+# MemoryCachedDataset's cache dict gets duplicated once per forked DataLoader worker).
+# The base config's worker_count_fallback (16) gets clamped to the machine's physical
+# core count -- 1 on Colab, 2 on a 2-core Kaggle instance -- so the SAME dataset and the
+# SAME available RAM produce a DIFFERENT cache-tier decision purely because of how many
+# CPU cores happen to be on the box that day. On a 2-core machine this doubles the
+# "effective" size the memory-tier check sees, which was enough to make it choose disk
+# instead -- and if disk space is also short there (as on a default Kaggle instance),
+# the pipeline correctly refuses to proceed rather than risk it (cache_engine.py's
+# "System halt: insufficient resources").
+#
+# Pinning to 1 makes the cache-tier decision reproducible across machines, the same way
+# T/pool_kernel/backend are already held fixed for this study -- this is exactly the
+# kind of hidden per-machine variable the study has been careful to control elsewhere.
+# It is a no-op on Colab (1 physical core already clamps to 1 regardless).
+resource_policy:
+  worker_count_fallback: 1
+
 training:
   # framework: NOT overridden -- base default is already `sj`, and the whole study
   # (ex6-ex9) is SpikingJelly-only by design. Stated here in prose so the record is
