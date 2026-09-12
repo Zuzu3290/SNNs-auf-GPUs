@@ -28,10 +28,10 @@ from skeleton import WorkflowSettings
 from skeleton.seeding import split_generator
 from .system_monitor import monitor
 from .cache_engine import (
-    AdaptiveCacheController, ClampToBinary, ComposedTransform, FixedToFrame,
-    PreTransformedDataset, cache_identity, compose_transforms, measure_event_bytes,
+    AdaptiveCacheController, ComposedTransform, FixedToFrame,
+    PreTransformedDataset, cache_identity, measure_event_bytes,
 )
-from .fast_denoise import FastDenoise
+from .fast_preprocessing import FastDenoise
 from .dataset_registry import resolve_dataset_entry
 from .prefetch import AsyncGPUPrefetcher, CudaPrefetcher
 
@@ -383,29 +383,12 @@ class NeuromorphicEncoder:
         # train_augment is random, so it must run fresh every access rather
         # than get baked into a persistent cache — see determine_dataset_strategy.
         # Toggled via data_workflow.yaml's augmentation.random_rotation_enabled.
-        # binarize rides out of the cache with the augmentation, so toggling it needs no
-        # rebuild. Applied to BOTH splits -- test-time input must mean the same thing.
-        binarize = ClampToBinary() if self.wf.BINARIZE else None
         train_augment = torchvision.transforms.RandomRotation([-10, 10]) if self.wf.RANDOM_ROTATION_ENABLED else None
         logger.info(f"[PIPELINE] Random rotation augmentation: {'ENABLED' if train_augment is not None else 'DISABLED'}")
-        # binarize goes LAST, so it caps whatever the chain produced.
-        #
-        # CAVEAT, and it matters here specifically: ClampToBinary applies min(x, 1) -- a
-        # CLAMP, not a threshold. On the integer counts ToFrame emits that IS a binarize
-        # (0,1,5,8 -> 0,1,1,1). But rotation INTERPOLATES, so once train_augment is in the
-        # chain the values are already fractional and clamping leaves them fractional
-        # (0.37 stays 0.37); only values above 1 are touched. With both enabled the train
-        # input is therefore NOT a spike train, while the test split -- which gets no
-        # augmentation -- IS. That asymmetry between train and test is the real hazard.
-        #
-        # For a genuine 0/1 input: binarize true AND random_rotation_enabled false.
         train_tf_steps = ([frame_tf, torch.from_numpy]
-                          + ([train_augment] if train_augment is not None else [])
-                          + ([binarize] if binarize is not None else []))
+                          + ([train_augment] if train_augment is not None else []))
         train_tf = transforms.Compose(train_tf_steps)
-        # The test split is not cached (see below), so binarize joins its transform chain
-        # directly. Applied to BOTH splits: test-time input must mean the same thing.
-        test_tf = ComposedTransform([frame_tf, binarize]) if binarize is not None else frame_tf
+        test_tf = frame_tf
 
         # Framing and denoising decide the cached BYTES, so they belong in the path.
         # Previously it was just <dataset>/<split>, so changing n_time_bins silently
@@ -447,7 +430,7 @@ class NeuromorphicEncoder:
             # augmentation out of the cached value (transform/live_transform split).
             train_data = controller.determine_dataset_strategy(
                 raw_train, transform=frame_tf,
-                live_transform=compose_transforms(train_augment, binarize),
+                live_transform=train_augment,
                 split=f"{dataset_prefix}/train", num_workers=worker_estimate,
                 manifest=self.cache_manifest)
             # Inference gets no cache and no adaptive sizing, deliberately -- caching earns its cost

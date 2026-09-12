@@ -1,15 +1,12 @@
-"""Unit tests for the training-loop corrections: warm-up, the firing window, and the
-iteration cap.
+"""Unit tests for the training-loop corrections: warm-up, and the iteration cap.
 
     python tests/unit_training_metrics.py
 
-Three fixes are covered, and each one was a number that came out wrong rather than a
+Two fixes are covered, and each one was a number that came out wrong rather than a
 crash -- which is why they need tests rather than a glance:
 
   D7   no warm-up, so CUDA kernel compilation was charged to training, and in a
        multi-framework run charged only to whichever framework ran first
-  D1   the Hz window read a config attribute that does not exist, so every firing-rate
-       figure was computed against a fixed 15 ms instead of the real sample duration
   D12  the iteration cap was checked after the batch had already been trained on, so an
        epoch ran num_iters + 1 iterations
 
@@ -23,7 +20,7 @@ import torch
 
 from _harness import FRAMEWORKS, Suite, build_model, fresh_cfg, spike_input
 from learning.utilities import (
-    firing_window_seconds, spikes_per_neuron_per_inference, warm_up,
+    spikes_per_neuron_per_inference, warm_up,
 )
 from skeleton.config_loader import deep_merge, load_base
 from skeleton.snn_config import Settings
@@ -41,55 +38,8 @@ def settings_pair(overrides: dict):
 
 
 # ---------------------------------------------------------------------------
-# 1. D1 -- the firing window
+# 1. phantom-attribute regression guard
 # ---------------------------------------------------------------------------
-def test_window_is_none_when_not_knowable() -> None:
-    """n_time_bins divides a recording of unknown length. Withholding Hz is the point:
-    the previous code invented 15 ms and published figures ~20x too high."""
-    cfg, wf = settings_pair({"framing": {"mode": "n_time_bins", "sample_duration_us": None}})
-    suite.check("n_time_bins with no stated duration gives None",
-                firing_window_seconds(cfg, wf) is None, str(firing_window_seconds(cfg, wf)))
-
-
-def test_window_from_a_stated_sample_duration() -> None:
-    cfg, wf = settings_pair({"framing": {"sample_duration_us": 300000}})
-    suite.check("stated duration is used", firing_window_seconds(cfg, wf) == 0.3,
-                str(firing_window_seconds(cfg, wf)))
-
-
-def test_window_derived_from_time_window_framing() -> None:
-    """time_window framing fixes each frame's duration, so T frames span T x that."""
-    cfg, wf = settings_pair({"framing": {"mode": "time_window", "time_window_ms": 15.0,
-                                         "n_time_bins": 16, "sample_duration_us": None}})
-    suite.check("time_window framing derives T x window",
-                abs(firing_window_seconds(cfg, wf) - 0.24) < 1e-12,
-                str(firing_window_seconds(cfg, wf)))
-
-
-def test_window_from_temporal_slicing_by_time() -> None:
-    cfg, wf = settings_pair({"temporal_slicing": {"enabled": True, "events_per_slice": None,
-                                                  "calibrate_events_per_slice": False,
-                                                  "slice_duration_us": 15000},
-                             "framing": {"sample_duration_us": None}})
-    suite.check("slicing by time uses the slice duration",
-                firing_window_seconds(cfg, wf) == 0.015, str(firing_window_seconds(cfg, wf)))
-
-
-def test_window_is_none_when_slicing_by_event_count() -> None:
-    """A fixed number of events spans a variable, unknown amount of time."""
-    cfg, wf = settings_pair({"temporal_slicing": {"enabled": True, "events_per_slice": 500},
-                             "framing": {"sample_duration_us": None}})
-    suite.check("slicing by event count gives None",
-                firing_window_seconds(cfg, wf) is None, str(firing_window_seconds(cfg, wf)))
-
-
-def test_stated_duration_wins_over_derivation() -> None:
-    cfg, wf = settings_pair({"framing": {"mode": "time_window", "time_window_ms": 15.0,
-                                         "n_time_bins": 16, "sample_duration_us": 500000}})
-    suite.check("an explicitly stated duration takes precedence",
-                firing_window_seconds(cfg, wf) == 0.5, str(firing_window_seconds(cfg, wf)))
-
-
 def test_the_attribute_the_old_code_read_does_not_exist() -> None:
     """The root cause, asserted so it cannot quietly come back."""
     cfg, wf = settings_pair({})
@@ -108,17 +58,6 @@ def test_spikes_per_inference_is_time_unit_free() -> None:
     suite.check("rate x T", spikes_per_neuron_per_inference(0.05, 16) == 0.8)
     suite.check("a silent layer gives 0", spikes_per_neuron_per_inference(0.0, 16) == 0.0)
     suite.check("scales with T", spikes_per_neuron_per_inference(0.05, 32) == 1.6)
-
-
-def test_the_size_of_the_old_error() -> None:
-    """0.05 rate at T=16 is 0.8 spikes/neuron/inference. Over a real 300 ms N-MNIST
-    sample that is 2.7 Hz; the old fixed 15 ms window reported 53.3 Hz."""
-    per_inference = spikes_per_neuron_per_inference(0.05, 16)
-    old_hz, true_hz = per_inference / 0.015, per_inference / 0.300
-    suite.check("the old window overstates by exactly 20x",
-                abs(old_hz / true_hz - 20.0) < 1e-9, f"{old_hz / true_hz:.4f}")
-    suite.check("the error is a constant factor, so relative comparisons survived",
-                abs((2 * per_inference / 0.015) / (2 * per_inference / 0.300) - 20.0) < 1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +185,6 @@ def test_trainer_exposes_the_new_pieces() -> None:
     suite.check("train() checks the cap before the body",
                 "if i >= num_iters:" in source)
     suite.check("the old trailing check is gone", "if i == num_iters:" not in source)
-    suite.check("train() resolves the window rather than hardcoding it",
-                "firing_window_seconds(" in source)
     suite.check("the phantom attribute is not read anywhere in training",
                 "getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US'" not in inspect.getsource(training))
 
@@ -264,8 +201,6 @@ def test_inference_no_longer_reads_phantom_attributes() -> None:
                 "getattr(self.cfg, 'TEMPORAL_SLICE_DURATION_US'" not in source)
     suite.check("inference does not read cfg.TIMESTEPS",
                 "getattr(self.cfg, 'TIMESTEPS'" not in source)
-    suite.check("inference resolves the window properly",
-                "firing_window_seconds(" in source)
     suite.check("inference reports the time-unit-free figure too",
                 "spikes_per_neuron_per_inference" in source)
 
@@ -277,7 +212,7 @@ def test_batch_size_is_recorded(  ) -> None:
 
     from learning import training
 
-    source = inspect.getsource(training.SNNTrainer.finalize_epoch_reports)
+    source = inspect.getsource(training.SNNTrainer.finalize_one_epoch_report)
     suite.check("the epoch row records batch_size", '"batch_size"' in source)
     suite.check("and whether it was calibrated", '"batch_size_calibrated"' in source)
 
@@ -361,7 +296,7 @@ def test_iteration_series_lengths_line_up() -> None:
     expected = len(trainer.loss_hist)
     suite.check("loss history has one entry per iteration", expected == 6, str(expected))
     for key in ["synops_energy_pj", "gpu_energy_j", "learning_rate",
-                "spikes_per_neuron_per_inference", "firing_rate_hz"]:
+                "spikes_per_neuron_per_inference"]:
         suite.check(f"{key} matches the loss history length",
                     len(series[key]) == expected, f"{len(series[key])} vs {expected}")
     suite.check("vram history matches too", len(trainer.vram_current_hist) == expected)
@@ -371,11 +306,9 @@ def test_epoch_row_carries_the_new_columns() -> None:
     trainer, _ = run_short_training(iterations=2, epochs=1, available=5)
     row = trainer.epoch_log[0]
     for column in ["energy_j_total", "energy_j_dynamic", "idle_power_w",
-                   "spikes_per_neuron_per_inference", "firing_rate_hz",
+                   "spikes_per_neuron_per_inference",
                    "batch_size", "batch_size_calibrated", "synops_energy_pj"]:
         suite.check(f"epoch row has {column}", column in row)
-    suite.check("Hz is None with no stated sample duration", row["firing_rate_hz"] is None,
-                str(row["firing_rate_hz"]))
 
 
 def test_training_runs_on_cpu_at_all() -> None:
@@ -630,15 +563,8 @@ def main() -> int:
         test_measure_latency_refuses_an_empty_sample_list,
         test_run_row_bs1_columns_come_from_the_real_measurement,
         test_latency_samples_is_configurable,
-        test_window_is_none_when_not_knowable,
-        test_window_from_a_stated_sample_duration,
-        test_window_derived_from_time_window_framing,
-        test_window_from_temporal_slicing_by_time,
-        test_window_is_none_when_slicing_by_event_count,
-        test_stated_duration_wins_over_derivation,
         test_the_attribute_the_old_code_read_does_not_exist,
         test_spikes_per_inference_is_time_unit_free,
-        test_the_size_of_the_old_error,
         test_warmup_leaves_the_weights_untouched,
         test_warmup_clears_gradients,
         test_warmup_leaves_no_activity_recordings,

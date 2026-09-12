@@ -165,7 +165,6 @@ def build_run_row(
         "time_steps": timesteps if timesteps is not None else getattr(wf, "N_TIME_BINS", None),
         "batch_size": getattr(cfg, "BATCH_SIZE", None),
         "num_workers": num_workers,
-        "binarize": getattr(wf, "BINARIZE", None),
         "denoise_us": getattr(wf, "DENOISE_FILTER_TIME_US", None),
         "epochs": getattr(cfg, "EPOCHS", None),
         "optimizer": getattr(cfg, "OPTIMIZER", None),

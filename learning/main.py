@@ -88,7 +88,7 @@ if __name__ == "__main__":
     if cfg.CALIBRATE_BATCH_SIZE:
         cfg.BATCH_SIZE = calibrate_batch_size(ModelClass, cfg, device, timesteps=wf.N_TIME_BINS,
                                                data_vram_fraction=wf.BATCH_VRAM_FRACTION, max_batch_size=wf.MAX_BATCH_SIZE,
-                                               band_min=wf.BATCH_VRAM_BAND_MIN, band_max=wf.BATCH_VRAM_BAND_MAX)
+                                               band_min=wf.BATCH_VRAM_BAND_MIN)
 
     # Hardcoded on purpose, NOT a config key: background CPU/GPU utilization and power
     # sampling is a diagnostic, always wanted on a real run. Set False here to disable.
@@ -198,10 +198,6 @@ if __name__ == "__main__":
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
     print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")
     print(f"  Spikes/neuron   : {test_results['avg_spikes_per_neuron_per_inference']:.4f} per inference")
-    if test_results["avg_firing_rate_hz"] is not None:
-        print(f"  Avg Firing Rate : {test_results['avg_firing_rate_hz']:.2f} Hz")
-    else:
-        print("  Avg Firing Rate : n/a -- set framing.sample_duration_us for Hz")
 
     # ------------------------------------------------------------------------------
     # Results, in the schema the SNNs_2 plotting layer reads (runs/epochs/layers.csv).

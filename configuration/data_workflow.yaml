@@ -4,53 +4,12 @@ framing:
   n_time_bins: 16
   time_window_ms: 15.0
 
-  # How much REAL TIME one sample spans, in microseconds. Used only to convert the
-  # spike rate into Hz:  firing_rate_hz = spikes_per_neuron_per_inference / duration_s
-  #
-  # null (the default) means "not known", and then Hz is reported as unavailable rather
-  # than guessed. The headline spike figure is `spikes_per_neuron_per_inference`
-  # (rate x T), which needs no time unit, cannot be wrong, and is the unit the SNN
-  # literature reports -- so nothing is lost by leaving this null.
-  #
-  # It is only knowable per dataset: with `n_time_bins` framing a sample is cut into T
-  # bins spanning the WHOLE recording, and recordings differ (N-MNIST is roughly
-  # 300000 us / 300 ms). With `time_window` framing it is derived automatically from
-  # time_window_ms x T and this key is ignored. With temporal slicing enabled it is
-  # derived from the slice duration.
-  #
-  # Set it only if you know your dataset's real per-sample duration and want Hz.
-  sample_duration_us: null
-
-  # Denoising: drop events with no neighbouring event within 1 pixel and this many
-  # MICROSECONDS. Event cameras emit a lot of isolated noise events and removing them is
-  # standard practice; the snnTorch/Tonic N-MNIST tutorial this architecture comes from
-  # uses 10000. Lower filters more aggressively. null disables it.
-  # Runs BEFORE framing and changes which events exist, so it is part of the cache
-  # identity -- changing it builds a separate, reusable cache.
   denoise_filter_time_us: 10000
-
-  # ToFrame ADDS UP every event landing in the same pixel, polarity and time bin, so
-  # frame values are event COUNTS, not spikes (measured range on N-MNIST at T=20: 0 to 8).
-  # true clamps them to 0/1, making the network's input real spikes.
-  #
-  # false (the default) keeps counts, which carry more information and is what
-  # Tonic-based examples normally feed. It applies identically to every framework either
-  # way, so it cannot bias a comparison -- but it changes accuracy and spike-rate figures,
-  # so record which was used. Applied AFTER the cache read, so flipping it needs no rebuild.
-  #
-  # ⚠ It CLAMPS -- min(x, 1) -- rather than thresholding. On integer counts that is a real
-  # binarize (0,1,5,8 -> 0,1,1,1). But random_rotation_enabled below INTERPOLATES, which
-  # makes the values fractional, and clamping a fraction leaves it fractional (0.37 stays
-  # 0.37). With both true the TRAIN input is not a spike train while the TEST input is,
-  # because test gets no augmentation -- so the two splits stop meaning the same thing.
-  # For a genuine 0/1 input: binarize true AND random_rotation_enabled false.
-  binarize: false
 
 temporal_slicing:
   enabled: false                # true | false
 
-  # Slice length in MICROSECONDS, used when slicing by time. Also what turns a spike
-  # rate into Hz (see utilities.firing_window_seconds). Moved here from
+  # Slice length in MICROSECONDS, used when slicing by time. Moved here from
   # SNN_module.yaml's architecture block, where it was separated from the rest of the
   # slicing settings.
   slice_duration_us: 15000
@@ -59,9 +18,7 @@ temporal_slicing:
   calibrate_events_per_slice: false   # true = derive the event count from the dataset
 
 # Train-only augmentation. Applied after ToFrame, on the dense frame — a
-# rotated frame interpolates, so spike counts on an augmented sample become
-# fractional rather than binary. Toggle off to keep training spike-count
-# semantics identical to test-time (no augmentation there either way).
+# rotated frame interpolates, so spike counts on an augmented sample becomefractional.
 augmentation:
   random_rotation_enabled: true
 
@@ -78,9 +35,9 @@ resource_policy:
   gpu_pressure_threshold: 0.75     # VRAM utilization ratio above which cache decisions avoid RAM,
                                     # to not compete with CUDA's pinned-memory allocator
   batch_vram_fraction: 0.35        # target VRAM fraction for auto-calibrated batch size (training AND inference --
-                                    # one policy covers both, see docs/functions.md)
-  batch_vram_band_min: 0.30        # reporting band around batch_vram_fraction -- below this, the log flags "outside policy band"
-  batch_vram_band_max: 0.35        # reporting band around batch_vram_fraction -- above this, the log flags "outside policy band"
+                                    # one policy covers both, see docs/functions.md). Also the band's upper edge for
+                                    # reporting -- the search never deliberately lands above its own target.
+  batch_vram_band_min: 0.30        # reporting band lower edge -- below this, the log flags "outside policy band"
   max_batch_size: 256              # learning-quality ceiling on calibrated batch size (see docs/functions.md)
   calibrate_prefetch_depth: true   # true: live VRAM probe (see compute_prefetch_depth(), docs/functions.md).
                                     # false: prefetch_depth_fallback below is used exactly as written.
@@ -91,9 +48,10 @@ resource_policy:
   memory_tier_headroom_fraction: 0.7   # dataset must fit under this fraction of available RAM to pick the "memory" cache tier
   disk_tier_headroom_multiple: 1.2     # free disk space must exceed dataset size by this multiple to pick the "disk" cache tier
   worker_ram_fraction: 0.25            # share of available RAM DataLoader workers' in-flight buffers may occupy; caps num_workers for large-sensor datasets
+  
   dataloader_worker_timeout_s: 120.0   # a stuck worker (num_workers > 0) raises TimeoutError after this long instead of hanging the run forever; 0 disables (PyTorch default)
-  calibrate_workers: false              # true: adaptive, RAM/spawn-reload-safe sizing (recommended, the normal setting). false: worker_count_fallback below is used exactly as written, skipping those safety caps -- opt-in only, for a deliberate one-off test where you know this machine's real free RAM/page file can back it
-  worker_count_fallback: 16            # only used when calibrate_workers is false (still clamped to physical core count)
+  calibrate_workers: false              # true: adaptive, RAM/spawn-reload-safe sizing (recommended, the normal setting). false: worker_count_fallback.
+  worker_count_fallback: 16            # only used when calibrate_workers is false.
 
 # batch_size lives in SNN_module.yaml (training section)
 

@@ -40,13 +40,8 @@ class WorkflowSettings:
         self.FRAME_MODE     = framing.require_choice("mode", ["n_time_bins", "time_window"])
         self.N_TIME_BINS    = framing.require_int("n_time_bins")
         self.TIME_WINDOW_US = int(framing.require_float("time_window_ms") * 1000)
-        # null = "not known"; Hz is then reported as unavailable rather than guessed.
-        self.SAMPLE_DURATION_US = framing.optional_int("sample_duration_us")
         # Part of the cache identity: it changes which events exist. null disables.
         self.DENOISE_FILTER_TIME_US = framing.optional_int("denoise_filter_time_us")
-        # Applied AFTER the cache, so toggling it needs no rebuild and it is NOT part of
-        # the cache identity.
-        self.BINARIZE = framing.require_bool("binarize")
 
         slicing = section(config, "temporal_slicing")
         self.TEMPORAL_SLICING_ENABLED = slicing.require_bool("enabled")
@@ -74,7 +69,6 @@ class WorkflowSettings:
         self.GPU_PRESSURE_THRESHOLD    = rp.require_float("gpu_pressure_threshold")
         self.BATCH_VRAM_FRACTION       = rp.require_float("batch_vram_fraction")
         self.BATCH_VRAM_BAND_MIN       = rp.require_float("batch_vram_band_min")
-        self.BATCH_VRAM_BAND_MAX       = rp.require_float("batch_vram_band_max")
         self.MAX_BATCH_SIZE            = rp.require_int("max_batch_size")
         self.CALIBRATE_PREFETCH_DEPTH  = rp.require_bool("calibrate_prefetch_depth")
         self.PREFETCH_DEPTH_FALLBACK   = rp.require_int("prefetch_depth_fallback")
