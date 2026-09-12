@@ -45,6 +45,11 @@ class DatasetAwareConfig(Protocol):
     def apply_dataset_shape(self, sensor_h: int, sensor_w: int, in_channels: int, num_classes: int) -> None: ...
 
 
+def to_float32(frame):
+    """ToFrame emits float64; cast here so PadTensors (which only casts a raw ndarray, not an already-built tensor) doesn't collate a float64 batch into Conv2d."""
+    return torch.from_numpy(frame).float()
+
+
 class LabelToIndex:
     """Picklable string-label -> int-index mapper (see cache_engine.ComposedTransform
     for why a closure/lambda can't be used here — Windows' spawn-based multiprocessing
@@ -346,13 +351,14 @@ class NeuromorphicEncoder:
         # augmentation -- IS. That asymmetry between train and test is the real hazard.
         #
         # For a genuine 0/1 input: binarize true AND random_rotation_enabled false.
-        train_tf_steps = ([frame_tf, torch.from_numpy]
+        train_tf_steps = ([frame_tf, to_float32]
                           + ([train_augment] if train_augment is not None else [])
                           + ([binarize] if binarize is not None else []))
         train_tf = transforms.Compose(train_tf_steps)
         # The test split is not cached (see below), so binarize joins its transform chain
         # directly. Applied to BOTH splits: test-time input must mean the same thing.
-        test_tf = ComposedTransform([frame_tf, binarize]) if binarize is not None else frame_tf
+        test_tf_steps = [frame_tf, to_float32] + ([binarize] if binarize is not None else [])
+        test_tf = ComposedTransform(test_tf_steps)
 
         # Framing and denoising decide the cached BYTES, so they belong in the path.
         # Previously it was just <dataset>/<split>, so changing n_time_bins silently
