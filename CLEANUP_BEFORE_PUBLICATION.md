@@ -13,6 +13,13 @@ will be added over time.
   file importing from it (`from plots import ...`), so that import breaks the moment
   this is deleted — either remove/rewrite `make_plots.py` alongside it, or confirm
   whether `make_plots.py` itself is also going before the final commit.
+- `check_network.py` — builds the network with a dummy tensor (no dataset/GPU needed)
+  to confirm layer shapes and that every framework starts from byte-identical
+  conv/linear weights. `tests/unit_entrypoints.py` directly `import check_network` and
+  exercises it in ~15 tests (`test_check_network_all_passes_and_reports`,
+  `test_check_network_fails_when_a_neuron_drifts_from_its_config`, etc.) — those break
+  the moment this file is deleted unless removed/updated together. Also referenced in
+  `HOW_TO_RUN.md` and mentioned in a comment in `frameworks/adapters/norse_lif.py`.
 
 ## To review (candidates, not yet decided)
 

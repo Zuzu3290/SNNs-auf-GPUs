@@ -7,8 +7,7 @@ framing:
   denoise_filter_time_us: 10000
 
 temporal_slicing:
-  enabled: false                # true | false
-
+  enabled: false
   # Slice length in MICROSECONDS, used when slicing by time. Moved here from
   # SNN_module.yaml's architecture block, where it was separated from the rest of the
   # slicing settings.

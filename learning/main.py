@@ -191,6 +191,15 @@ if __name__ == "__main__":
     del trainer, train_loader
     safe_empty_cache()
 
+    # Right at the train -> inference boundary, on the just-trained model, before
+    # inference starts touching it (eval_mode() etc.) -- output.save_checkpoint in
+    # SNN_module.yaml, opt-in and false by default (real disk usage every run
+    # doesn't need). Load back with model.load_state(torch.load(path)).
+    if cfg.SAVE_CHECKPOINT:
+        checkpoint_path = run_results_dir / "model_checkpoint.pt"
+        torch.save(model.get_state(), checkpoint_path)
+        print(f"  Checkpoint     : {checkpoint_path}")
+
     visualize = select_inference_mode()
     tester       = SNNTester(model, test_loader, cfg, device, visualize=visualize)
     test_results = tester.run(csv_path=str(run_results_dir / "test.csv"))

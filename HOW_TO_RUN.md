@@ -133,6 +133,55 @@ evaluates, and writes to the `output:` paths in `SNN_module.yaml`
 
 This is exactly what it always did. The additions below are all opt-in.
 
+### Before you run: do you want the trained model saved?
+
+**Decide this before you run, not after** — the model is trained fresh every time
+`learning/main.py` runs, and by default nothing is kept once the process exits, so
+if you skip this and want the weights afterward, the only fix is to train again.
+
+Set `output.save_checkpoint` in `SNN_module.yaml` (or an experiment overlay):
+
+```yaml
+output:
+  save_checkpoint: true   # false by default -- opt in
+```
+
+**true** if you want to reuse these exact trained weights afterward — resume
+training later, run inference in a separate script, inspect the weights, and so
+on. **false** (the default) if this run is only about the numbers it prints and
+writes to `runs.csv`/`test.csv` — the common case for a framework-comparison run,
+where keeping every run's weights on disk is real, usually-unneeded disk usage.
+
+When on, it writes `model_checkpoint.pt` (model + optimizer state, framework name,
+neuron config) into the run's results folder, right after training finishes and
+before inference starts — inference itself is unaffected either way, and still
+runs immediately after in the same invocation.
+
+**Using the saved weights elsewhere** — a separate script, a notebook, anywhere
+outside this run. You need three things: the same model class the checkpoint was
+trained with (`training.framework` in the config that produced it — `SNN_SJ` for
+`sj`, etc., see `learning/main.py`'s `FRAMEWORK_MODULES`), a `Settings` built from
+that SAME config (architecture must match, or the weights won't fit the layers),
+and the checkpoint file's path:
+
+```python
+from skeleton import Settings
+from frameworks.snn_spikingjelly import SNN_SJ   # match the framework the checkpoint was trained with
+import torch
+
+cfg = Settings()   # the SAME config (base + overlay) the checkpoint was trained under
+cfg.apply_dataset_shape(...)   # same dataset shape as the training run
+
+model = SNN_SJ(cfg)
+model.load_state(torch.load("path/to/model_checkpoint.pt"))
+model.eval_mode()
+# model(data) now runs inference with the trained weights
+```
+
+If the architecture (dataset shape, layer sizes, framework) doesn't match what the
+checkpoint was trained with, `load_state` raises rather than silently loading
+mismatched weights.
+
 ### The same command, with every flag it accepts
 
 ```bash

@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-
 from frameworks.adapters import lif_factory
 from frameworks.model_interface import ModelInterface
 from frameworks.spiking_net import build_network

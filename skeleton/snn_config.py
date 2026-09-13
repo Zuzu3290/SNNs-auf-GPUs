@@ -152,6 +152,7 @@ class Settings:
         self.OUTPUT_DIR = output.require_str("output_dir")
         self.PLOT_DIR   = output.require_str("plot_dir")
         self.DATA_DIR   = output.require_str("data_dir")
+        self.SAVE_CHECKPOINT = output.require_bool("save_checkpoint")
 
 
     # ---- shape, owned by the dataset registry -----------------------------------
@@ -386,6 +387,7 @@ class Settings:
             row("Output dir", self.OUTPUT_DIR)
             row("Plot dir",   self.PLOT_DIR)
             row("Data dir",   self.DATA_DIR)
+        row("Save checkpoint", self.SAVE_CHECKPOINT)
 
         print()
         print("=" * W)
