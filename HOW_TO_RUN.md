@@ -99,6 +99,7 @@ pip install torch==2.13.0 torchvision==0.28.0        # CPU
 # ...or, for CUDA 12.8:
 pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu128
 
+pip install --no-deps tonic==1.6.0
 pip install -r requirements.txt
 python check_env.py
 ```
@@ -106,6 +107,14 @@ python check_env.py
 torch is installed first and separately because its build differs per machine.
 `requirements.txt` pins the **version** (`2.13.0`), not the wheel tag (`+cpu`, `+cu128`),
 so one file serves both; `check_env.py` compares the same way and ignores the tag.
+
+tonic is also installed first and separately, with `--no-deps`: tonic 1.6.0 (its own
+latest release) declares `numpy<2.0.0`, which has no wheel on Python 3.13+, so asking
+pip to resolve it together with `requirements.txt`'s `numpy==2.3.5` in one command
+fails outright (`ResolutionImpossible`). `--no-deps` skips that check; tonic's actual
+runtime dependencies are pinned in `requirements.txt` instead. See that file's "Event
+data" section for the full story. `check_env.py` still checks tonic's version (see
+`EXTRA_PINS` there), so this deviation can't go unnoticed either.
 
 ---
 ---
@@ -368,6 +377,7 @@ the same `--framework` and a different `--seed` to get replicates.
 A Colab runtime is a **new machine every session**, so it starts with Step 0:
 
 ```bash
+!pip install --no-deps tonic==1.6.0
 !pip install -r requirements.txt
 !python check_env.py --strict
 ```
@@ -376,6 +386,11 @@ A Colab runtime is a **new machine every session**, so it starts with Step 0:
 resolution to a different version is exactly the drift that makes two runs
 incomparable. Then two things differ from a laptop run, and both are command-line
 flags — the config never changes.
+
+tonic still needs its own `--no-deps` install first, same reason as the laptop
+instructions above (its `numpy<2.0.0` pin has no Python 3.13+ wheel) — this one
+actually matters LESS on Colab, since Colab's own preinstalled numpy is already 2.x
+and requirements.txt's `numpy==2.3.5` pin now matches that instead of fighting it.
 
 ```bash
 python learning/main.py \

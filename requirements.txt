@@ -1,96 +1,22 @@
-# Dependencies, pinned to the environment the pipeline is actually validated against.
-#
-# WHY EXACT PINS AND NOT FLOORS
-# -----------------------------
-# This project compares SNN FRAMEWORKS. A floor like `snntorch>=0.9.1` lets Colab and a
-# laptop resolve to different library versions, and then the comparison is between
-# versions rather than between frameworks -- with nothing in the output saying so. The
-# four framework libraries, tonic and numpy therefore carry `==`. Verify with:
-#
-#     python check_env.py
-#
-# runs.csv records `framework_version` per row, so a drift is recoverable after the
-# fact -- but only if someone notices. Pinning is the cheaper half of that.
-#
-# Versions below are what `python tests/run_all.py` (9 suites) passes against.
-
-# ---------------------------------------------------------------------------
-# PyTorch -- install FIRST, and pick the build that matches your machine.
-#
-# The pin is the version, not the build. A local wheel tag differs per platform
-# (2.13.0+cpu here, 2.13.0+cu128 on Colab) and pinning it would make this file
-# unusable anywhere else.
-#
-#   CPU:   pip install torch==2.13.0 torchvision==0.28.0
-#   CUDA:  pip install torch==2.13.0 torchvision==0.28.0 \
-#              --index-url https://download.pytorch.org/whl/cu128
-#
-# On Linux, torch pulls `triton` itself; it does not need declaring here.
-# ---------------------------------------------------------------------------
 torch==2.13.0
 torchvision==0.28.0
 
-# ---------------------------------------------------------------------------
-# The four frameworks under comparison. These decide the RESULTS, so they are the
-# pins that matter most.
-#
-# sinabs additionally pulls nir, nirtorch and samna (SynSense's chip SDK) -- it will
-# not import without them. None is used by this pipeline directly, so they are not
-# listed here, but check_env.py reports their versions because they belong in the
-# write-up's environment appendix.
-# ---------------------------------------------------------------------------
 snntorch==1.0.0
 norse==1.1.0
 spikingjelly==0.0.0.0.14
 sinabs==3.1.3
 
-# ---------------------------------------------------------------------------
-# Event data
-#
-# numpy is held BELOW 2.0 because tonic 1.6.0 itself declares `numpy<2.0.0` (verified
-# from its metadata), and tonic loads every dataset here. numba 0.66 allows 1.22-2.5,
-# so 1.26.4 satisfies both. This is also what the SNNs_2 reference runs used, which is
-# what makes their numbers comparable with these.
-#
-# THE COLAB CONSEQUENCE, and why it is not a reason to move the pin. Colab ships numpy
-# 2.x, so installing this downgrades it, and Colab's preinstalled jax then fails with
-#
-#     AttributeError: module 'numpy.dtypes' has no attribute 'StringDType'
-#
-# which reached this pipeline through norse: norse.torch imports its tensorboard
-# helpers whenever tensorboard is installed, those import torch.utils.tensorboard, and
-# that imports TensorFlow, which imports jax. Nothing here uses tensorboard, so the
-# chain is cut at its first link in frameworks/adapters/norse_lif.py rather than
-# loosening the pin and breaking tonic. See that file, and the regression test in
-# tests/unit_adapters.py that reconstructs the whole path.
-# ---------------------------------------------------------------------------
-tonic==1.6.0
-numpy==1.26.4
-numba==0.66.0        # compiles denoise/to_frame -- see event_data_workflow/fast_preprocessing.py
-h5py==3.16.0         # reads .h5 event files (3ET Eyetracking, DSEC)
+numpy==2.3.5
+numba==0.66.0
+h5py==3.16.0
 
-# ---------------------------------------------------------------------------
-# Metrics, monitoring, output
-# ---------------------------------------------------------------------------
-nvidia-ml-py==13.610.43   # imported as `pynvml` -- GPU power, clocks, utilisation
-psutil==7.2.2             # RAM/CPU probing for the cache tier and worker sizing
-pandas==3.0.5             # plots/ -- the F0-F6 comparison figures
+pbr==7.0.3
+typing_extensions==4.15.0
+importRosbag==1.0.4
+
+nvidia-ml-py==13.610.43
+psutil==7.2.2
+pandas==3.0.5
 matplotlib==3.11.1
 PyYAML==6.0.3
 tqdm==4.70.0
-
-# ---------------------------------------------------------------------------
-# REMOVED, and why -- so nobody adds them back by reflex:
-#
-#   nir, nirtorch     sinabs pulls both; nothing here imports them
-#   tensorboard       imported nowhere in this pipeline
-#   scipy, Pillow     transitive (tonic, matplotlib) -- not imported directly
-#   triton            torch pulls it on Linux; a no-op entry on Windows
-#   hdf5plugin        was declared "needed for DSEC's compressed .h5" but is imported
-#                     NOWHERE, and it only registers its codecs when imported -- so it
-#                     was never doing the job it was listed for. It is also not
-#                     installed in the validated environment. Add it back WITH an
-#                     import if DSEC support is ever finished.
-#   imageio           same story: listed for DSEC's PNG flow targets, imported nowhere,
-#                     not installed.
-# ---------------------------------------------------------------------------

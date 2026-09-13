@@ -103,10 +103,19 @@ def package_versions() -> dict[str, str]:
     return found
 
 
+# Pinned OUTSIDE requirements.txt because it cannot be a plain line there: tonic 1.6.0
+# (its own latest release) declares `numpy<2.0.0`, which has no wheel on Python 3.13+,
+# so listing it alongside requirements.txt's numpy==2.3.5 makes `pip install -r
+# requirements.txt` fail outright (verified: ResolutionImpossible). It is installed
+# separately with --no-deps instead -- see requirements.txt's "Event data" section and
+# HOW_TO_RUN.md. Tracked here by hand so it stays RESULT-CRITICAL-checked anyway.
+EXTRA_PINS = {"tonic": "1.6.0"}
+
+
 def required_pins(path: Path) -> dict[str, str]:
-    """The `name==version` lines from requirements.txt. Comments and unpinned lines
-    are skipped -- only exact pins can be checked."""
-    pins: dict[str, str] = {}
+    """The `name==version` lines from requirements.txt, plus EXTRA_PINS above.
+    Comments and unpinned lines are skipped -- only exact pins can be checked."""
+    pins: dict[str, str] = dict(EXTRA_PINS)
     if not path.is_file():
         return pins
     for line in path.read_text(encoding="utf-8").splitlines():
