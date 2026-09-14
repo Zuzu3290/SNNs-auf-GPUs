@@ -6,20 +6,23 @@
 # ---------------------------------------------------------------------------
 # convolution: layer dimensions.
 #
-# sensor_h / sensor_w / in_channels are OVERWRITTEN at runtime by
-# Settings.apply_dataset_shape() from the selected dataset's registry entry, so the
-# values here are only the fallback for a standalone Settings() with no dataset picked.
-# The conv/pool numbers are the real architecture and are used as written.
+# ONLY the network internals live here. The INPUT SHAPE does not:
+#
+#   sensor_h, sensor_w, in_channels, num_classes  come from the dataset registry, via
+#   Settings.apply_dataset_shape(). They were listed here until they were removed,
+#   which was misleading -- every real run overwrote all four, so editing sensor_h to
+#   128 looked like a setting and changed nothing. cfg.SENSOR_H now raises if it is
+#   read before a dataset has been applied, instead of handing back a stale 34.
+#
+# The flattened width is not here either: it is DERIVED. Settings.compute_fc_in()
+# calculates it from the sensor and the sizes below, and frameworks/spiking_net.py
+# measures it with a real forward pass and raises if the two disagree.
 #
 # Architecture 12C5 - MP2 - 32C5 - MP2 - FC, from the snnTorch/Tonic N-MNIST tutorial.
-# The flattened width is NOT here: Settings.compute_fc_in() derives it by formula for
-# display, and frameworks/spiking_net.py measures it with a real forward pass and
-# raises if the two disagree.
+# Every key below is REQUIRED: a missing or misspelled one raises at startup rather
+# than falling back to a value buried in the code. See skeleton/strict.py.
 # ---------------------------------------------------------------------------
 convolution:
-  sensor_h:     34
-  sensor_w:     34
-  in_channels:  2
   conv1_out:    12
   conv1_kernel: 5
   conv2_out:    32

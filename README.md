@@ -51,6 +51,11 @@ All runtime parameters live in `SNN_module.yaml` at the project root:
 architecture, training schedule, dataset path, device, and data pipeline
 settings. No hardcoded values in source files.
 
+`output.save_checkpoint` (false by default) saves the trained model + optimizer
+to disk right after training, for reuse outside the run that produced it — see
+[HOW_TO_RUN.md](HOW_TO_RUN.md)'s "Before you run: do you want the trained model
+saved?" for the decision to make before running, and how to reload it elsewhere.
+
 ---
 
 ## Framework Backends

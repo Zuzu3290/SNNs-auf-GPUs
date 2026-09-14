@@ -49,6 +49,13 @@ class ModelInterface(ABC):
     def get_state(self) -> dict:
         """Return serialisable state for checkpointing via torch.save()."""
 
+    def load_state(self, state: dict) -> None:
+        """Restore model + optimizer from a get_state() payload (torch.load()'d by
+        the caller). Symmetric with get_state() -- works as-is for SNNModel, whose
+        state_dict/optimizer this reads back exactly as get_state() wrote them."""
+        self.load_state_dict(state["model_state_dict"])
+        self.optimizer.load_state_dict(state["optimizer_state_dict"])
+
     def tensor_format(self) -> str:
         """
         Tensor layout this model's forward() expects from the DataLoader.

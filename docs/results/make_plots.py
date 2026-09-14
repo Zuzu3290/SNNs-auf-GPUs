@@ -145,7 +145,6 @@ def main():
         plot_bar(results, "test_overall_accuracy", f"{args.dataset} — Test Accuracy", "Accuracy", "test_accuracy.png", scale=100)
         plot_bar(results, "test_energy_per_sample_pj", f"{args.dataset} — Energy per Sample (neuromorphic model)", "pJ / sample", "test_energy.png")
         plot_bar(results, "test_avg_latency_per_sample_ms", f"{args.dataset} — Inference Latency per Sample", "ms / sample", "test_latency.png")
-        plot_bar(results, "test_avg_firing_rate_hz", f"{args.dataset} — Average Firing Rate", "Hz", "test_firing_rate.png")
         if all(r.get("test_framework_ratio") is not None for r in results.values()):
             plot_bar(results, "test_framework_ratio",
                      f"{args.dataset} — Framework Ratio (input activity / output spikes)",

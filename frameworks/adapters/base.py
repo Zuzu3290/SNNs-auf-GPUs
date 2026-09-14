@@ -23,11 +23,56 @@ itself at the start of every forward pass rather than relying on a call site.
 """
 from __future__ import annotations
 
+import math
 from abc import abstractmethod
 from typing import Any
 
 import torch
 import torch.nn as nn
+
+MISMATCH = "<-- MISMATCH: config asked"
+
+
+def scalar(value: Any) -> Any:
+    """A plain Python value for a tensor or Parameter; anything else unchanged."""
+    if isinstance(value, torch.Tensor):
+        return value.item() if value.numel() == 1 else value.tolist()
+    return value
+
+
+def _agree(live: Any, wanted: Any) -> bool:
+    """Whether two settings mean the same thing. Floats compare with a tolerance --
+    a config float becomes a float32 tensor inside the framework and comes back
+    slightly changed, which is not a mismatch."""
+    if isinstance(live, bool) or isinstance(wanted, bool):
+        return bool(live) == bool(wanted)
+    if isinstance(live, (int, float)) and isinstance(wanted, (int, float)):
+        if math.isnan(live) or math.isnan(wanted):
+            return math.isnan(live) and math.isnan(wanted)
+        if math.isinf(live) or math.isinf(wanted):
+            return live == wanted          # inf == inf, and inf != -inf
+        return math.isclose(live, wanted, rel_tol=1e-6, abs_tol=1e-9)
+    return live == wanted
+
+
+def reconcile(live: Any, wanted: Any, *, agrees: bool | None = None) -> Any:
+    """The value the BUILT module holds, flagged when the config asked for another.
+
+    describe() reports the module rather than the config because a config value is only
+    a REQUEST. A framework can rename a constructor argument between versions, accept
+    one and ignore it, or clamp it on the way in -- and a report that echoed the request
+    would look perfectly correct in all three cases. Reading the object back is the only
+    way that class of failure becomes visible, and these numbers are what the training
+    run will actually use.
+
+    `agrees` overrides the comparison where the two sides are spelled differently by
+    nature: the config says `multi`, the module holds `MultiSpike`, and only the
+    adapter's own lookup table knows those name one thing.
+    """
+    live = scalar(live)
+    if agrees is None:
+        agrees = _agree(live, scalar(wanted))
+    return live if agrees else f"{live}   {MISMATCH} {wanted!r}"
 
 
 class BaseLIF(nn.Module):

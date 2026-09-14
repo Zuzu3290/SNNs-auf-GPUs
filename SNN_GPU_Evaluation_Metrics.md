@@ -51,32 +51,20 @@ now appears as one block immediately after training completes.
 
 | Metric | Definition | Formula |
 |---|---|---|
-| **Spike rate (firing frequency)** | Average number of spikes emitted per neuron per unit time (or per inference window) | `total_spikes / (num_neurons × T)`, in Hz or spikes/sample |
+| **Spike rate** | Average number of spikes emitted per neuron per timestep, over the inference window | `total_spikes / (num_neurons × T)`, unit-free (spikes/neuron/timestep) |
 | **Spike ratio (network-wide sparsity)** | Fraction of neurons that are active (fire at least once, or fraction of possible spike-events that actually occur) across the *whole* network over an inference window | `active_neuron_events / total_possible_neuron_events` |
 
 **Why we track them:** These are the metrics that are unique to SNNs and have no ANN equivalent — they're the direct evidence that the network is exploiting temporal/event-driven sparsity rather than behaving like a disguised dense ANN. A network that fires on nearly every timestep isn't gaining anything from the spiking paradigm; it's paying SNN training cost for ANN-level density. Firing rate is also diagnostic of training pathologies (dead neurons if it's near 0, saturating/ANN-like behavior if it's near 1).
 
 **Caveat:** Spike rate and spike ratio are *proxies*, not the same thing as energy — see §2.4. A network can have low average firing rate but concentrate spikes in a few very fan-out-heavy layers, which dominates real energy cost.
 
-**Report `spikes_per_neuron_per_inference` as the headline, not Hz.** Hz requires knowing how much *real time* one sample spans, and that is often not knowable: with `n_time_bins` framing a sample is cut into T bins covering a whole recording of unspecified length. `spikes_per_neuron_per_inference = spike_rate × T` needs no time unit, cannot be wrong, and is the unit the SNN literature reports — so it is directly comparable with published figures.
-
-Hz is derived only where a real per-sample duration exists:
-
-| framing | window |
-|---|---|
-| `framing.sample_duration_us` stated | that value |
-| `time_window` framing | `time_window_ms × T` |
-| temporal slicing **by time** | the slice duration |
-| `n_time_bins` with nothing stated | **not knowable** — Hz is reported as unavailable |
-| temporal slicing **by event count** | **not knowable** — a fixed event count spans a variable time |
-
-`learning/utilities.py`'s `firing_window_seconds()` implements exactly that table and returns `None` for the last two rows rather than substituting a default. This is deliberate: an earlier version read a config attribute that did not exist, so `getattr` silently supplied 15 ms and *every* published Hz figure was ≈20× too high on N-MNIST (real window ≈300 ms). Because it was a constant factor applied to every framework, relative comparisons survived and the error was invisible — which is precisely why the fallback is now "report nothing" rather than "report a default".
+**Report `spikes_per_neuron_per_inference` as the headline, not Hz.** Event-driven data (a DVS camera, or any spike train derived from one) has no characteristic real-world frequency the way a clocked signal does, so converting a spike count into Hz manufactures a unit the underlying data never had — and a plain average across neurons also hides that some fire heavily while others stay silent. `spikes_per_neuron_per_inference = spike_rate × T` needs no time unit, cannot be wrong, and is the unit the SNN literature reports — so it is directly comparable with published figures. This project does not compute or report a Hz figure anywhere.
 
 #### Inter-Spike Interval variability — CV(ISI)
 
-Implemented in `learning/utilities.py`'s `compute_cv_isi()`, called from the
-deferred end-of-run report in `SNNTrainer._finalize_epoch_reports()` (one
-value per epoch, last batch / sample 0) and `SNNTester.run()` (one value for
+Implemented in `learning/utilities.py`'s `compute_cv_isi()`, called from
+`SNNTrainer.finalize_one_epoch_report()` immediately after each epoch finishes
+(one value per epoch, last batch / sample 0) and `SNNTester.run()` (one value for
 the whole test pass, last batch / sample 0).
 
 | Metric | Definition | Formula |
@@ -361,8 +349,8 @@ else:
 ```
 See `SNNTrainer._timed()` / `SNNTester._timed()` in `learning/training.py` /
 `learning/inference.py` for the context-manager version actually used, and
-`SNNTrainer._finalize_epoch_reports()` for where `elapsed_time()` is called
-in bulk, once, after training finishes.
+`SNNTrainer.train()` for where `elapsed_time()` is read back once per epoch
+boundary, not per iteration.
 
 For a per-layer breakdown (which layer/timestep dominates the backward sweep), register a full backward hook on each module and timestamp when its grad arrives:
 ```python
@@ -421,7 +409,6 @@ Report this SynOps-based estimate *alongside* (not instead of) the directly-meas
 | Loss (final epoch, train / val) | |
 | **Spikes / neuron / inference** (rate × T) — the headline sparsity figure | |
 | Mean spike rate (per neuron per timestep) | |
-| Firing rate (Hz) — *only if a real sample duration is known; else "n/a"* | |
 | Network-wide spike ratio | |
 | Timesteps (T) | |
 | Credit-assignment algorithm (BPTT+SG / e-prop / FPTT / SLTT / other) | |

@@ -8,13 +8,16 @@ from skeleton.snn_logging import configure_logging
 from skeleton.seeding import (
     param_report, seed_everything, seed_model_init, shared_weight_fingerprint,
 )
-from skeleton.results import write_results
+from skeleton.results import make_run_id, write_results
 from skeleton.results_collect import build_epoch_rows, build_layer_rows, build_run_row
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder, resolve_dataset_entry
 from learning.robustness import AdversarialEvaluator
-from learning.utilities import calibrate_batch_size, select_inference_mode, safe_empty_cache
+from learning.utilities import (
+    calibrate_batch_size, collect_single_samples, measure_latency,
+    safe_empty_cache, select_inference_mode,
+)
 
 # module path, class name -- imported dynamically below, only for cfg.FRAMEWORK.
 # DataLoader worker processes (Windows spawn re-imports this whole file) never
@@ -41,7 +44,7 @@ def parse_args():
         description="Train and evaluate one SNN framework on one event dataset.",
         epilog="examples:\n"
                "  python learning/main.py\n"
-               "  python learning/main.py --config config/ex2.yaml --experiment ex2 "
+               "  python learning/main.py --config experiments/ex2/config.yaml --experiment ex2 "
                "--framework sinabs --seed 1\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -85,7 +88,7 @@ if __name__ == "__main__":
     if cfg.CALIBRATE_BATCH_SIZE:
         cfg.BATCH_SIZE = calibrate_batch_size(ModelClass, cfg, device, timesteps=wf.N_TIME_BINS,
                                                data_vram_fraction=wf.BATCH_VRAM_FRACTION, max_batch_size=wf.MAX_BATCH_SIZE,
-                                               band_min=wf.BATCH_VRAM_BAND_MIN, band_max=wf.BATCH_VRAM_BAND_MAX)
+                                               band_min=wf.BATCH_VRAM_BAND_MIN)
 
     # Hardcoded on purpose, NOT a config key: background CPU/GPU utilization and power
     # sampling is a diagnostic, always wanted on a real run. Set False here to disable.
@@ -120,21 +123,60 @@ if __name__ == "__main__":
     print(f"  weight fingerprint : {params['shared_fingerprint']}   "
           f"({params['total_trainable']} trainable params)")
     print(f"\n  Model backend  : {cfg.FRAMEWORK.upper()}")
-    cfg.display()
-
     results_dir, _, plots_dir = run_info["results_dir"], run_info["equivalence_dir"], run_info["plots_dir"]
-    results_dir.mkdir(parents=True, exist_ok=True)
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    trainer = SNNTrainer(model, train_loader, cfg, device)
-    results = trainer.train(csv_path=str(results_dir / "training_results.csv"))
-    print("\n Training complete!")
-    print(f"  Final loss      : {results['loss_history'][-1]:.4f}")
-    print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}")
-    print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}")
 
-    trainer.plot_training(save_dir=str(plots_dir))
-    trainer.plot_iteration_metrics(save_dir=str(plots_dir))
-    trainer.plot_raster(save_dir=str(plots_dir))
+    # ---- one folder per run, for everything with a fixed filename -----------------
+    # training_results.csv, batch_metrics.csv, test.csv and the seven diagnostic PNGs
+    # are all named without the framework or seed in them, so four frameworks writing
+    # into one experiment folder would leave only the last one's files. Giving each run
+    # its own subfolder keyed by run_id fixes that, and because the SAME run_id goes
+    # into the runs.csv row, any figure can be traced back to the row that describes it.
+    #
+    # runs.csv / epochs.csv / layers.csv stay at the TOP of results_dir: they are
+    # append-only across runs, which is the whole point of them.
+    #
+    # Only when --experiment routed the output. Without it nothing is nested and the
+    # original ./outputs layout is untouched.
+    run_id = make_run_id(cfg.FRAMEWORK, cfg.SEED)
+    run_results_dir = (results_dir / run_id) if run_info["routed"] else results_dir
+    run_plots_dir = (plots_dir / run_id) if run_info["routed"] else plots_dir
+    for directory in (results_dir, run_results_dir, run_plots_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    if run_info["routed"]:
+        print(f"  run_id         : {run_id}   -> {run_results_dir}")
+
+    # After the run directories exist, so the OUTPUT section can name the paths this
+    # run will actually write to rather than the config's unrouted defaults.
+    cfg.display(output_dirs={
+        "Results dir": run_results_dir,
+        "Plots dir":   run_plots_dir,
+        "Shared CSVs": f"{results_dir}   (runs.csv, epochs.csv, layers.csv)",
+    } if run_info["routed"] else None)
+
+    trainer = SNNTrainer(model, train_loader, cfg, device)
+    results = trainer.train(csv_path=str(run_results_dir / "training_results.csv"))
+    # The last EPOCH, not the last batch. loss_history/accuracy_history are per-BATCH
+    # series, so [-1] was one batch of 256 samples -- noisy, and it disagreed with the
+    # "Epoch 5/5" block printed directly above it (0.9414 against 93.23%) for no reason
+    # a reader could see. These now restate the final epoch, which is also what
+    # epochs.csv and runs.csv record.
+    print("\n Training complete!")
+    final_epoch = results["epoch_log"][-1] if results.get("epoch_log") else None
+    if final_epoch:
+        print(f"  Final loss      : {final_epoch['train_loss']:.4f}   (epoch "
+              f"{final_epoch['epoch']} mean)")
+        print(f"  Final accuracy  : {final_epoch['train_accuracy']:.4f}   (epoch "
+              f"{final_epoch['epoch']} mean)")
+        print(f"  Final spike rate: {final_epoch['spike_rate']:.4f}   (epoch "
+              f"{final_epoch['epoch']} mean)")
+    else:
+        print(f"  Final loss      : {results['loss_history'][-1]:.4f}   (last batch)")
+        print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}   (last batch)")
+        print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}   (last batch)")
+
+    trainer.plot_training(save_dir=str(run_plots_dir))
+    trainer.plot_iteration_metrics(save_dir=str(run_plots_dir))
+    trainer.plot_raster(save_dir=str(run_plots_dir))
 
     # Copied out BEFORE the trainer is dropped below: epoch_log is the source for
     # epochs.csv, and the last activity snapshot is the free per-layer spike record
@@ -149,17 +191,22 @@ if __name__ == "__main__":
     del trainer, train_loader
     safe_empty_cache()
 
+    # Right at the train -> inference boundary, on the just-trained model, before
+    # inference starts touching it (eval_mode() etc.) -- output.save_checkpoint in
+    # SNN_module.yaml, opt-in and false by default (real disk usage every run
+    # doesn't need). Load back with model.load_state(torch.load(path)).
+    if cfg.SAVE_CHECKPOINT:
+        checkpoint_path = run_results_dir / "model_checkpoint.pt"
+        torch.save(model.get_state(), checkpoint_path)
+        print(f"  Checkpoint     : {checkpoint_path}")
+
     visualize = select_inference_mode()
     tester       = SNNTester(model, test_loader, cfg, device, visualize=visualize)
-    test_results = tester.run(csv_path=str(results_dir / "test.csv"))
+    test_results = tester.run(csv_path=str(run_results_dir / "test.csv"))
     print("\n Testing complete!")
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
     print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")
     print(f"  Spikes/neuron   : {test_results['avg_spikes_per_neuron_per_inference']:.4f} per inference")
-    if test_results["avg_firing_rate_hz"] is not None:
-        print(f"  Avg Firing Rate : {test_results['avg_firing_rate_hz']:.2f} Hz")
-    else:
-        print("  Avg Firing Rate : n/a -- set framing.sample_duration_us for Hz")
 
     # ------------------------------------------------------------------------------
     # Results, in the schema the SNNs_2 plotting layer reads (runs/epochs/layers.csv).
@@ -168,6 +215,22 @@ if __name__ == "__main__":
     # again with a different seed -- accumulates into a single comparable table. The
     # number of seeds per framework does not have to match.
     # ------------------------------------------------------------------------------
+    # ---- batch-size-1 latency, its own untimed pass -------------------------------
+    # Separate from the batched test above because it answers a different question:
+    # "one event arrives, how long until the answer is ready" (MLPerf Single-Stream),
+    # not "how much wall-clock does each sample cost at this batch size". Dividing a
+    # batch time by the batch size gives the second and is often mistaken for the first.
+    latency = None
+    if cfg.LATENCY_SAMPLES > 0:
+        try:
+            singles = collect_single_samples(test_loader, device, cfg.LATENCY_SAMPLES)
+            latency = measure_latency(model, singles, device)
+            print(f"\n  latency (bs=1)  : median {latency['latency_ms']:.2f} ms   "
+                  f"p90 {latency['latency_p90_ms']:.2f} ms   "
+                  f"({latency['latency_samples']} samples)")
+        except Exception as exc:  # a diagnostic must not cost a finished run
+            print(f"\n  !! latency (bs=1) not measured: {type(exc).__name__}: {exc}")
+
     try:
         run_row = build_run_row(
             cfg, wf, model, run_info,
@@ -175,6 +238,9 @@ if __name__ == "__main__":
             epoch_log=epoch_log,
             params=params,
             timesteps=test_results.get("timesteps"), num_workers=num_workers,
+            latency=latency,
+            # The SAME id the run folder is named after, so a figure maps to its row.
+            run_id=run_id,
             notes=" ".join(f"{k}={v}" for k, v in (run_info.get("overrides") or {}).items()),
         )
         paths = write_results(
@@ -199,4 +265,6 @@ if __name__ == "__main__":
 
     if RUN_ADVERSARIAL_EVAL:
         evaluator = AdversarialEvaluator(model, test_loader, cfg, device)
-        evaluator.evaluate()
+        # Routed like every other artefact. Called bare it would default to
+        # ./outputs/data/ and be left behind on a Colab runtime.
+        evaluator.evaluate(csv_path=str(run_results_dir / "adversarial_robustness.csv"))

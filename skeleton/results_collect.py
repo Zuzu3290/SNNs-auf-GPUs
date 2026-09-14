@@ -28,6 +28,20 @@ def _last(seq) -> Any:
     return seq[-1] if seq else None
 
 
+def _peak_over_epochs(epoch_log: list[dict], key: str) -> float | None:
+    """The largest per-epoch value of `key`, in MB.
+
+    SNNTrainer records GPU memory once per epoch, so the run-level peak is the max over
+    those samples. Reported rather than left empty: these two columns were hardcoded
+    None with a comment saying this pipeline only measures the inference phase, which
+    stopped being true once the per-epoch GPU report was added -- the numbers were
+    already in epoch_log and were being printed every epoch.
+    """
+    values = [row.get(key) for row in (epoch_log or [])]
+    numeric = [float(v) for v in values if isinstance(v, (int, float))]
+    return max(numeric) * GB_TO_MB if numeric else None
+
+
 def build_epoch_rows(epoch_log: list[dict]) -> list[dict]:
     """One row per epoch, from SNNTrainer.epoch_log.
 
@@ -118,8 +132,14 @@ def build_run_row(
     num_workers: int | None = None,
     notes: str = "",
     run_id: str | None = None,
+    latency: dict | None = None,
 ) -> dict:
-    """One row summarising the whole run."""
+    """One row summarising the whole run.
+
+    `latency` is utilities.measure_latency()'s dict -- REAL batch-size-1 timings. None
+    leaves those three columns empty rather than filling them with the amortised
+    per-sample figure, which is a different measurement (see below).
+    """
     framework = cfg.FRAMEWORK
     seed = getattr(cfg, "SEED", None)
 
@@ -145,7 +165,6 @@ def build_run_row(
         "time_steps": timesteps if timesteps is not None else getattr(wf, "N_TIME_BINS", None),
         "batch_size": getattr(cfg, "BATCH_SIZE", None),
         "num_workers": num_workers,
-        "binarize": getattr(wf, "BINARIZE", None),
         "denoise_us": getattr(wf, "DENOISE_FILTER_TIME_US", None),
         "epochs": getattr(cfg, "EPOCHS", None),
         "optimizer": getattr(cfg, "OPTIMIZER", None),
@@ -164,17 +183,32 @@ def build_run_row(
         "train_time_s": train_time,
         "train_time_per_epoch_s": (train_time / len(epoch_log)) if train_time and epoch_log else None,
         "inference_throughput_samples_per_s": test_results.get("throughput_samples_per_s"),
-        "inference_latency_bs1_ms": test_results.get("median_latency_per_sample_ms"),
-        "inference_latency_bs1_mean_ms": test_results.get("avg_latency_per_sample_ms"),
-        "inference_latency_bs1_p90_ms": test_results.get("p90_latency_per_sample_ms"),
+        # REAL batch-size-1 measurements, from utilities.measure_latency -- one sample at
+        # a time with a synchronise around each, the MLPerf Single-Stream convention.
+        #
+        # These used to be filled from the test pass's per-sample figures, which are a
+        # BATCH time divided by the batch size: throughput under batching, not latency.
+        # It is systematically optimistic (a single arriving event cannot use that
+        # parallelism) and its p90 describes batch-to-batch variation, since every sample
+        # in a batch carries the same divided value. Same column names as SNNs_2, and now
+        # the same measurement behind them.
+        "inference_latency_bs1_ms": (latency or {}).get("latency_ms"),
+        "inference_latency_bs1_mean_ms": (latency or {}).get("latency_mean_ms"),
+        "inference_latency_bs1_p90_ms": (latency or {}).get("latency_p90_ms"),
 
         "spike_rate_pct": _pct(_last(train_results.get("spike_rate_history") or [])),
 
-        # Only a peak for the inference phase is reported by this pipeline, and in GB.
-        "peak_memory_train_mb": None,
+        # Peaks for BOTH phases, in MB. The training figures are the max across the
+        # per-epoch samples in epoch_log; the inference ones come from the test run.
+        #
+        # peak_memory_*  = GPU memory in use, read from NVML
+        # peak_reserved_* = PyTorch's caching-allocator high-water mark, which includes
+        #                   memory held but not currently in use, so it is the larger
+        #                   number and the one that decides whether a batch size fits.
+        "peak_memory_train_mb": _peak_over_epochs(epoch_log, "gpu_mem_peak_gb"),
         "peak_memory_infer_mb": (test_results.get("gpu_mem_peak_gb") or 0) * GB_TO_MB
                                  if test_results.get("gpu_mem_peak_gb") else None,
-        "peak_reserved_train_mb": None,
+        "peak_reserved_train_mb": _peak_over_epochs(epoch_log, "max_memory_reserved_gb"),
         "peak_reserved_infer_mb": (test_results.get("max_memory_reserved_gb") or 0) * GB_TO_MB
                                    if test_results.get("max_memory_reserved_gb") else None,
 

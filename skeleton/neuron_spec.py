@@ -14,10 +14,18 @@ a silent default costs a whole experiment.
 These helpers deliberately do NOT validate whether a value is sensible. The config
 owner decides the science; this module only guarantees the value was stated explicitly
 and has the right type.
+
+The same rule now covers every other config block through skeleton/strict.py, which is
+where the type checks below actually live -- kept in one place so the two cannot drift
+into reporting the same mistake differently. This module remains the neuron-specific
+face of it: the `neuron.` message prefix, the framework sub-block lookup, and the
+surrogate pair.
 """
 from __future__ import annotations
 
 from typing import Any, Sequence
+
+from skeleton.strict import check_bool, check_choice, check_float, check_int
 
 
 class NeuronSpecError(Exception):
@@ -60,42 +68,19 @@ def _get(d: dict, path: str) -> Any:
 
 
 def require_float(d: dict, path: str) -> float:
-    value = _get(d, path)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise NeuronSpecError(
-            f"neuron.{path} must be a number, got {value!r} ({type(value).__name__}). "
-            "A quoted YAML value is a string -- unquote it."
-        )
-    return float(value)
+    return check_float(_get(d, path), f"neuron.{path}", NeuronSpecError)
 
 
 def require_int(d: dict, path: str) -> int:
-    value = _get(d, path)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise NeuronSpecError(
-            f"neuron.{path} must be a whole number, got {value!r} "
-            f"({type(value).__name__}). A quoted YAML value is a string -- unquote it."
-        )
-    return value
+    return check_int(_get(d, path), f"neuron.{path}", NeuronSpecError)
 
 
 def require_bool(d: dict, path: str) -> bool:
-    value = _get(d, path)
-    if not isinstance(value, bool):
-        raise NeuronSpecError(
-            f"neuron.{path} must be true or false, got {value!r}. YAML reads bare "
-            "yes/no/on/off as booleans but quoted 'true' as a string -- unquote it."
-        )
-    return value
+    return check_bool(_get(d, path), f"neuron.{path}", NeuronSpecError)
 
 
 def require_choice(d: dict, path: str, allowed: Sequence[str]) -> str:
-    value = _get(d, path)
-    if value not in allowed:
-        raise NeuronSpecError(
-            f"neuron.{path} must be one of {sorted(allowed)}, got {value!r}"
-        )
-    return str(value)
+    return check_choice(_get(d, path), f"neuron.{path}", allowed, NeuronSpecError)
 
 
 def optional_float(d: dict, path: str) -> float | None:

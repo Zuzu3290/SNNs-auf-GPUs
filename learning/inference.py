@@ -9,10 +9,9 @@ import numpy as np
 from skeleton import Settings
 from learning.training import aggregate_spike_output
 from learning.utilities import (
-    compute_cv_isi, firing_window_seconds, measure_dense_macs,
+    compute_cv_isi, measure_dense_macs,
     spikes_per_neuron_per_inference,
 )
-from skeleton import WorkflowSettings
 from event_data_workflow.system_monitor import PipelineMonitor, monitor
 import matplotlib.pyplot as plt
 
@@ -113,13 +112,6 @@ class SNNTester:
         monitor.enter_phase("testing")
         self.model.eval_mode()
 
-        # None when the real per-sample duration is not knowable. Previously this read
-        # `TEMPORAL_SLICE_DURATION_US`, which is defined nowhere -- the real name has no
-        # `_US` -- so getattr silently returned its 15000 default and every Hz figure
-        # below was computed against a fixed 15 ms window. With n_time_bins framing a
-        # sample spans the whole recording (~300 ms on N-MNIST), so the numbers were
-        # roughly 20x too high. See utilities.firing_window_seconds.
-        window_s = firing_window_seconds(self.cfg, WorkflowSettings(config=self.cfg.config))
         # T is read from the DATA below, per batch. It used to come from a
         # `cfg.TIMESTEPS` that is also defined nowhere, so it was always the 25 in the
         # getattr default regardless of framing.n_time_bins.
@@ -230,8 +222,6 @@ class SNNTester:
             energy_pj       = batch_spikes * ENERGY_PER_SPIKE_PJ
             # Time-unit free, always valid.
             spikes_per_inference = spikes_per_neuron_per_inference(spike_rate, T)
-            # None when the real per-sample duration is not knowable.
-            firing_rate_hz  = (spikes_per_inference / window_s) if window_s else None
 
             total_spikes       += batch_spikes
             total_input_spikes += batch_input_spikes
@@ -257,8 +247,6 @@ class SNNTester:
                 "possible_spikes":       possible_spikes,
                 "spike_rate":            round(spike_rate, 4),
                 "spikes_per_neuron_per_inference": round(spikes_per_inference, 4),
-                "firing_rate_hz":        (round(firing_rate_hz, 2)
-                                          if firing_rate_hz is not None else None),
                 "latency_ms":            round(latency_ms, 3),
                 "latency_per_sample_ms": round(latency_ms / B, 3),
                 "energy_pJ":             round(energy_pj, 2),
@@ -266,15 +254,10 @@ class SNNTester:
                 "credit_assignment":     credit_assignment,
             })
 
-            # firing_rate_hz is None whenever the real per-sample duration isn't
-            # knowable (see firing_window_seconds) -- e.g. time_window framing with no
-            # framing.sample_duration_us stated. Shown as "n/a" rather than crashing on
-            # a None format, or guessing a duration to fill the slot.
-            hz_display = f"{firing_rate_hz:.1f} Hz" if firing_rate_hz is not None else "n/a"
             print(f"  Batch {rec['batch_idx']:>3} | "
                   f"Acc: {acc * 100:.2f}% | "
                   f"Spikes: {batch_spikes:>6} | "
-                  f"Rate: {spike_rate:.3f} ({hz_display}) | "
+                  f"Rate: {spike_rate:.3f} | "
                   f"Latency: {latency_ms:.1f}ms | "
                   f"Energy: {energy_pj:.1f}pJ")
 
@@ -297,10 +280,15 @@ class SNNTester:
         # batches actually run. This used to divide by (n_batches x 25 x num_classes):
         # a hardcoded 25 timesteps regardless of framing, and no batch dimension at all.
         avg_spike_rate         = (total_spikes / total_possible_spikes) if total_possible_spikes else 0.0
+        # MEASURED from the data, per batch -- not framing.n_time_bins. It is carried
+        # into the summary below so runs.csv can record the T that RAN rather than the T
+        # that was asked for. Those disagreed once already: a run framed at 16 was
+        # recorded as 20 because this value never left this function, and time_steps
+        # fell back to the config. The column that should have caught the bug was
+        # reading from the same place the bug was in.
         mean_timesteps         = (sum(r["timesteps"] for r in self.batch_log) / len(self.batch_log)
                                   if self.batch_log else 0)
         avg_spikes_per_inference = spikes_per_neuron_per_inference(avg_spike_rate, mean_timesteps)
-        avg_firing_rate_hz     = (avg_spikes_per_inference / window_s) if window_s else None
         energy_per_sample_pj   = total_energy_pj / total_samples if total_samples > 0 else 0.0
         synops_energy_per_sample_pj = total_synops_pj / total_samples if total_samples > 0 else 0.0
         class_metrics          = self.class_metrics(cm)
@@ -318,11 +306,6 @@ class SNNTester:
         print(f"  • Avg Input / Sample      : {avg_input_spikes_per_sample:.2f}")
         print(f"  • Framework Ratio (in/out): {framework_ratio:.3f}" if framework_ratio is not None else "  • Framework Ratio (in/out): N/A (zero output spikes)")
         print(f"  • Avg Spikes/neuron       : {avg_spikes_per_inference:.4f} per inference  (rate x T)")
-        if avg_firing_rate_hz is not None:
-            print(f"  • Avg Firing Rate         : {avg_firing_rate_hz:.2f} Hz  (over a {window_s * 1000:.1f} ms sample)")
-        else:
-            print("  • Avg Firing Rate         : n/a -- real per-sample duration unknown. "
-                  "Set framing.sample_duration_us to get Hz.")
         print(f"  • CV_ISI (network-wide)   : {cv_isi_mean:.3f}  (last batch)")
         print(f"  • Avg Batch Latency       : {avg_latency_ms:.2f} ms")
         print(f"  • Avg Latency / Sample    : {avg_latency_per_sample:.3f} ms")
@@ -373,7 +356,6 @@ class SNNTester:
             "framework_ratio":           framework_ratio,
             "avg_spikes_per_sample":     avg_spikes_per_sample,
             "avg_spikes_per_neuron_per_inference": avg_spikes_per_inference,
-            "avg_firing_rate_hz":        avg_firing_rate_hz,
             "cv_isi_mean":               cv_isi_mean,
             "avg_latency_ms":            avg_latency_ms,
             "avg_latency_per_sample_ms": avg_latency_per_sample,
@@ -394,6 +376,9 @@ class SNNTester:
             "gpu_mem_peak_gb":           gpu.get("gpu_mem_peak_gb") if gpu else None,
             "gpu_util_avg_pct":          gpu.get("gpu_util_avg_pct") if gpu else None,
             "max_memory_reserved_gb":    gpu_diag.get("max_memory_reserved_gb"),
+            # The real BPTT unroll length, averaged over the test batches. See
+            # mean_timesteps above for why this is reported rather than the config value.
+            "timesteps":                 mean_timesteps or None,
             "gpu_temp_c":                gpu_diag.get("gpu_temp_c"),
             "sm_clock_mhz":              gpu_diag.get("sm_clock_mhz"),
             "mem_clock_mhz":             gpu_diag.get("mem_clock_mhz"),

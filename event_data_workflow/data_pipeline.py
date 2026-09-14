@@ -27,10 +27,10 @@ from skeleton import WorkflowSettings
 from skeleton.seeding import split_generator
 from .system_monitor import monitor
 from .cache_engine import (
-    AdaptiveCacheController, ClampToBinary, ComposedTransform, FixedToFrame,
-    PreTransformedDataset, cache_identity, compose_transforms, measure_event_bytes,
+    AdaptiveCacheController, ComposedTransform, FixedToFrame,
+    PreTransformedDataset, cache_identity, measure_event_bytes,
 )
-from .fast_denoise import FastDenoise
+from .fast_preprocessing import FastDenoise
 from .dataset_registry import resolve_dataset_entry
 from .prefetch import AsyncGPUPrefetcher, CudaPrefetcher
 
@@ -179,6 +179,20 @@ class PrefetchedLoader:
         # throttles the GPU below what `depth` was chosen to sustain.
         self.queue_size = max(1, queue_size if queue_size is not None else self.depth)
         self.current: CudaPrefetcher | None = None
+        # ONE copy stream for this loader's whole life, not one per epoch.
+        #
+        # __iter__ below builds a fresh CudaPrefetcher every pass, and that used to
+        # build a fresh torch.cuda.Stream with it. PyTorch's caching allocator pools
+        # free blocks PER STREAM, so each epoch allocated its prefetch queue from CUDA
+        # again while the previous epoch's queue stayed free-but-unreachable: reserved
+        # memory climbed by one queue per epoch (measured: +1.48 GB, T=20/batch 256/
+        # depth 32) with memory actually in use flat. See CudaPrefetcher.__init__.
+        #
+        # A stream is a long-lived handle, not per-iteration state -- nothing about
+        # re-iterating invalidates it, and stop() only ends the CPU-side feeder thread.
+        # Only one iterator is ever live per loader (see __iter__), so nothing else can
+        # be issuing copies on it at the same time.
+        self.stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
 
     def __len__(self) -> int:
         return len(self.loader)
@@ -187,7 +201,8 @@ class PrefetchedLoader:
         if self.current is not None:
             self.current.stop()
         async_stage = AsyncGPUPrefetcher(self.loader, queue_size=self.queue_size)
-        self.current = CudaPrefetcher(async_stage, self.device, depth=self.depth)
+        self.current = CudaPrefetcher(async_stage, self.device, depth=self.depth,
+                                      stream=self.stream)
         try:
             yield from self.current
         finally:
@@ -200,7 +215,17 @@ class NeuromorphicEncoder:
     def __init__(self, cfg: DatasetAwareConfig, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None):
 
         self.cfg = cfg
-        self.wf  = WorkflowSettings()
+        # cfg.config is the MERGED config -- the three base files with the experiment
+        # overlay already applied. Constructing WorkflowSettings() bare here re-read the
+        # base files from disk and threw the overlay away, so every framing, cache,
+        # augmentation, temporal_slicing and resource_policy key an experiment set was
+        # silently ignored by the data pipeline while the rest of the run honoured it.
+        #
+        # MEASURED: an ex2 run asking for framing.n_time_bins = 20 was framed at the
+        # base file's 16. Nothing in the output said so -- the batch-size calibration
+        # had already sized itself for T=20, so the two halves of the same run
+        # disagreed about the tensor shape.
+        self.wf  = WorkflowSettings(config=cfg.config)
 
         # Configure the shared SystemResourceMonitor once, early, now that
         # the run's device and cache path are both known — every consumer
@@ -335,30 +360,12 @@ class NeuromorphicEncoder:
         # train_augment is random, so it must run fresh every access rather
         # than get baked into a persistent cache — see determine_dataset_strategy.
         # Toggled via data_workflow.yaml's augmentation.random_rotation_enabled.
-        # binarize rides out of the cache with the augmentation, so toggling it needs no
-        # rebuild. Applied to BOTH splits -- test-time input must mean the same thing.
-        binarize = ClampToBinary() if self.wf.BINARIZE else None
         train_augment = torchvision.transforms.RandomRotation([-10, 10]) if self.wf.RANDOM_ROTATION_ENABLED else None
         logger.info(f"[PIPELINE] Random rotation augmentation: {'ENABLED' if train_augment is not None else 'DISABLED'}")
-        # binarize goes LAST, so it caps whatever the chain produced.
-        #
-        # CAVEAT, and it matters here specifically: ClampToBinary applies min(x, 1) -- a
-        # CLAMP, not a threshold. On the integer counts ToFrame emits that IS a binarize
-        # (0,1,5,8 -> 0,1,1,1). But rotation INTERPOLATES, so once train_augment is in the
-        # chain the values are already fractional and clamping leaves them fractional
-        # (0.37 stays 0.37); only values above 1 are touched. With both enabled the train
-        # input is therefore NOT a spike train, while the test split -- which gets no
-        # augmentation -- IS. That asymmetry between train and test is the real hazard.
-        #
-        # For a genuine 0/1 input: binarize true AND random_rotation_enabled false.
-        train_tf_steps = ([frame_tf, to_float32]
-                          + ([train_augment] if train_augment is not None else [])
-                          + ([binarize] if binarize is not None else []))
+        train_tf_steps = ([frame_tf, torch.from_numpy]
+                          + ([train_augment] if train_augment is not None else []))
         train_tf = transforms.Compose(train_tf_steps)
-        # The test split is not cached (see below), so binarize joins its transform chain
-        # directly. Applied to BOTH splits: test-time input must mean the same thing.
-        test_tf_steps = [frame_tf, to_float32] + ([binarize] if binarize is not None else [])
-        test_tf = ComposedTransform(test_tf_steps)
+        test_tf = frame_tf
 
         # Framing and denoising decide the cached BYTES, so they belong in the path.
         # Previously it was just <dataset>/<split>, so changing n_time_bins silently
@@ -394,7 +401,7 @@ class NeuromorphicEncoder:
             # augmentation out of the cached value (transform/live_transform split).
             train_data = controller.determine_dataset_strategy(
                 raw_train, transform=frame_tf,
-                live_transform=compose_transforms(train_augment, binarize),
+                live_transform=train_augment,
                 split=f"{dataset_prefix}/train", num_workers=worker_estimate,
                 manifest=self.cache_manifest)
             # Inference gets no cache and no adaptive sizing, deliberately -- caching earns its cost

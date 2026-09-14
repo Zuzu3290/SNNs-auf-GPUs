@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import io
+import pathlib
 import sys
 import tempfile
 from pathlib import Path
@@ -113,9 +114,9 @@ def test_check_network_single_framework_shows_shapes() -> None:
 
 def test_check_network_honours_the_overlay() -> None:
     code, out = run_script("check_network",
-                           ["--config", "config/ex2.yaml", "--framework", "sinabs"])
+                           ["--config", "experiments/ex2/config.yaml", "--framework", "sinabs"])
     suite.check("overlay run exits 0", code == 0, f"exit {code}")
-    suite.check("the banner names the overlay", "config/ex2.yaml" in out)
+    suite.check("the banner names the overlay", "experiments/ex2/config.yaml" in out)
     suite.check("the dataset came from the overlay, not a prompt", "N-MNIST" in out)
     suite.check("ex2's leak-free sinabs is reported", "inf" in out)
 
@@ -208,10 +209,16 @@ def test_equivalence_measures_but_does_not_judge() -> None:
     error. ex2 deliberately gives sinabs no leak, multi-spike and a subtract reset, so
     a large deviation IS the experiment's finding. It must be reported, and must not
     fail the run."""
-    code, out = run_script("equivalence_check", ["--config", "config/ex2.yaml"])
+    code, out = run_script("equivalence_check", ["--config", "experiments/ex2/config.yaml"])
     suite.check("a deliberately divergent config still exits 0", code == 0, f"exit {code}")
     suite.check("sinabs is reported as differing", "sinabs" in out and "differing" in out)
-    suite.check("the other three still agree", "6/8 framework-patterns" in out, out[-400:])
+    # ex2 moves ALL FOUR neurons to their own defaults, so only the reference agrees
+    # with itself -- 2 of 8 framework-patterns (torch, in both patterns). A wholesale
+    # divergence IS the result here, which is exactly why this script does not gate.
+    suite.check("every non-reference framework is reported as differing",
+                "2/8 framework-patterns" in out, out[-400:])
+    for framework in ("norse", "sj", "sinabs"):
+        suite.check(f"{framework} differs under ex2", f"{framework} (" in out)
     suite.check("it says the deviation may be the intended result",
                 "this IS the" in out or "deliberately varies" in out)
     suite.check("no PASS/FAIL verdict is issued", "GATE A3" not in out)
@@ -247,14 +254,14 @@ def test_main_parses_the_full_flag_set() -> None:
     from learning.main import parse_args
 
     saved = sys.argv
-    sys.argv = ["main.py", "--config", "config/ex2.yaml", "--experiment", "ex2",
+    sys.argv = ["main.py", "--config", "experiments/ex2/config.yaml", "--experiment", "ex2",
                 "--framework", "sinabs", "--seed", "3",
                 "--results-root", "/drive/runs", "--cache-root", "/content/cache"]
     try:
         args = parse_args()
     finally:
         sys.argv = saved
-    suite.check("--config parsed", args.config == "config/ex2.yaml")
+    suite.check("--config parsed", args.config == "experiments/ex2/config.yaml")
     suite.check("--experiment parsed", args.experiment == "ex2")
     suite.check("--framework parsed", args.framework == "sinabs")
     suite.check("--seed parsed as an int", args.seed == 3 and isinstance(args.seed, int))
@@ -305,9 +312,13 @@ def test_each_script_advertises_exactly_the_flags_it_can_act_on() -> None:
                           "results_root", "cache_root"},
         "check_network": {"config", "framework", "seed", "experiment",
                           "all", "batch", "timesteps"},
-        # writes no files, so no results_root / cache_root; builds all four, so no
-        # framework; the poisson pattern carries its own seed, so no seed.
-        "equivalence_check": {"config", "experiment"},
+        # Writes FIGURES, so it takes results_root (they must be able to land on
+        # mounted Drive on Colab) and formats. No cache_root -- it touches no dataset.
+        # Builds all four, so no framework; the poisson pattern carries its own seed.
+        "equivalence_check": {"config", "experiment", "results_root", "formats"},
+        # Reads the environment and requirements.txt only. No config, no experiment,
+        # no roots -- it writes nothing and knows nothing about a run.
+        "check_env": {"strict"},
     }
     for module_name, flags in expected.items():
         module = importlib.import_module(module_name)
@@ -322,23 +333,150 @@ def test_each_script_advertises_exactly_the_flags_it_can_act_on() -> None:
                     f"extra {sorted(actual - flags)}, missing {sorted(flags - actual)}")
 
 
-def test_equivalence_check_has_no_output_roots() -> None:
-    """It writes nothing, so offering --results-root would be a flag that does nothing."""
-    for flag in ["--results-root", "--cache-root"]:
-        code, _ = run_script("equivalence_check", [flag, "/tmp/x"])
-        suite.check(f"equivalence_check rejects {flag}", code != 0, f"exit {code}")
+def test_equivalence_check_roots() -> None:
+    """It writes figures, so --results-root must work (Colab Drive). It reads no
+    dataset, so --cache-root must NOT exist."""
+    code, _ = run_script("equivalence_check", ["--cache-root", "/tmp/x"])
+    suite.check("equivalence_check rejects --cache-root", code != 0, f"exit {code}")
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        code, out = run_script("equivalence_check",
+                               ["--experiment", "extest", "--results-root", tmp])
+        suite.check("equivalence_check accepts --results-root with --experiment",
+                    code == 0, f"exit {code}")
+        written = list(pathlib.Path(tmp).rglob("EQ_*.png"))
+        suite.check("figures land under the given results root", len(written) == 2,
+                    f"{len(written)} figures: {[p.name for p in written]}")
+
+
+def test_equivalence_check_formats() -> None:
+    """PDF is vector, which a written report needs."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        code, _ = run_script("equivalence_check",
+                             ["--experiment", "extest", "--results-root", tmp,
+                              "--formats", "png,pdf"])
+        suite.check("a multi-format run succeeds", code == 0, f"exit {code}")
+        root = pathlib.Path(tmp)
+        suite.check("PNG written", len(list(root.rglob("EQ_*.png"))) == 2)
+        suite.check("PDF written", len(list(root.rglob("EQ_*.pdf"))) == 2)
 
 
 def test_check_network_has_no_output_roots() -> None:
+    """It writes nothing at all, so neither root should exist."""
     for flag in ["--results-root", "--cache-root"]:
         code, _ = run_script("check_network", [flag, "/tmp/x"])
         suite.check(f"check_network rejects {flag}", code != 0, f"exit {code}")
 
 
+def _banner_rows(output: str) -> dict[str, str]:
+    """The `  label   value` rows of the LEADING banner only, as a dict.
+
+    Scoped to the region between the banner's own two `===` rules. The neuron blocks
+    further down print `      framework   snntorch` in the same shape, so a parser that
+    just scanned indented lines would report a framework row the banner never printed.
+    """
+    lines = output.splitlines()
+    rules = [i for i, line in enumerate(lines) if set(line.strip()) == {"="} and line.strip()]
+    if len(rules) < 2:
+        return {}
+    rows = {}
+    for line in lines[rules[0] + 1:rules[1]]:
+        if not line.startswith("  "):
+            continue
+        parts = line[2:].split(None, 1)
+        if len(parts) == 2:
+            rows.setdefault(parts[0], parts[1].strip())
+    return rows
+
+
+def test_check_network_banner_claims_only_what_it_uses() -> None:
+    """A banner row is a claim about the run, and a wrong claim is worse than silence.
+
+    check_network builds on the CPU whatever `training.device` says (see the module
+    docstring: "no download, no GPU"), and under --all it builds EVERY framework rather
+    than cfg.FRAMEWORK. The `shape` row already names the dataset, with its size, class
+    count and provenance.
+    """
+    code, out = run_script("check_network", ["--config", "experiments/ex2/config.yaml", "--all"])
+    suite.check("--all still passes", code == 0, f"exit {code}")
+    rows = _banner_rows(out)
+    for absent in ("device", "dataset", "framework"):
+        suite.check(f"--all banner does not claim a {absent}", absent not in rows,
+                    f"found {absent}={rows.get(absent)!r}")
+    for present in ("config", "seed", "shape"):
+        suite.check(f"--all banner still states the {present}", present in rows)
+    suite.check("the shape row carries the dataset name", "N-MNIST" in rows.get("shape", ""))
+
+    # Without --all exactly one framework IS inspected, so naming it is correct.
+    code, out = run_script("check_network",
+                           ["--config", "experiments/ex2/config.yaml", "--framework", "sinabs"])
+    suite.check("single-framework run passes", code == 0, f"exit {code}")
+    rows = _banner_rows(out)
+    suite.check("without --all the framework IS named", rows.get("framework") == "sinabs",
+                f"got {rows.get('framework')!r}")
+    suite.check("device stays absent -- it is still CPU-only", "device" not in rows)
+
+
+def test_norse_warning_is_not_repeated_per_layer() -> None:
+    """ex2 selects norse's own 'super' surrogate, whose alpha norse 1.1.0 ignores. The
+    warning is worth printing; printing it once per LIF layer, four networks over, read
+    as a dozen separate problems."""
+    from frameworks.adapters import norse_lif
+
+    norse_lif.reset_alpha_warning()
+    _code, out = run_script("check_network",
+                            ["--config", "experiments/ex2/config.yaml", "--all"])
+    hits = out.count("IGNORES alpha")
+    suite.check("the whole --all run warns at most once", hits <= 1, f"{hits} times")
+    suite.check("torch's namedtuple pytree noise is filtered at the norse import",
+                "is a subclass of `collections.namedtuple`" not in out)
+
+
+def test_check_network_fails_when_a_neuron_drifts_from_its_config() -> None:
+    """The inline MISMATCH marker has to reach the exit code, or a CI step and a reader
+    skimming the last line would both call a broken neuron spec green."""
+    import torch
+
+    import frameworks.adapters.snntorch_lif as snntorch_lif
+
+    real_build = snntorch_lif.build_lif
+
+    def drifting(cfg):
+        lif = real_build(cfg)
+        lif.beta = torch.tensor(0.123)   # as if the constructor had ignored the argument
+        return lif
+
+    snntorch_lif.build_lif = drifting
+    try:
+        code, out = run_script("check_network",
+                               ["--config", "experiments/ex2/config.yaml", "--all"])
+    finally:
+        snntorch_lif.build_lif = real_build
+
+    suite.check("a drifted neuron fails the run", code != 0, f"exit {code}")
+    suite.check("the verdict names the neuron check",
+                "every neuron holds the value its config asked for" in out)
+    suite.check("OVERALL is FAIL", "OVERALL: FAIL" in out)
+    suite.check("the offending value is named", "torch.beta" in out, out[-600:])
+    suite.check("weights still pass -- only the neuron drifted",
+                "PASS  every framework starts from identical weights" in out)
+
+    # And the clean config must still pass, so the check above is not just noise.
+    code, out = run_script("check_network",
+                           ["--config", "experiments/ex2/config.yaml", "--all"])
+    suite.check("the unmodified config still passes", code == 0, f"exit {code}")
+    suite.check("both checks report PASS", out.count("  PASS  ") == 2, out[-400:])
+
+
 def main() -> int:
     return suite.run([
         test_each_script_advertises_exactly_the_flags_it_can_act_on,
-        test_equivalence_check_has_no_output_roots,
+        test_equivalence_check_roots,
+        test_equivalence_check_formats,
         test_check_network_has_no_output_roots,
         test_shape_without_download_from_the_registry,
         test_shape_falls_back_to_the_convolution_block,
@@ -346,6 +484,9 @@ def main() -> int:
         test_check_network_all_passes_and_reports,
         test_check_network_single_framework_shows_shapes,
         test_check_network_honours_the_overlay,
+        test_check_network_banner_claims_only_what_it_uses,
+        test_norse_warning_is_not_repeated_per_layer,
+        test_check_network_fails_when_a_neuron_drifts_from_its_config,
         test_equivalence_pins_cpu,
         test_equivalence_takes_no_framework_or_seed_flag,
         test_input_patterns_stay_below_threshold,

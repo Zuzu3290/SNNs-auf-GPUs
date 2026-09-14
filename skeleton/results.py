@@ -53,7 +53,7 @@ RUN_COLUMNS: list[str] = [
     "schema_version", "run_id", "timestamp", "framework", "seed",
     "config_path", "config_hash",
     # setup
-    "dataset", "time_steps", "batch_size", "num_workers", "binarize",
+    "dataset", "time_steps", "batch_size", "num_workers",
     "denoise_us", "epochs", "optimizer", "lr", "surrogate",
     # integrity -- the fairness evidence travels WITH the numbers
     "trainable_params", "weight_fingerprint",

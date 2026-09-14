@@ -6,7 +6,7 @@ from typing import Any
 import torch
 from spikingjelly.activation_based import neuron, surrogate
 
-from frameworks.adapters.base import BaseLIF
+from frameworks.adapters.base import BaseLIF, reconcile
 from skeleton.neuron_spec import (
     neuron_cfg, require_bool, require_choice, require_float, require_surrogate,
 )
@@ -77,16 +77,32 @@ class SpikingJellyLIF(BaseLIF):
         return v if isinstance(v, torch.Tensor) else None
 
     def describe(self) -> dict[str, Any]:
+        """Read off the BUILT LIFNode -- these are the values training will use."""
         n = neuron_cfg(self.cfg, "spikingjelly")
         stype, salpha = require_surrogate(n)
+        node, fn = self.lif, self.lif.surrogate_function
+        # SpikingJelly names its surrogate classes ATan / Sigmoid while the config keys
+        # are lower case, so the comparison is on the class the table maps `stype` to
+        # rather than on the two spellings.
+        wanted_class = SURROGATES.get(stype)
         return {
             "framework": "spikingjelly",
-            "tau": require_float(n, "tau"),
-            "decay_input": require_bool(n, "decay_input"),
-            "v_threshold": require_float(n, "v_threshold"),
-            "v_reset": require_float(n, "v_reset"),
-            "detach_reset": require_bool(n, "detach_reset"),
-            "step_mode": require_choice(n, "step_mode", ["s", "m"]),
-            "backend": require_choice(n, "backend", ["torch", "cupy"]),
-            "surrogate": f"{stype}(alpha={salpha})",
+            "tau": reconcile(node.tau, require_float(n, "tau")),
+            "decay_input": reconcile(node.decay_input, require_bool(n, "decay_input")),
+            "v_threshold": reconcile(node.v_threshold, require_float(n, "v_threshold")),
+            "v_reset": reconcile(node.v_reset, require_float(n, "v_reset")),
+            "detach_reset": reconcile(node.detach_reset, require_bool(n, "detach_reset")),
+            "step_mode": reconcile(node.step_mode, require_choice(n, "step_mode", ["s", "m"])),
+            "backend": reconcile(node.backend,
+                                 require_choice(n, "backend", ["torch", "cupy"])),
+            "surrogate": reconcile(
+                f"{type(fn).__name__}(alpha={getattr(fn, 'alpha', '?')})",
+                f"{stype}(alpha={salpha})",
+                agrees=(wanted_class is not None and isinstance(fn, wanted_class)
+                        and _agree_alpha(getattr(fn, "alpha", None), salpha)),
+            ),
         }
+
+
+def _agree_alpha(live: Any, wanted: Any) -> bool:
+    return live is not None and abs(float(live) - float(wanted)) < 1e-9

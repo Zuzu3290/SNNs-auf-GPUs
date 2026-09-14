@@ -8,6 +8,7 @@ Import pattern in each framework file:
 import gc
 import logging
 import threading
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -54,56 +55,88 @@ def build_optimizer(params, cfg) -> torch.optim.Optimizer:
     return torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999), weight_decay=wd)
 
 
-def firing_window_seconds(cfg, wf) -> float | None:
-    """How much REAL TIME one sample spans, in seconds, or None if not knowable.
-
-    Only used to turn a spike rate into Hz:
-
-        firing_rate_hz = spikes_per_neuron_per_inference / window_seconds
-
-    Returning None rather than a guess is the point. This previously read a config
-    attribute that does not exist (`TEMPORAL_SLICE_DURATION_US` -- the real name has no
-    `_US`), so `getattr` silently supplied its 15000 default and EVERY reported Hz figure
-    was computed against a fixed 15 ms window. With `n_time_bins` binning a sample spans
-    the whole recording -- roughly 300 ms for N-MNIST -- so the published numbers were
-    about 20x too high. It was a constant factor across frameworks, so relative
-    comparisons survived; the absolute values did not.
-
-    Three cases are genuinely derivable, and one is not:
-
-      temporal slicing by TIME    one slice = wf.SLICE_DURATION_US microseconds
-      time_window binning         T frames x time_window_ms each
-      binning.sample_duration_us  stated explicitly by whoever knows the dataset
-      otherwise                   None -- n_time_bins divides a recording of unknown length
-
-    When this returns None, report `spikes_per_neuron_per_inference` (rate x T) instead:
-    it needs no time unit, cannot be wrong, and is the unit the SNN literature uses.
-    """
-    stated = getattr(wf, "SAMPLE_DURATION_US", None)
-    if stated:
-        return stated / 1e6
-
-    if getattr(wf, "TEMPORAL_SLICING_ENABLED", False):
-        duration_us = getattr(wf, "SLICE_DURATION_US", None)
-        return duration_us / 1e6 if duration_us else None
-
-    if getattr(wf, "FRAME_MODE", None) == "time_window":
-        window_us = getattr(wf, "TIME_WINDOW_US", None)
-        bins = getattr(wf, "N_TIME_BINS", None)
-        if window_us and bins:
-            return window_us * bins / 1e6
-
-    return None
-
-
 def spikes_per_neuron_per_inference(spike_rate: float, timesteps: int) -> float:
     """The time-unit-free spike figure: spikes per neuron over one whole inference.
 
     `spike_rate` is spikes per neuron per TIMESTEP, so multiplying by T gives the count
-    per sample. This is the headline number precisely because it needs no window and
-    therefore cannot be wrong -- see firing_window_seconds() for why Hz can be.
+    per sample. This is the headline spike-activity figure: event-driven data has no
+    real clock to convert it into Hz against, so this stays the one number reported.
     """
     return spike_rate * timesteps
+
+
+def collect_single_samples(loader, device, count: int) -> list:
+    """`count` individual samples, on-device, each shaped [T, 1, C, H, W].
+
+    Pre-loaded so the latency measurement below times the NETWORK, not the data
+    pipeline. The host-to-device copy is excluded for the same reason, and it is
+    identical for all four frameworks anyway.
+    """
+    samples: list = []
+    for frames, _ in loader:
+        frames = frames.to(device)
+        for index in range(frames.shape[1]):          # dim 1 = batch
+            samples.append(frames[:, index: index + 1].contiguous())
+            if len(samples) >= count:
+                return samples
+    return samples
+
+
+def measure_latency(model, samples: list, device: torch.device, warmup: int = 5) -> dict:
+    """Single-stream latency: batch size 1, synchronised around EACH sample.
+
+    This is the MLPerf Single-Stream convention and the question a deployment actually
+    asks -- "one event arrives, how long until the answer is ready?"
+
+    It is NOT the same measurement as dividing a batch's wall-clock by the batch size.
+    That figure is throughput under batching: it benefits from parallelism a single
+    arriving event cannot use, so it is systematically optimistic, and percentiles built
+    from it describe batch-to-batch variation rather than sample-to-sample -- every
+    sample in a batch is assigned the same divided value. Both are recorded, under
+    names that say which is which (see SNN_GPU_Evaluation_Metrics.md 2.3).
+
+    Per-sample synchronisation IS the point here, unlike in bulk timing: latency is
+    defined as when the output is genuinely ready, not when the work was queued.
+    """
+    import statistics
+
+    if not samples:
+        raise ValueError("measure_latency needs at least one sample")
+
+    model.eval_mode()
+    tensor_format = model.tensor_format() if hasattr(model, "tensor_format") else "TB"
+
+    def forward(sample):
+        data = sample.permute(1, 0, 2, 3, 4).contiguous() if tensor_format == "BT" else sample
+        return model(data)
+
+    def sync():
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+    with torch.no_grad():
+        for _ in range(warmup):          # kernels compiled before the clock starts
+            forward(samples[0])
+        sync()
+
+        durations_ms: list[float] = []
+        for sample in samples:
+            sync()
+            start = time.perf_counter()
+            forward(sample)
+            sync()
+            durations_ms.append(1000.0 * (time.perf_counter() - start))
+
+    ordered = sorted(durations_ms)
+    p90_index = min(len(ordered) - 1, int(round(0.90 * (len(ordered) - 1))))
+    return {
+        "latency_ms": statistics.median(durations_ms),      # headline
+        "latency_mean_ms": statistics.fmean(durations_ms),
+        "latency_p90_ms": ordered[p90_index],               # MLPerf convention
+        "latency_min_ms": ordered[0],
+        "latency_max_ms": ordered[-1],
+        "latency_samples": len(durations_ms),
+    }
 
 
 def warm_up(model, sample_batch: torch.Tensor, iterations: int) -> dict:
@@ -480,14 +513,15 @@ def measure_batch_vram(model_cls, cfg, device, batch_size: int, timesteps: int) 
 
 
 def calibrate_batch_size(model_cls, cfg, device, timesteps: int, *, data_vram_fraction: float,
-                          band_min: float, band_max: float,
+                          band_min: float,
                           max_batch_size: int = 256, min_batch_size: int = 1,
                           baseline_sensor_px: int = 34 * 34, baseline_batch_size: int = 128) -> int:
     """Picks a batch size that fits within data_vram_fraction of total VRAM
-    (the policy band is resource_policy.batch_vram_band_{min,max} in
-    data_workflow.yaml -- WorkflowSettings is the one place that band is
-    defined; this function only consumes it), instead of the largest one
-    that avoids OOM.
+    (the policy band's lower edge is resource_policy.batch_vram_band_min in
+    data_workflow.yaml; the upper edge is data_vram_fraction itself, since the
+    search never deliberately lands above its own target -- WorkflowSettings
+    is the one place that lower edge is defined; this function only consumes
+    it), instead of the largest one that avoids OOM.
 
     timesteps must be the real per-sample frame count (WorkflowSettings.N_TIME_BINS,
     from data_workflow.yaml), passed through to measure_batch_vram so the probe
@@ -498,6 +532,16 @@ def calibrate_batch_size(model_cls, cfg, device, timesteps: int, *, data_vram_fr
     linearly-scaled target (memory ~ batch size for fixed architecture/T) --
     at most 2 real forward/backward passes total. Falls back to halving on
     OOM, or to the already-confirmed guess if the scaled probe fails.
+
+    RAISES if min_batch_size itself OOMs -- e.g. DSEC's 640x480 sensor is a
+    real, documented case where even batch_size=1 can exceed available VRAM
+    (SDformerFlow, OF_EV_SNN and E-GMFlow all report needing batch_size 1-2
+    at full resolution on 11-32 GB cards). No fallback (cropping, gradient
+    checkpointing, sharding) is applied automatically here -- surveyed
+    against PyTorch Lightning, HuggingFace Accelerate, DeepSpeed and COPUS,
+    none of them do this either; the closest precedent is Accelerate's
+    find_executable_batch_size, which raises once every candidate size is
+    exhausted rather than silently returning an unverified one.
     """
     total_vram_gb = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
     vram_budget_gb = total_vram_gb * data_vram_fraction
@@ -511,19 +555,23 @@ def calibrate_batch_size(model_cls, cfg, device, timesteps: int, *, data_vram_fr
         guess //= 2
         peak_gb = measure_batch_vram(model_cls, cfg, device, guess, timesteps)
     if peak_gb is None:
-        _log_stable_batch_size(cfg, min_batch_size, 0.0, total_vram_gb, band_min, band_max)
-        return min_batch_size
+        raise RuntimeError(
+            f"[CALIBRATE_BATCH_SIZE] No batch size fits -- even batch_size={min_batch_size} "
+            f"OOMs at {cfg.SENSOR_H}x{cfg.SENSOR_W} resolution, T={timesteps}, on this "
+            f"{total_vram_gb:.1f} GB GPU. Reduce sensor resolution, timesteps, or model "
+            "size, or run on a GPU with more VRAM."
+        )
 
     scaled = max(min_batch_size, min(max_batch_size, int(guess * (vram_budget_gb / peak_gb))))
     if scaled == guess:
-        _log_stable_batch_size(cfg, guess, peak_gb, total_vram_gb, band_min, band_max)
+        _log_stable_batch_size(cfg, guess, peak_gb, total_vram_gb, band_min, data_vram_fraction)
         return guess  # already at budget, no second probe needed
 
     scaled_peak_gb = measure_batch_vram(model_cls, cfg, device, scaled, timesteps)
     if scaled_peak_gb is not None:
-        _log_stable_batch_size(cfg, scaled, scaled_peak_gb, total_vram_gb, band_min, band_max)
+        _log_stable_batch_size(cfg, scaled, scaled_peak_gb, total_vram_gb, band_min, data_vram_fraction)
         return scaled
-    _log_stable_batch_size(cfg, guess, peak_gb, total_vram_gb, band_min, band_max)
+    _log_stable_batch_size(cfg, guess, peak_gb, total_vram_gb, band_min, data_vram_fraction)
     return guess  # scaled estimate didn't hold up -- fall back to the already-confirmed value
 
 
@@ -534,6 +582,10 @@ def _log_stable_batch_size(cfg, batch_size: int, peak_gb: float, total_vram_gb: 
     not logger.info() -- logger.info has no attached handler anywhere in
     this project (configure_logging() in skeleton/snn_logging.py is never
     called), so it would otherwise be silently dropped.
+
+    band_max is the caller's data_vram_fraction, not a separately configured
+    value: the search never deliberately lands above its own target, so the
+    band's upper edge and the target are the same number by construction.
     """
     dataset = getattr(cfg, "DATASET_NAME", None) or "unknown dataset"
     pct = 100 * peak_gb / total_vram_gb if total_vram_gb else 0.0

@@ -28,6 +28,97 @@ runs unchanged on a laptop and on Colab.
 ---
 ---
 
+# Step 0 — check the environment first
+
+Run this once on every new machine — your laptop, a fresh Colab runtime, a colleague's
+GPU box — **before** spending time on a run.
+
+```bash
+python check_env.py
+```
+
+It prints the version of every dependency, the CPU and RAM, the GPU and whether NVML can
+read power from it, then a verdict comparing what is installed against the `==` pins in
+`requirements.txt`.
+
+```
+====================================================================
+VERDICT
+====================================================================
+OK: all packages import, and every pinned version matches requirements.txt
+```
+
+**Why this is not optional here.** This pipeline compares SNN *frameworks*. If Colab
+resolves `snntorch` to a different version than the laptop did, part of the difference
+between two runs is a difference between versions — and nothing in `runs.csv` says which
+part. So a drift is reported loudly:
+
+```
+version mismatches against requirements.txt:
+  snntorch             wanted 1.0.0        got 0.9.1  RESULT-CRITICAL
+```
+
+`RESULT-CRITICAL` marks the seven pins that decide the numbers: the four frameworks plus
+`torch`, `tonic` and `numpy`. The rest may drift without changing a result.
+
+### The same command, with every flag it accepts
+
+```bash
+python check_env.py --strict
+```
+
+| arg | possible values | default | what it does |
+|---|---|---|---|
+| `--strict` | flag | off | exit non-zero on a version **mismatch** too, not only on a missing package |
+| `-h`, `--help` | — | — | print this list |
+
+Exit codes, so it can gate a script or a notebook cell:
+
+| situation | plain | `--strict` |
+|---|---|---|
+| everything matches | `0` | `0` |
+| a package is missing | `1` | `1` |
+| all present, a version differs | `0` | `1` |
+
+Two lines in its output are worth reading beyond the verdict:
+
+- **`cpu_cores_physical`** — a Colab runtime with 1 physical core has been measured
+  holding GPU utilisation near 11%, the loader unable to keep up. A run in that state
+  times the data pipeline rather than the framework, so the script warns at ≤ 2 cores.
+- **`nvml_power_readable`** — if this says `NO`, the energy columns in `runs.csv` will be
+  empty on this machine. Better to know before the run than after it.
+
+`samna` is read from pip metadata and deliberately never imported: importing it makes
+sinabs try to install it from a private index. It is only needed to drive real Speck
+hardware, so `not installed (optional)` is the normal answer.
+
+## Installing from scratch
+
+```bash
+pip install torch==2.13.0 torchvision==0.28.0        # CPU
+# ...or, for CUDA 12.8:
+pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu128
+
+pip install --no-deps tonic==1.6.0
+pip install -r requirements.txt
+python check_env.py
+```
+
+torch is installed first and separately because its build differs per machine.
+`requirements.txt` pins the **version** (`2.13.0`), not the wheel tag (`+cpu`, `+cu128`),
+so one file serves both; `check_env.py` compares the same way and ignores the tag.
+
+tonic is also installed first and separately, with `--no-deps`: tonic 1.6.0 (its own
+latest release) declares `numpy<2.0.0`, which has no wheel on Python 3.13+, so asking
+pip to resolve it together with `requirements.txt`'s `numpy==2.3.5` in one command
+fails outright (`ResolutionImpossible`). `--no-deps` skips that check; tonic's actual
+runtime dependencies are pinned in `requirements.txt` instead. See that file's "Event
+data" section for the full story. `check_env.py` still checks tonic's version (see
+`EXTRA_PINS` there), so this deviation can't go unnoticed either.
+
+---
+---
+
 # Flow A — the original way, unchanged
 
 ## A1. Train and evaluate
@@ -42,11 +133,60 @@ evaluates, and writes to the `output:` paths in `SNN_module.yaml`
 
 This is exactly what it always did. The additions below are all opt-in.
 
+### Before you run: do you want the trained model saved?
+
+**Decide this before you run, not after** — the model is trained fresh every time
+`learning/main.py` runs, and by default nothing is kept once the process exits, so
+if you skip this and want the weights afterward, the only fix is to train again.
+
+Set `output.save_checkpoint` in `SNN_module.yaml` (or an experiment overlay):
+
+```yaml
+output:
+  save_checkpoint: true   # false by default -- opt in
+```
+
+**true** if you want to reuse these exact trained weights afterward — resume
+training later, run inference in a separate script, inspect the weights, and so
+on. **false** (the default) if this run is only about the numbers it prints and
+writes to `runs.csv`/`test.csv` — the common case for a framework-comparison run,
+where keeping every run's weights on disk is real, usually-unneeded disk usage.
+
+When on, it writes `model_checkpoint.pt` (model + optimizer state, framework name,
+neuron config) into the run's results folder, right after training finishes and
+before inference starts — inference itself is unaffected either way, and still
+runs immediately after in the same invocation.
+
+**Using the saved weights elsewhere** — a separate script, a notebook, anywhere
+outside this run. You need three things: the same model class the checkpoint was
+trained with (`training.framework` in the config that produced it — `SNN_SJ` for
+`sj`, etc., see `learning/main.py`'s `FRAMEWORK_MODULES`), a `Settings` built from
+that SAME config (architecture must match, or the weights won't fit the layers),
+and the checkpoint file's path:
+
+```python
+from skeleton import Settings
+from frameworks.snn_spikingjelly import SNN_SJ   # match the framework the checkpoint was trained with
+import torch
+
+cfg = Settings()   # the SAME config (base + overlay) the checkpoint was trained under
+cfg.apply_dataset_shape(...)   # same dataset shape as the training run
+
+model = SNN_SJ(cfg)
+model.load_state(torch.load("path/to/model_checkpoint.pt"))
+model.eval_mode()
+# model(data) now runs inference with the trained weights
+```
+
+If the architecture (dataset shape, layer sizes, framework) doesn't match what the
+checkpoint was trained with, `load_state` raises rather than silently loading
+mismatched weights.
+
 ### The same command, with every flag it accepts
 
 ```bash
 python learning/main.py \
-    --config config/ex2.yaml \
+    --config experiments/ex2/config.yaml \
     --framework sinabs \
     --seed 3 \
     --experiment ex2 \
@@ -80,7 +220,7 @@ No dataset, no download, no GPU — it runs on any laptop.
 
 ```bash
 python check_network.py \
-    --config config/ex2.yaml \
+    --config experiments/ex2/config.yaml \
     --framework sinabs \
     --seed 1 \
     --experiment ex2 \
@@ -117,22 +257,35 @@ neuron, and nothing else enforces it.
 serve both uses — ex1 forces the neurons to agree, ex2 deliberately varies one, so a
 large deviation is a bug in the first case and the result in the second.
 
+It also **draws** three stacked panels per input pattern — input current, membrane
+trajectory, spike raster — so the divergence can be read as well as counted.
+
 ### The same command, with every flag it accepts
 
 ```bash
-python equivalence_check.py --config config/ex2.yaml --experiment ex2
+python equivalence_check.py \
+    --config experiments/ex2/config.yaml \
+    --experiment ex2 \
+    --results-root /content/drive/MyDrive/snn_runs \
+    --formats png,pdf
 ```
 
 | arg | possible values | default | what it does |
 |---|---|---|---|
 | `--config` | path to a `.yaml` | *none* | overlay, as above |
-| `--experiment` | any name | *none* | **label only** — this script writes no files |
+| `--experiment` | any name, e.g. `ex2` | *none* → `outputs/plots` | figures go to `<results-root>/<name>/plots` |
+| `--results-root` | any path | `experiments` | where that tree lives. **Requires `--experiment`.** Point at Drive on Colab. |
+| `--formats` | `png`, `pdf`, `svg`, comma-separated | `png` | `png,pdf` gives a vector copy for a report |
 | `-h`, `--help` | — | — | print this list |
 
 No `--framework` (it builds all four — picking one would defeat the point), no `--seed`
-(the poisson pattern carries its own, so every framework gets identical input), and no
-`--device` (CPU is hardcoded: one neuron for 90 steps gains nothing from a GPU, and
-float non-determinism would undermine an exact comparison).
+(the poisson pattern carries its own, so every framework gets identical input), no
+`--cache-root` (no dataset is touched), and no `--device` (CPU is hardcoded: one neuron
+for 90 steps gains nothing from a GPU, and float non-determinism would undermine an
+exact comparison).
+
+Matplotlib runs on the `Agg` backend, so it works headless — a Colab cell or an SSH
+session needs no display.
 
 ## A4. Run the unit tests
 
@@ -140,7 +293,7 @@ float non-determinism would undermine an exact comparison).
 python tests/run_all.py
 ```
 
-761 checks across 8 suites, CPU-only, no dataset, about 90 seconds. Exits non-zero if
+1,028 checks across 9 suites, CPU-only, no dataset, about a minute. Exits non-zero if
 anything fails, so it works as a pre-push gate.
 
 | arg | possible values | default | what it does |
@@ -166,7 +319,7 @@ One YAML per experiment, stating **only what differs**. Everything else is inher
 from the three base files.
 
 ```yaml
-# config/ex2.yaml
+# experiments/ex2/config.yaml
 dataset:
   name: N-MNIST          # names the dataset, so nothing ever waits at a prompt
 
@@ -207,22 +360,24 @@ otherwise leave the run on base values and the experiment quietly would not happ
 
 ## B2. Verify the config before spending GPU time
 
-Run these two first, in this order. Both are CPU-only and take seconds.
+Run these three first, in this order. All are CPU-only and take seconds.
 
 ```bash
-python check_network.py --config config/ex2.yaml --all
-python equivalence_check.py --config config/ex2.yaml --experiment ex2
+python check_env.py
+python check_network.py --config experiments/ex2/config.yaml --all
+python equivalence_check.py --config experiments/ex2/config.yaml --experiment ex2
 ```
 
-The first confirms all four frameworks start from **byte-identical weights** under one
-seed — if they do not, no accuracy comparison between them means anything. The second
-reports how far apart the four neurons actually are.
+The first proves this machine's library versions match the ones every other run used —
+see Step 0. The second confirms all four frameworks start from **byte-identical weights**
+under one seed; if they do not, no accuracy comparison between them means anything. The
+third reports how far apart the four neurons actually are.
 
 ## B3. Run the experiment
 
 ```bash
 python learning/main.py \
-    --config config/ex2.yaml \
+    --config experiments/ex2/config.yaml \
     --experiment ex2 \
     --framework sinabs \
     --seed 0
@@ -232,21 +387,63 @@ Output is routed into its own tree instead of `./outputs`:
 
 ```
 experiments/ex2/
-├── results/      training_results.csv, test.csv
-├── equivalence/
-└── plots/        training_metrics.png, vram_breakdown.png, spike_raster.png, ...
+├── config.yaml                              the experiment, beside its README
+├── README.md
+├── results/
+│   ├── runs.csv  epochs.csv  layers.csv     APPEND-ONLY, every run of this experiment
+│   ├── runs/<run_id>.json                   full record, one per run
+│   └── <run_id>/                            this run only
+│       └── training_results.csv  batch_metrics.csv  test.csv
+├── plots/<run_id>/                          this run's 7 diagnostics
+├── figures/                                 make_plots.py -- the cross-run comparison
+└── equivalence/
 ```
+
+`run_id` is `<timestamp>_<framework>_seed<n>`, and it is the **same** id used in the
+`runs.csv` row — so any figure traces back to the row describing it.
+
+**Why the per-run subfolder.** `training_results.csv`, `batch_metrics.csv`, `test.csv`
+and the seven PNGs all carry fixed names with no framework or seed in them. Four
+frameworks writing into one experiment folder would leave only the last one's files.
+The three schema CSVs are exempt because they are append-only — that is what they are
+for.
+
+**Two families of plot, and they do not mix:**
+
+| folder | written by | shows |
+|---|---|---|
+| `plots/<run_id>/` | `learning/main.py`, automatically | this ONE run — loss curve, VRAM, spike raster |
+| `figures/` | `make_plots.py`, after several runs | the COMPARISON across frameworks (F0–F6) |
+
+Nesting happens only when `--experiment` is given. Without it, everything stays flat in
+`./outputs` exactly as before.
 
 Repeat with a different `--framework` and the same `--seed` to compare frameworks; with
 the same `--framework` and a different `--seed` to get replicates.
 
 ## B4. On Colab
 
-Two things differ on Colab, and both are command-line flags — the config never changes.
+A Colab runtime is a **new machine every session**, so it starts with Step 0:
+
+```bash
+!pip install --no-deps tonic==1.6.0
+!pip install -r requirements.txt
+!python check_env.py --strict
+```
+
+`--strict` is worth it here: Colab ships its own torch and numpy, and a silent
+resolution to a different version is exactly the drift that makes two runs
+incomparable. Then two things differ from a laptop run, and both are command-line
+flags — the config never changes.
+
+tonic still needs its own `--no-deps` install first, same reason as the laptop
+instructions above (its `numpy<2.0.0` pin has no Python 3.13+ wheel) — this one
+actually matters LESS on Colab, since Colab's own preinstalled numpy is already 2.x
+and requirements.txt's `numpy==2.3.5` pin now matches that instead of fighting it.
 
 ```bash
 python learning/main.py \
-    --config config/ex1.yaml \
+    --config experiments/ex1/config.yaml \
     --experiment ex1 \
     --framework norse \
     --seed 0 \
@@ -263,11 +460,11 @@ set, you can launch several cells at once — each with its own `--framework` an
 
 ```bash
 # cell 1
-python learning/main.py --config config/ex1.yaml --experiment ex1 --framework norse  --seed 0 --results-root /content/drive/MyDrive/snn_runs
+python learning/main.py --config experiments/ex1/config.yaml --experiment ex1 --framework norse  --seed 0 --results-root /content/drive/MyDrive/snn_runs
 # cell 2
-python learning/main.py --config config/ex1.yaml --experiment ex1 --framework sj     --seed 0 --results-root /content/drive/MyDrive/snn_runs
+python learning/main.py --config experiments/ex1/config.yaml --experiment ex1 --framework sj     --seed 0 --results-root /content/drive/MyDrive/snn_runs
 # cell 3
-python learning/main.py --config config/ex1.yaml --experiment ex1 --framework sinabs --seed 0 --results-root /content/drive/MyDrive/snn_runs
+python learning/main.py --config experiments/ex1/config.yaml --experiment ex1 --framework sinabs --seed 0 --results-root /content/drive/MyDrive/snn_runs
 ```
 
 Add `--cache-root` if the default cache location is short of space.
@@ -280,6 +477,7 @@ Add `--cache-root` if the default cache location is short of space.
 | `--cache-root` | any path with space | `/content` is small and ephemeral |
 | `--experiment` | any name | required before `--results-root` will be accepted |
 | `dataset.name` *(config, not a flag)* | see the table below | a cell cannot answer a prompt |
+| `check_env.py --strict` *(a cell, not a flag)* | — | the runtime is new, so its versions are unproven |
 
 ## B5. Choosing the dataset
 
@@ -316,7 +514,7 @@ config produced what follows:
 ```
 ==========================================================================
 learning/main.py
-  config        config/ex2.yaml   hash 4be0992923e9
+  config        experiments/ex2/config.yaml   hash 4be0992923e9
   experiment    ex2
   framework     sinabs
   seed          3

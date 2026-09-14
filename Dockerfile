@@ -15,6 +15,11 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir --break-system-packages torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
+# tonic==1.6.0 (its own latest release) declares numpy<2.0.0, which conflicts with
+# requirements.txt's numpy==2.3.5 if resolved together -- see that file's "Event data"
+# section. --no-deps installs it without pip enforcing that stale constraint.
+RUN pip install --no-cache-dir --break-system-packages --no-deps tonic==1.6.0
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
