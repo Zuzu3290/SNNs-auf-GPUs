@@ -277,7 +277,7 @@ def test_batch_size_is_recorded(  ) -> None:
 
     from learning import training
 
-    source = inspect.getsource(training.SNNTrainer.finalize_epoch_reports)
+    source = inspect.getsource(training.SNNTrainer.finalize_one_epoch_report)
     suite.check("the epoch row records batch_size", '"batch_size"' in source)
     suite.check("and whether it was calibrated", '"batch_size_calibrated"' in source)
 

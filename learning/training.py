@@ -92,10 +92,9 @@ class SNNTrainer:
         self.cfg          = cfg
         self.device       = device
 
-        # Final, host-side histories — populated once in bulk by
-        # finalize_epoch_reports() after the whole run completes. Kept
-        # under these exact names since plot_training()/the train() return
-        # dict already depend on them.
+        # Final, host-side histories — extended once per epoch (train()'s epoch-boundary
+        # sync), not held GPU-resident for the whole run. Kept under these exact names
+        # since plot_training()/the train() return dict already depend on them.
         self.loss_hist       = []
         self.acc_hist        = []
         self.spike_rate_hist = []
@@ -105,6 +104,9 @@ class SNNTrainer:
         self.epoch_log       = []
         self.timesteps: int | None = None  # set once in train(), reused to derive per-iteration firing rate at plot time
         self.window_s: float | None = None
+        # Tracked here now that each epoch's report finalizes immediately (see
+        # finalize_one_epoch_report()) rather than in one bulk pass at the end.
+        self.best_acc_so_far = 0.0
 
         # GPU-resident accumulation through the run — see train()'s docstring
         # note on the deferred-sync design. Nothing here is read back to host
@@ -223,7 +225,7 @@ class SNNTrainer:
         without waiting for it, so this never stalls the training loop the
         way a `torch.cuda.synchronize()`-bracketed timer would — the
         blocking half (`elapsed_time()` / the CPU delta) only happens once,
-        later, in `finalize_epoch_reports`."""
+        later, at that epoch's own boundary in `train()`."""
         if self.device.type == "cuda":
             start = torch.cuda.Event(enable_timing=True)
             end   = torch.cuda.Event(enable_timing=True)
@@ -370,8 +372,6 @@ class SNNTrainer:
                     "step is taken there, so this means something else is mutating them "
                     "-- the timed epochs would not start from the seeded weights."
                 )
-
-        raw_epoch_records: list[dict] = []
 
         for epoch in range(epochs):
             self.model.train_mode()
@@ -597,8 +597,17 @@ class SNNTrainer:
             gpu_active_s    = epoch_duration * gpu.get("gpu_util_avg_pct", 0.0) / 100.0
 
             # .item()/.cpu() here (sync already paid above for fwd/bwd_latencies_ms), not held
-            # GPU-resident until the whole run finishes -- same class of fix as fwd/bwd_events below.
-            raw_epoch_records.append({
+            # GPU-resident until the whole run finishes -- same class of fix as fwd/bwd_events above.
+            #
+            # activity_snapshot (built in measure_activity(), just above) is a real per-layer
+            # spike-recording tensor dict, already moved to CPU. This record used to be appended
+            # to a list held for the WHOLE run and only processed in one bulk pass at the very
+            # end -- meaning every epoch's snapshot stayed resident in host RAM simultaneously,
+            # growing linearly epoch over epoch (a real run: system RAM climbed steadily and the
+            # process was killed partway through a run). Finalizing immediately, one epoch at a
+            # time, means each record (snapshot included) is freed as soon as that epoch's
+            # report is printed, instead of accumulating for the whole run.
+            record = {
                 "epoch":              epoch + 1,
                 "n":                  n,
                 "fwd_latencies_ms":   fwd_latencies_ms,
@@ -621,11 +630,9 @@ class SNNTrainer:
                 "gpu_active_s":       gpu_active_s,
                 "current_lr":         self.model.get_lr(),
                 "mem_breakdown":      mem_breakdown,
-            })
+            }
+            self.finalize_one_epoch_report(record, epochs, timesteps, window_s)
 
-        # ---- Bulk transfer: the single sync point for everything
-        # accumulated above, now that every epoch has finished training. ----
-        self.finalize_epoch_reports(raw_epoch_records, epochs, timesteps, window_s)
         self.finalize_gradient_norms()
 
         self.pipeline_monitor.stop()
@@ -654,137 +661,135 @@ class SNNTrainer:
             "epoch_log":          self.epoch_log,
         }
 
-    def finalize_epoch_reports(self, raw_epoch_records: list, epochs: int, timesteps: int, window_s: float) -> None:
-        """Prints the full per-epoch report (deferred rather than streamed
-        live) from data train() already synced back per-epoch --
-        self.loss_hist/acc_hist/spike_rate_hist and each record's
-        fwd/bwd_latencies_ms are already plain Python values by this point,
-        read back at each epoch's own boundary rather than held GPU-resident
-        for the whole run."""
+    def finalize_one_epoch_report(self, record: dict, epochs: int, timesteps: int, window_s: float) -> None:
+        """Builds and prints ONE epoch's report, called right after that epoch finishes --
+        not deferred to a bulk pass over every epoch at the end of the run, so record
+        (activity_snapshot included) is freed as soon as this returns rather than staying
+        resident for the whole run. self.loss_hist/acc_hist/spike_rate_hist and record's own
+        fwd/bwd_latencies_ms are already plain Python values by this point, read back at
+        this epoch's own boundary rather than held GPU-resident."""
         credit_assignment = self.model.credit_assignment()
 
-        best_acc_so_far = 0.0
-        for record in raw_epoch_records:
-            n = record["n"]
-            epoch_fwd = record["fwd_latencies_ms"]
-            epoch_bwd = record["bwd_latencies_ms"]
+        n = record["n"]
+        epoch_fwd = record["fwd_latencies_ms"]
+        epoch_bwd = record["bwd_latencies_ms"]
 
-            train_loss  = (record["epoch_loss_sum"]  / n) if n else 0.0
-            train_acc   = (record["epoch_acc_sum"]   / n) if n else 0.0
-            train_spike = (record["epoch_spike_sum"] / n) if n else 0.0
-            # One batch's SynOps, sampled by the untimed pass -- a PER-BATCH figure,
-            # not an epoch total. It used to be summed over every iteration, which
-            # made it scale with iteration count and so not comparable between runs
-            # of different length.
-            synops_pj   = record["epoch_synops"] * SYNOPS_ENERGY_PJ_PER_MAC
+        train_loss  = (record["epoch_loss_sum"]  / n) if n else 0.0
+        train_acc   = (record["epoch_acc_sum"]   / n) if n else 0.0
+        train_spike = (record["epoch_spike_sum"] / n) if n else 0.0
+        # One batch's SynOps, sampled by the untimed pass -- a PER-BATCH figure,
+        # not an epoch total. It used to be summed over every iteration, which
+        # made it scale with iteration count and so not comparable between runs
+        # of different length.
+        synops_pj   = record["epoch_synops"] * SYNOPS_ENERGY_PJ_PER_MAC
 
-            # Time-unit free, so always valid. This is the headline spike figure and
-            # the one directly comparable with published SNN numbers.
-            spikes_per_inference = spikes_per_neuron_per_inference(train_spike, timesteps)
-            # None when the real per-sample duration is not knowable -- reported as
-            # unavailable rather than computed against a guessed window.
-            firing_rate_hz = (spikes_per_inference / window_s) if window_s else None
+        # Time-unit free, so always valid. This is the headline spike figure and
+        # the one directly comparable with published SNN numbers.
+        spikes_per_inference = spikes_per_neuron_per_inference(train_spike, timesteps)
+        # None when the real per-sample duration is not knowable -- reported as
+        # unavailable rather than computed against a guessed window.
+        firing_rate_hz = (spikes_per_inference / window_s) if window_s else None
 
-            # Kept on the trainer so a caller can build per-layer rows (layers.csv)
-            # from the measurement this epoch already took, instead of paying for an
-            # extra pass. Hooked layers only -- lif_out is not hooked.
-            self.last_activity_snapshot = record["activity_snapshot"]
+        # Kept on the trainer so a caller can build per-layer rows (layers.csv)
+        # from the measurement this epoch already took, instead of paying for an
+        # extra pass. Hooked layers only -- lif_out is not hooked.
+        self.last_activity_snapshot = record["activity_snapshot"]
 
-            cv_isi      = compute_cv_isi(record["activity_snapshot"])
-            cv_isi_mean = cv_isi.get("network_wide", 0.0)
-            buf_report  = buffer_report(record["activity_snapshot"])
+        cv_isi      = compute_cv_isi(record["activity_snapshot"])
+        cv_isi_mean = cv_isi.get("network_wide", 0.0)
+        buf_report  = buffer_report(record["activity_snapshot"])
 
-            avg_fwd_ms = sum(epoch_fwd) / len(epoch_fwd) if epoch_fwd else 0.0
-            avg_bwd_ms = sum(epoch_bwd) / len(epoch_bwd) if epoch_bwd else 0.0
+        avg_fwd_ms = sum(epoch_fwd) / len(epoch_fwd) if epoch_fwd else 0.0
+        avg_bwd_ms = sum(epoch_bwd) / len(epoch_bwd) if epoch_bwd else 0.0
 
-            gpu      = record["gpu"]
-            gpu_diag = record["gpu_diag"]
-            mem      = record["mem_breakdown"]
+        gpu      = record["gpu"]
+        gpu_diag = record["gpu_diag"]
+        mem      = record["mem_breakdown"]
 
-            is_best_epoch = train_acc > best_acc_so_far
-            if is_best_epoch:
-                best_acc_so_far = train_acc
+        is_best_epoch = train_acc > self.best_acc_so_far
+        if is_best_epoch:
+            self.best_acc_so_far = train_acc
 
-            self.epoch_log.append({
-                "epoch":               record["epoch"],
-                "n":                   n,
-                "train_loss":          round(train_loss, 4),
-                "train_accuracy":      round(train_acc, 4),
-                "best_accuracy_so_far": round(best_acc_so_far, 4),
-                "is_best_epoch":       is_best_epoch,
-                "spike_rate":          round(train_spike, 4),
-                "spikes_per_neuron_per_inference": round(spikes_per_inference, 4),
-                "firing_rate_hz":      (round(firing_rate_hz, 2)
-                                        if firing_rate_hz is not None else None),
-                # Recorded because calibrate_batch_size sizes this from live VRAM, so
-                # it legitimately differs between machines and between runs. Batch size
-                # is the largest single lever on wall-clock time, so two rows can only
-                # be compared on speed once this column is known to match.
-                "batch_size":          getattr(self.cfg, "BATCH_SIZE", None),
-                "batch_size_calibrated": getattr(self.cfg, "CALIBRATE_BATCH_SIZE", None),
-                "learning_rate":       round(record["current_lr"], 6),
-                "epoch_duration_s":    round(record["epoch_duration"], 2),
-                "gpu_active_s":        round(record["gpu_active_s"], 2),
-                # Named so a CSV reader cannot mistake one basis for the other.
-                "energy_j_total":      round(record["energy_j"], 2),
-                "energy_j_dynamic":    round(record["dynamic_energy_j"], 2),
-                "avg_power_w":         round(record["avg_power_w"], 2),
-                "dynamic_power_w":     round(record["dynamic_power_w"], 2),
-                # The baseline both dynamic figures rest on. None = never measured,
-                # which is also when dynamic equals total.
-                "idle_power_w":        (round(record["idle_power_w"], 2)
-                                        if record["idle_power_w"] is not None else None),
-                "forward_latency_ms":  round(avg_fwd_ms, 3),
-                "backward_latency_ms": round(avg_bwd_ms, 3),
-                "cv_isi_mean":         round(cv_isi_mean, 4),
-                "credit_assignment":   credit_assignment,
-                "synops_energy_pj":    round(synops_pj, 2),
-                **{k: v for k, v in gpu_diag.items()},
-                **{k: v for k, v in gpu.items()},
-                **{f"model_{k}": round(v, 4) for k, v in mem.items()},
-            })
+        self.epoch_log.append({
+            "epoch":               record["epoch"],
+            "n":                   n,
+            "train_loss":          round(train_loss, 4),
+            "train_accuracy":      round(train_acc, 4),
+            "best_accuracy_so_far": round(self.best_acc_so_far, 4),
+            "is_best_epoch":       is_best_epoch,
+            "spike_rate":          round(train_spike, 4),
+            "spikes_per_neuron_per_inference": round(spikes_per_inference, 4),
+            "firing_rate_hz":      (round(firing_rate_hz, 2)
+                                    if firing_rate_hz is not None else None),
+            # Recorded because calibrate_batch_size sizes this from live VRAM, so
+            # it legitimately differs between machines and between runs. Batch size
+            # is the largest single lever on wall-clock time, so two rows can only
+            # be compared on speed once this column is known to match.
+            "batch_size":          getattr(self.cfg, "BATCH_SIZE", None),
+            "batch_size_calibrated": getattr(self.cfg, "CALIBRATE_BATCH_SIZE", None),
+            "learning_rate":       round(record["current_lr"], 6),
+            "epoch_duration_s":    round(record["epoch_duration"], 2),
+            "gpu_active_s":        round(record["gpu_active_s"], 2),
+            # Named so a CSV reader cannot mistake one basis for the other.
+            "energy_j_total":      round(record["energy_j"], 2),
+            "energy_j_dynamic":    round(record["dynamic_energy_j"], 2),
+            "avg_power_w":         round(record["avg_power_w"], 2),
+            "dynamic_power_w":     round(record["dynamic_power_w"], 2),
+            # The baseline both dynamic figures rest on. None = never measured,
+            # which is also when dynamic equals total.
+            "idle_power_w":        (round(record["idle_power_w"], 2)
+                                    if record["idle_power_w"] is not None else None),
+            "forward_latency_ms":  round(avg_fwd_ms, 3),
+            "backward_latency_ms": round(avg_bwd_ms, 3),
+            "cv_isi_mean":         round(cv_isi_mean, 4),
+            "credit_assignment":   credit_assignment,
+            "synops_energy_pj":    round(synops_pj, 2),
+            **{k: v for k, v in gpu_diag.items()},
+            **{k: v for k, v in gpu.items()},
+            **{f"model_{k}": round(v, 4) for k, v in mem.items()},
+        })
 
-            print(f"\nEpoch {record['epoch']}/{epochs}")
-            print(f"  • Train Loss     : {train_loss:.4f}")
-            print(f"  • Train Accuracy : {train_acc * 100:.2f}%" + ("  (best so far)" if is_best_epoch else ""))
-            print(f"  • Spike Rate     : {train_spike:.4f}")
-            print(f"  • Spikes/neuron  : {spikes_per_inference:.4f} per inference  (rate x T)")
-            if firing_rate_hz is not None:
-                print(f"  • Firing Rate    : {firing_rate_hz:.2f} Hz  (over a {window_s * 1000:.1f} ms sample)")
-            else:
-                print("  • Firing Rate    : n/a -- the real per-sample duration is not known. "
-                      "Set framing.sample_duration_us to get Hz.")
-            print(f"  • Spike Buffer   : {buf_report}")
-            print(f"  • Fwd/Bwd Latency: {avg_fwd_ms:.3f} ms / {avg_bwd_ms:.3f} ms  ({credit_assignment})")
-            print(f"  • CV_ISI (net)   : {cv_isi_mean:.3f}")
-            print(f"  • SynOps Energy  : {synops_pj:.2f} pJ (estimated, per epoch)")
-            print(f"  • LR             : {record['current_lr']:.6f}")
-            print(f"  • Wall time      : {record['epoch_duration']:.2f}s")
-            print(f"  • GPU active     : {record['gpu_active_s']:.2f}s  ({gpu.get('gpu_util_avg_pct', 0.0):.1f}% of wall time)")
-            print(f"  • Energy (total) : {record['energy_j']:.2f} J  ({record['avg_power_w']:.1f} W avg, idle draw INCLUDED)")
-            if record["idle_power_w"] is not None:
-                print(f"  • Energy (dynamic): {record['dynamic_energy_j']:.2f} J  "
-                      f"({record['dynamic_power_w']:.1f} W above a {record['idle_power_w']:.1f} W idle baseline)")
-                print("                      ^ total scales with runtime; dynamic isolates the work")
-            else:
-                print("  • Energy (dynamic): not available -- no idle baseline was measured, "
-                      "so the total above is all there is")
-            if gpu:
-                print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
-                print(f"  • GPU Memory     : {gpu['gpu_mem_peak_gb']} GB / {self.pipeline_monitor.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
-                if gpu.get("gpu_idle_episodes", 0) > 0:
-                    print(f"  • GPU Idle       : {gpu['gpu_idle_episodes']} episode(s), {gpu['gpu_idle_total_s']:.1f}s total "
-                          f"— CPU-side data prep couldn't keep up with the GPU this often")
-            print(f"  • Max Mem Reserved: {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB")
-            if mem:
-                weights_mb, grad_mb, optim_mb = (mem.get(k, 0.0) * 1024 for k in ("weights_gb", "gradients_gb", "optimizer_state_gb"))
-                print(f"  • Model VRAM     : weights {weights_mb:.2f}MB + grad {grad_mb:.2f}MB + "
-                      f"optim {optim_mb:.2f}MB = {weights_mb + grad_mb + optim_mb:.2f}MB static, held between iterations "
-                      f"(excludes the input batch/prefetch queue)")
-                print(f"  • Fwd/Bwd Peak   : {mem.get('forward_peak_gb', 0.0):.3f}GB / {mem.get('backward_peak_gb', 0.0):.3f}GB  "
-                      f"(cumulative allocator high-water mark during each phase -- already includes the static figure above, not additive with it)")
-            if "gpu_temp_c" in gpu_diag:
-                print(f"  • GPU Temp/Clock : {gpu_diag['gpu_temp_c']}°C   SM {gpu_diag.get('sm_clock_mhz')} MHz   Mem {gpu_diag.get('mem_clock_mhz')} MHz")
+        print(f"\nEpoch {record['epoch']}/{epochs}")
+        print(f"  • Train Loss     : {train_loss:.4f}")
+        print(f"  • Train Accuracy : {train_acc * 100:.2f}%" + ("  (best so far)" if is_best_epoch else ""))
+        print(f"  • Spike Rate     : {train_spike:.4f}")
+        print(f"  • Spikes/neuron  : {spikes_per_inference:.4f} per inference  (rate x T)")
+        if firing_rate_hz is not None:
+            print(f"  • Firing Rate    : {firing_rate_hz:.2f} Hz  (over a {window_s * 1000:.1f} ms sample)")
+        else:
+            print("  • Firing Rate    : n/a -- the real per-sample duration is not known. "
+                  "Set framing.sample_duration_us to get Hz.")
+        print(f"  • Spike Buffer   : {buf_report}")
+        print(f"  • Fwd/Bwd Latency: {avg_fwd_ms:.3f} ms / {avg_bwd_ms:.3f} ms  ({credit_assignment})")
+        print(f"  • CV_ISI (net)   : {cv_isi_mean:.3f}")
+        print(f"  • SynOps Energy  : {synops_pj:.2f} pJ (estimated, per epoch)")
+        print(f"  • LR             : {record['current_lr']:.6f}")
+        print(f"  • Wall time      : {record['epoch_duration']:.2f}s")
+        print(f"  • GPU active     : {record['gpu_active_s']:.2f}s  ({gpu.get('gpu_util_avg_pct', 0.0):.1f}% of wall time)")
+        print(f"  • Energy (total) : {record['energy_j']:.2f} J  ({record['avg_power_w']:.1f} W avg, idle draw INCLUDED)")
+        if record["idle_power_w"] is not None:
+            print(f"  • Energy (dynamic): {record['dynamic_energy_j']:.2f} J  "
+                  f"({record['dynamic_power_w']:.1f} W above a {record['idle_power_w']:.1f} W idle baseline)")
+            print("                      ^ total scales with runtime; dynamic isolates the work")
+        else:
+            print("  • Energy (dynamic): not available -- no idle baseline was measured, "
+                  "so the total above is all there is")
+        if gpu:
+            print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
+            print(f"  • GPU Memory     : {gpu['gpu_mem_peak_gb']} GB / {self.pipeline_monitor.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
+            if gpu.get("gpu_idle_episodes", 0) > 0:
+                print(f"  • GPU Idle       : {gpu['gpu_idle_episodes']} episode(s), {gpu['gpu_idle_total_s']:.1f}s total "
+                      f"— CPU-side data prep couldn't keep up with the GPU this often")
+        print(f"  • Max Mem Reserved: {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB")
+        if mem:
+            weights_mb, grad_mb, optim_mb = (mem.get(k, 0.0) * 1024 for k in ("weights_gb", "gradients_gb", "optimizer_state_gb"))
+            print(f"  • Model VRAM     : weights {weights_mb:.2f}MB + grad {grad_mb:.2f}MB + "
+                  f"optim {optim_mb:.2f}MB = {weights_mb + grad_mb + optim_mb:.2f}MB static, held between iterations "
+                  f"(excludes the input batch/prefetch queue)")
+            print(f"  • Fwd/Bwd Peak   : {mem.get('forward_peak_gb', 0.0):.3f}GB / {mem.get('backward_peak_gb', 0.0):.3f}GB  "
+                  f"(cumulative allocator high-water mark during each phase -- already includes the static figure above, not additive with it)")
+        if "gpu_temp_c" in gpu_diag:
+            print(f"  • GPU Temp/Clock : {gpu_diag['gpu_temp_c']}°C   SM {gpu_diag.get('sm_clock_mhz')} MHz   Mem {gpu_diag.get('mem_clock_mhz')} MHz")
 
     def plot_training(self, save_dir: str = "./outputs/plots") -> None:
         os.makedirs(save_dir, exist_ok=True)
