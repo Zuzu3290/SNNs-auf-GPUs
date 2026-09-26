@@ -214,7 +214,7 @@ def test_reset_loader_order() -> None:
                 torch.randperm(20, generator=loader.generator).tolist() == first)
 
     wrapped = FakeWrapper(FakeLoader(loader_generator(0)))
-    suite.check("it reaches through a PrefetchedLoader-style wrapper",
+    suite.check("it reaches through a DeviceLoader-style wrapper",
                 reset_loader_order(wrapped, 0) is True)
     suite.check("an unshuffled loader reports False, not an error",
                 reset_loader_order(FakeLoader(None), 0) is False)

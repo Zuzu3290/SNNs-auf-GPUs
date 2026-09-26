@@ -7,12 +7,12 @@ TWO WAYS TO RUN, BOTH SUPPORTED
         is chosen at the prompt, and output goes to ./outputs -- exactly as this
         pipeline has always worked.
 
-    python learning/main.py --config experiments/ex2/config.yaml --experiment ex2 --framework sinabs
-        One overlay config per experiment, output routed into experiments/ex2/.
+    python learning/main.py --config experiments/experiment2/n_caltech101.yaml --experiment experiment2 --framework sinabs
+        One overlay config per experiment, output routed under the records root.
 
 THE DIVIDING LINE
 -----------------
-    the CONFIG describes the experiment   -- neuron, architecture, framing, epochs
+    the CONFIG describes the experiment   -- neuron, architecture, binning, epochs
     the COMMAND LINE describes this run   -- which folder, which machine, which
                                              framework, which seed
 
@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from skeleton.config_loader import ConfigError, load_config
-from skeleton.snn_config import FW_TO_CFG_KEY, Settings
+from skeleton.snn_config import FW_TO_CFG_KEY, MODEL_CHOICES, Settings
 from skeleton.workflow_config import WorkflowSettings
 
 # Where output lands when no --experiment is given: this pipeline's own existing
@@ -77,7 +77,7 @@ def add_common_args(
     )
     if framework:
         parser.add_argument(
-            "--framework", default=None, choices=sorted(FW_TO_CFG_KEY),
+            "--framework", default=None, choices=MODEL_CHOICES,
             help="overrides training.framework from the config",
         )
     if seed:

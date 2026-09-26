@@ -40,10 +40,9 @@ SHARED_PARAM_HINTS = ("conv", "fc", "linear", "weight", "bias")
 def seed_everything(seed: int) -> None:
     """Seed every RNG that can affect a run's trajectory.
 
-    numpy and the stdlib `random` matter here as well as torch: torchvision's
-    RandomRotation (the train augmentation in data_pipeline) and
-    torch.utils.data.random_split both draw from torch, while tonic's own
-    transforms can reach for numpy.
+    numpy and the stdlib `random` matter here as well as torch:
+    torch.utils.data.random_split draws from torch, while tonic's own transforms
+    can reach for numpy.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -86,7 +85,7 @@ def reset_loader_order(loader, seed: int) -> bool:
     labels [5,2,2,8...], pass 2 gave [7,7,4,1...]. Left unreset, a cross-framework
     comparison is partly measuring which batches each framework happened to get.
 
-    Accepts either a raw DataLoader or a PrefetchedLoader wrapping one. Returns
+    Accepts either a raw DataLoader or a DeviceLoader wrapping one. Returns
     False if the loader has no generator (an unshuffled loader, already deterministic).
     """
     inner = getattr(loader, "loader", loader)

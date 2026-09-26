@@ -25,10 +25,10 @@ OPTIMIZERS = ("nadam", "adam", "adamw", "sgd")
 def build_optimizer(params, cfg) -> torch.optim.Optimizer:
     """The ONE optimizer, shared by every framework.
 
-    Reads training.optimizer.{type,lr,weight_decay,momentum} from SNN_module.yaml via
-    Settings. Not per-framework: these are plain torch, none of the four SNN libraries
-    supplies them, and giving a framework its own would mean comparing training recipes
-    rather than frameworks.
+    Reads training.optimizer.{type,lr,weight_decay,momentum} from the merged config.
+    Experiment 2 shares one optimizer across frameworks so the neuron is the only
+    variable; experiment 3 overrides it per framework, because an author publishes a
+    learning rate along with a neuron and the two are not separable in practice.
 
     An unrecognised name RAISES. This previously fell through to Adam for anything it
     did not recognise, so a typo produced a real run with the wrong optimizer and no
@@ -196,6 +196,11 @@ def sum_over_time_cross_entropy(spk_rec: torch.Tensor, targets: torch.Tensor) ->
 LOSSES = ("cross_entropy", "mse_count")
 
 
+def mean_over_time_mse(out_rec: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Regression counterpart of sum_over_time_cross_entropy: average the continuous readout over T, then plain torch MSE. Belongs to none of the four libraries, which is what makes it neutral."""
+    return F.mse_loss(out_rec.mean(dim=0), targets.float())
+
+
 def build_loss(cfg):
     """The ONE loss, shared by every framework.
 
@@ -207,6 +212,8 @@ def build_loss(cfg):
 
       cross_entropy — torch's own loss on spike counts summed over T. Belongs to none
                       of the four libraries, which is what makes it neutral.
+      mse_regression— torch's own MSE on the time-averaged continuous readout, for the
+                      regression datasets. Neutral for the same reason cross_entropy is.
       mse_count     — snnTorch's functional.mse_count_loss. Available, but it belongs
                       to ONE of the four frameworks: do not use it for a
                       cross-framework comparison run.
@@ -215,6 +222,9 @@ def build_loss(cfg):
 
     if loss_name == "cross_entropy":
         return sum_over_time_cross_entropy
+
+    if loss_name == "mse_regression":
+        return mean_over_time_mse
 
     if loss_name == "mse_count":
         from snntorch import functional as SF
@@ -233,20 +243,29 @@ class DenseTimestepBuffer:
     """Per-timestep spike buffer for SNN forward passes: push() once per
     timestep, stack() to reconstruct [T, B, ...] for loss/metrics."""
 
-    def __init__(self) -> None:
+    def __init__(self, sequence: bool = False) -> None:
         self.events: List[torch.Tensor] = []
         self.lock = threading.Lock()
+        # A layer driven in multi-step mode is called ONCE with the whole [T, batch, ...]
+        # stack instead of T times with [batch, ...]. Stacking those pushes would give
+        # [1, T, batch, ...] -- a rank every metric below reads wrongly, and wrongly
+        # without failing. Concatenating along time is the correct join for that shape,
+        # and it stays correct if a pass ever pushes more than once.
+        self.sequence = sequence
 
     def push(self, spk: torch.Tensor) -> None:
         tensor = spk.detach()
         with self.lock:
             self.events.append(tensor)
 
+    def join(self) -> Optional[torch.Tensor]:
+        if not self.events:
+            return None
+        return torch.cat(self.events, dim=0) if self.sequence else torch.stack(self.events)
+
     def stack(self) -> Optional[torch.Tensor]:
         with self.lock:
-            if not self.events:
-                return None
-            return torch.stack(self.events)
+            return self.join()
 
     def clear(self) -> None:
         with self.lock:
@@ -259,9 +278,8 @@ class DenseTimestepBuffer:
         call every batch without forcing a CUDA sync; the caller decides
         when (if ever) to read it back to host memory."""
         with self.lock:
-            if not self.events:
-                return None
-            return torch.stack(self.events).float().mean()
+            joined = self.join()
+            return None if joined is None else joined.float().mean()
 
 
 class ActivityMonitor:
@@ -288,7 +306,14 @@ class ActivityMonitor:
 
     def __init__(self, layer_map: Optional[Dict[str, nn.Module]] = None):
         layer_map = layer_map or {}
-        self.buffers: Dict[str, DenseTimestepBuffer] = {name: DenseTimestepBuffer() for name in layer_map}
+        # The buffer is told the layer's calling convention rather than guessing from
+        # the tensor it receives: a [T, batch, C, H, W] push and a [batch, C, H, W] push
+        # from a 5-D-input layer are the same rank, so shape alone cannot distinguish
+        # them. The layer already declares it -- see BaseLIF.consumes_sequence.
+        self.buffers: Dict[str, DenseTimestepBuffer] = {
+            name: DenseTimestepBuffer(sequence=layer.consumes_sequence())
+            for name, layer in layer_map.items()
+        }
         self.paused = False
         for name, layer in layer_map.items():
             layer.register_forward_hook(self.make_hook(name))
@@ -363,43 +388,93 @@ def cv_isi_single_neuron(spike_times: np.ndarray) -> Optional[float]:
     return float(isi.std() / mean) if mean > 0 else None
 
 
-def compute_cv_isi(activity_snapshot: Dict[str, Optional[torch.Tensor]], sample_idx: int = 0) -> Dict[str, float]:
+def cv_isi_population(trains: np.ndarray) -> tuple[Optional[float], float]:
+    """Mean CV_ISI over every spike train in [T, M] that produced at least one interval, and the percentage that did.
+
+    Vectorised over all M trains at once: a per-neuron Python loop over the 184,512
+    neurons of a conv layer, times the batch, is minutes of work for a diagnostic.
+    """
+    steps, count = trains.shape
+    if count == 0:
+        return None, 0.0
+    # nonzero on the transpose sorts by train, then by timestep, so consecutive entries
+    # sharing a train index are consecutive spikes and their difference is an interval.
+    train_index, timestep = np.nonzero(trains.T)
+    if len(timestep) < 2:
+        return None, 0.0
+    consecutive = train_index[1:] == train_index[:-1]
+    interval = (timestep[1:] - timestep[:-1])[consecutive].astype(np.float64)
+    group = train_index[1:][consecutive]
+
+    intervals_per_train = np.bincount(group, minlength=count).astype(np.float64)
+    total = np.bincount(group, weights=interval, minlength=count)
+    squares = np.bincount(group, weights=interval * interval, minlength=count)
+
+    qualified = intervals_per_train > 0
+    coverage = float(qualified.sum()) / count * 100.0
+    if not qualified.any():
+        return None, coverage
+    mean = total[qualified] / intervals_per_train[qualified]
+    # Population variance (ddof=0), matching numpy's default and cv_isi_single_neuron.
+    variance = np.maximum(squares[qualified] / intervals_per_train[qualified] - mean * mean, 0.0)
+    usable = mean > 0
+    if not usable.any():
+        return None, coverage
+    return float((np.sqrt(variance[usable]) / mean[usable]).mean()), coverage
+
+
+def compute_cv_isi(activity_snapshot: Dict[str, Optional[torch.Tensor]]) -> Dict[str, float]:
     """Per-layer + network-wide Coefficient of Variation of Inter-Spike-Interval
     (SNN_GPU_Evaluation_Metrics.md §2.2/§4.6): a per-neuron firing-regularity
     diagnostic, independent of firing rate. Low CV_ISI = clock-like, regular
     firing; near/above 1 = bursty/irregular.
 
     activity_snapshot: output of ActivityMonitor.recordings(), i.e.
-    {layer_name: [T, B, ...] spike tensor}. Only sample `sample_idx` of the
-    batch is used (same "sample 0" convention as SNNTrainer.plot_raster) —
-    this is a diagnostic snapshot, not a training-time metric, so a single
-    representative sample per layer is the intentional scope, not a
-    shortcut. Does the CPU/numpy conversion internally; call this only from
-    an already-deferred (end-of-epoch/end-of-run) reporting pass, never from
-    inside the hot batch loop.
+    {layer_name: [T, B, ...] spike tensor}. EVERY (neuron, sample) pair in the
+    snapshot is treated as its own short spike train and all of them are pooled.
+    Does the CPU/numpy conversion internally; call this only from an already-
+    deferred (end-of-epoch/end-of-run) reporting pass, never from inside the
+    hot batch loop.
 
-    Returns {layer_name: mean_cv_isi} plus a "network_wide" key averaging
-    across all layers that had at least one multi-spike neuron. Layers with
-    no qualifying neuron (all silent or all firing exactly once) are
-    omitted rather than reported as a misleading 0.0.
+    WHY POOLED, AND WHY COVERAGE IS REPORTED BESIDE THE VALUE. The standard
+    estimator is only asymptotically unbiased, and intervals seen inside a fixed
+    window are right-censored (Rajdl & Kostal 2023) — both biases bite hardest
+    exactly here, because T is 8 to 16 timesteps and a neuron firing at 4% is
+    expected to spike less than once. MEASURED on DVS128 Gesture: 14.8% of lif1
+    neurons fire twice in 16 steps and only 0.2% of lif2 do, and a neuron that
+    fires exactly twice yields CV 0 by construction, since one interval has no
+    spread. Pooling every neuron of every sample is the parallel-spike-trains
+    approach that regime calls for, and it removes the previous version's
+    variance — it read one sample of one batch — but it cannot remove the bias.
+    So the qualifying fraction travels with the number.
+
+    THIS VALUE IS THEREFORE COMPARATIVE, NOT ABSOLUTE. Five models over the same
+    window at similar rates carry the same bias, so ranking them is sound.
+    Reading it against published CV_ISI values, where a spike train runs for
+    seconds and carries tens of intervals, is not.
+
+    Returns {layer_name: mean_cv_isi} plus a "network_wide" key averaging across
+    all layers that had at least one qualifying train, a "coverage" mapping of
+    layer_name -> percentage of trains that contributed an interval, and
+    "coverage_network_wide". Layers with no qualifying train (all silent, or all
+    firing exactly once) are omitted rather than reported as a misleading 0.0.
     """
     per_layer: Dict[str, float] = {}
+    coverage: Dict[str, float] = {}
     for name, spk in activity_snapshot.items():
         if spk is None:
             continue
-        # [T, B, ...] -> sample -> [T, N]
-        sample = spk[:, sample_idx] if spk.dim() > 1 else spk
-        flat = sample.detach().cpu().numpy().reshape(sample.shape[0], -1)
-        cvs = [
-            cv_isi_single_neuron(np.nonzero(flat[:, n])[0])
-            for n in range(flat.shape[1])
-        ]
-        cvs = [c for c in cvs if c is not None]
-        if cvs:
-            per_layer[name] = float(np.mean(cvs))
+        # [T, B, ...] -> [T, B * neurons]: one column per (neuron, sample) pair.
+        trains = spk.detach().reshape(spk.shape[0], -1).to(torch.bool).cpu().numpy()
+        value, covered = cv_isi_population(trains)
+        if value is not None:
+            per_layer[name] = value
+            coverage[name] = covered
 
     if per_layer:
         per_layer["network_wide"] = float(np.mean(list(per_layer.values())))
+        per_layer["coverage"] = coverage
+        per_layer["coverage_network_wide"] = float(np.mean(list(coverage.values())))
     return per_layer
 
 
@@ -449,6 +524,22 @@ def measure_dense_macs(model, sample_batch: torch.Tensor) -> Dict[str, float]:
         for h in handles:
             h.remove()
 
+    # PER TIMESTEP, always -- the caller multiplies by T (inference.py: rate * macs * T),
+    # so a figure that already covered T would be counted twice.
+    #
+    # Whether it does depends on how the network drives its neurons, which is invisible
+    # here: a per-timestep network hands each Conv2d [batch, C, H, W], but a multi-step
+    # one folds time into the batch and hands it [T*batch, C, H, W] (see
+    # spiking_net.run_sequence). The captured tensor looks perfectly ordinary in both
+    # cases -- only its leading dimension differs -- so the fold is detected by comparing
+    # it against the batch dimension of the real input rather than assumed either way.
+    #
+    # MEASURED: without this, SpikingJelly's multi-step + cupy arm recorded a SynOps
+    # energy of 1.91e9 pJ/sample against the single-step control's 1.21e8 -- a ratio of
+    # 15.8 on a T=16 run. The two are verified to emit bit-identical spikes, so the
+    # entire difference was this double count.
+    batch = sample_batch.shape[1] if sample_batch.dim() == 5 else sample_batch.shape[0]
+
     dense_macs: Dict[str, float] = {}
     for name, module in layer_map.items():
         captured_input = captured.get(name)
@@ -456,7 +547,8 @@ def measure_dense_macs(model, sample_batch: torch.Tensor) -> Dict[str, float]:
             continue
         with torch.no_grad(), FlopCounterMode(display=False) as fc:
             module(captured_input)
-        dense_macs[name] = fc.get_total_flops() / 2.0
+        fold = max(1, round(captured_input.shape[0] / batch)) if batch else 1
+        dense_macs[name] = fc.get_total_flops() / 2.0 / fold
 
     return dense_macs
 
@@ -610,3 +702,59 @@ def select_inference_mode() -> bool:
         print(f"[MAIN] Invalid selection '{choice}' — defaulting to statistics only")
         choice = "1"
     return choice == "2"
+
+
+def measure_activation_density(model, loader, device, max_batches: int = 8) -> dict:
+    """Per-layer activation density, measured the SAME way for a spiking and a non-spiking model.
+
+    THE PROBLEM THIS SOLVES. The existing activity figures come from two places, and
+    neither is fair across the two model types. SNNTester derives its spike rate from
+    `spk_rec.sum()` -- the OUTPUT layer's values, which is a spike count for a LIF
+    readout and a sum of magnitudes for a ReLU one. ActivityMonitor's hooks record each
+    layer's raw output, which is binary for a LIF and continuous for a ReLU. Comparing
+    either across the SNN and the control would be comparing a count against a
+    magnitude, and the control would look absurdly "active" for arithmetic reasons.
+
+    BaseLIF's own counters do not have that problem: a LIF layer records its binary
+    spikes and ReLUActivation records `(output > 0)`, so both accumulate the same
+    quantity -- the fraction of units that emitted anything. That is the honest common
+    ground, and 1 - density is the activation sparsity the efficiency claim rests on.
+
+    Run as its OWN untimed pass, after the timed test, for two reasons: counting costs
+    an extra reduction per layer per timestep and would bias the throughput and latency
+    figures, and the counters must be read on a clean window rather than whatever the
+    test pass happened to leave behind.
+    """
+    # The classification models wrap a SpikingNet in .net; the dense ones (flow,
+    # detection) hold their neuron layers directly and implement the counting contract
+    # themselves. Both are measured here, or neither would be comparable with the other.
+    net = getattr(model, "net", None) or model
+    if not hasattr(net, "set_spike_counting"):
+        return {}
+
+    was_training = getattr(model, "training", False)
+    model.eval_mode()
+    net.set_spike_counting(True)
+    try:
+        with torch.no_grad():
+            for index, (data, _) in enumerate(loader):
+                if index >= max_batches:
+                    break
+                if model.tensor_format() == "BT":
+                    data = data.permute(1, 0, 2, 3, 4).contiguous()
+                model(data)
+        per_layer = net.spike_rates()
+    finally:
+        net.set_spike_counting(False)
+        if was_training:
+            model.train_mode()
+
+    hidden = {name: rate for name, rate in per_layer.items() if name != "lif_out"}
+    return {
+        "per_layer": per_layer,
+        # Mean over HIDDEN layers only: the readout's density is set by the class count
+        # rather than by the representation, so averaging it in would make a 101-class
+        # row incomparable with an 11-class one.
+        "hidden_mean": (sum(hidden.values()) / len(hidden)) if hidden else None,
+        "layers_measured": len(per_layer),
+    }

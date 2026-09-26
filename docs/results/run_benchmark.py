@@ -5,14 +5,12 @@ on real event-camera data.
 Two run modes:
   Diagnostic (default) — EPOCHS/ITERA deliberately small, finishes in one sitting,
     good for confirming everything runs and comparing the *shape* of behavior.
-  Full (--full) — EPOCHS=10, iterates the entire train/test set, plus a full
-    adversarial-robustness pass (FGSM + PGD-20) per framework, same as main.py.
+  Full (--full) — EPOCHS=10, iterates the entire train/test set.
 
 Usage:
     python docs/results/run_benchmark.py                          # diagnostic, N-MNIST
     python docs/results/run_benchmark.py --dataset "ASL-DVS"       # any DATASET_REGISTRY name
     python docs/results/run_benchmark.py --full --cooldown-minutes 20
-    python docs/results/run_benchmark.py --full --trades           # TRADES on during training
 """
 import sys
 import argparse
@@ -42,7 +40,6 @@ from event_data_workflow import NeuromorphicEncoder, DATASET_REGISTRY
 from event_data_workflow.system_monitor import PipelineMonitor
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
-from learning.robustness import AdversarialEvaluator
 from frameworks.snn_torch import SNN_TORCH
 from frameworks.snn_norse import SNN_NORSE
 from frameworks.snn_spikingjelly import SNN_SJ
@@ -181,14 +178,6 @@ def run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, 
     test_results = tester.run(csv_path=str(data_dir / f"{name}_test.csv"))
     test_time_s = time.perf_counter() - t0
 
-    # Same AdversarialEvaluator main.py runs at the end of a single-framework
-    # session — run here per framework too, against the same (unlimited) test_loader
-    # main.py would use, not the LimitedLoader test-batch cap used for the timed test above.
-    adv_results = None
-    if task_type == "classification":
-        evaluator = AdversarialEvaluator(model, test_loader, cfg, device)
-        adv_results = evaluator.evaluate(csv_path=str(data_dir / f"{name}_adversarial.csv"))
-
     train_energy_j = None  # pulled from the per-epoch CSV below, matching make_plots.py's approach
     train_avg_power_w = None
     train_csv = data_dir / f"{name}_train.csv"
@@ -239,7 +228,6 @@ def run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, 
         "test_confusion_matrix": test_results["confusion_matrix"],
         "test_gt_distribution": test_results["gt_distribution"],
         "test_pred_distribution": test_results["pred_distribution"],
-        "adversarial_robustness": adv_results,
     }
 
     out_path = data_dir / f"{name}_summary.json"
@@ -259,7 +247,7 @@ def run_one(name, ModelClass, cfg, train_loader, test_loader, device, data_dir, 
 # parameter fairness (see docs/Haseeb-open-items.md), so results from either
 # side can be compared directly rather than needing to unpack nested JSON.
 RUN_CSV_COLUMNS = [
-    "run_id", "dataset", "framework", "task_type", "epochs", "trades_enabled",
+    "run_id", "dataset", "framework", "task_type", "epochs",
     "weight_fingerprint", "idle_power_cold_w", "idle_power_hot_w",
     "train_time_s", "test_time_s", "train_energy_j", "train_energy_dynamic_j",
     "train_avg_power_w", "energy_warnings",
@@ -296,9 +284,6 @@ def main():
     parser.add_argument("--full", action="store_true",
                          help="Full-scale run: 5 epochs, entire train/test set (vs the small "
                               "diagnostic default). Takes much longer.")
-    parser.add_argument("--trades", action="store_true",
-                         help="Enable TRADES adversarial training (off by default here — "
-                              "diagnostic/comparison runs use plain training).")
     parser.add_argument("--cooldown-minutes", type=float, default=0.0,
                          help="Idle wait between each framework's run, so consecutive runs don't "
                               "share GPU thermal/power state. 0 = no wait (default).")
@@ -315,7 +300,7 @@ def main():
         for name in runnable:
             print(f"\n{'#'*60}\n#  DATASET: {name}\n{'#'*60}")
             try:
-                run_dataset(name, config, args.trades, args.cooldown_minutes)
+                run_dataset(name, config, args.cooldown_minutes)
             except Exception as e:
                 print(f"  !! Dataset '{name}' FAILED entirely: {e}")
                 traceback.print_exc()
@@ -329,10 +314,10 @@ def main():
             json.dump(overall_errors, f, indent=2)
         return
 
-    run_dataset(args.dataset, config, args.trades, args.cooldown_minutes)
+    run_dataset(args.dataset, config, args.cooldown_minutes)
 
 
-def run_dataset(dataset_name: str, config: dict = DIAGNOSTIC_CONFIG, trades_enabled: bool = False,
+def run_dataset(dataset_name: str, config: dict = DIAGNOSTIC_CONFIG,
                  cooldown_minutes: float = 0.0):
     entry = next((e for e in DATASET_REGISTRY.values() if e["name"].upper() == dataset_name.upper()), None)
     if entry is None:
@@ -345,9 +330,6 @@ def run_dataset(dataset_name: str, config: dict = DIAGNOSTIC_CONFIG, trades_enab
             f"'{entry['name']}' needs regression model variants (frameworks/personal/), "
             "not present in this checkout — see docs/Haseeb-open-items.md."
         )
-    if task_type == "regression" and trades_enabled:
-        print("  Note: --trades requested but this dataset is regression — TRADES doesn't "
-              "apply to a dense target and is skipped automatically (see training.py).")
 
     data_dir = HERE / "data" / dataset_slug(entry["name"])
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -359,7 +341,6 @@ def run_dataset(dataset_name: str, config: dict = DIAGNOSTIC_CONFIG, trades_enab
         cfg.ITERA = config["ITERA"]
     else:
         cfg.ITERA = 10**9  # sentinel "no cap" — SNNTrainer.train() breaks on the loader's own StopIteration first
-    cfg.TRADES_ENABLED = trades_enabled
     if cfg.DEVICE == "auto":
         # This is an automated/reproducible benchmark script — always autodetect,
         # never prompt (unlike main.py's select_hardware_config, which can).
@@ -373,7 +354,7 @@ def run_dataset(dataset_name: str, config: dict = DIAGNOSTIC_CONFIG, trades_enab
     print(f"Train batches: {len(train_loader)}  Test batches: {len(test_loader)} "
           f"(using {'all' if test_batches is None else test_batches})")
     print(f"Mode: {'FULL' if config is FULL_CONFIG else 'diagnostic'}   "
-          f"Epochs: {cfg.EPOCHS}   TRADES: {'ON' if trades_enabled else 'off'}")
+          f"Epochs: {cfg.EPOCHS}")
 
     results = {}
     errors = {}
@@ -386,7 +367,7 @@ def run_dataset(dataset_name: str, config: dict = DIAGNOSTIC_CONFIG, trades_enab
             r = results[name]
             csv_rows.append({
                 "run_id": run_id, "dataset": entry["name"], "framework": name,
-                "task_type": task_type, "epochs": cfg.EPOCHS, "trades_enabled": trades_enabled,
+                "task_type": task_type, "epochs": cfg.EPOCHS,
                 "weight_fingerprint": r["weight_fingerprint"],
                 "idle_power_cold_w": r["idle_power_cold_w"], "idle_power_hot_w": r["idle_power_hot_w"],
                 "train_time_s": round(r["train_time_s"], 2), "test_time_s": round(r["test_time_s"], 2),

@@ -57,26 +57,12 @@ notes.txt
 
 # Personal/local-only work — not shared with collaborators
 # src/learning/frameworks/personal/
-/diagnostics
 /comparison
 scalability.md
 frameworks/regression/
 scalability_tests
 
-
-# Experiment output -- produced by a run, never source.
-#
-#   TRACKED    experiments/exN/*        config.yaml, README.md, design notes -- the
-#                                       files that DESCRIBE the experiment
-#   IGNORED    experiments/exN/<any>/   results/, plots/, figures/, equivalence/ and
-#                                       anything added later -- the files a RUN writes
-#
-# Without this, a Colab run and a laptop run fight over the same generated files, and
-# every framework's CSVs and PNGs land in the diff of the next commit.
-#
-# The rule ignores the CONTENTS of each subfolder rather than the subfolder itself.
-# git cannot re-include a file whose parent DIRECTORY is excluded, so `experiments/*/*/`
-# would make the .gitkeep exception below impossible -- and then a fresh clone would not
-# have the folders at all.
+/experiments
 experiments/*/*/**
 !experiments/*/*/.gitkeep
+/extra work

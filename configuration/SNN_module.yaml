@@ -13,15 +13,8 @@ training:
   # null = auto: one epoch is a full pass, derived from dataset size / batch size.
   # A number caps the epoch at that many batches (never more than a full pass).
   iterations_per_epoch: null
-
-  # true  = live GPU probe picks batch_size, overriding the value above
-  # false = batch_size above is used exactly as written, no probe
-  # Either way iterations_per_epoch is resolved against the real loader.
   calibrate_batch_size: true
 
-  # Untimed forward+backward passes before timing starts, so CUDA kernel compilation and
-  # allocator warm-up are not charged to whichever framework runs first (measured: 174 ms
-  # vs 41-80 ms). No optimizer step is taken. 0 disables.
   warmup_iterations: 5
 
   # Samples used for the batch-size-1 latency measurement (MLPerf Single-Stream).
@@ -32,16 +25,12 @@ training:
   # 0 skips it, and the three inference_latency_bs1_* columns are then left empty.
   latency_samples: 100
 
-  # ONE optimizer and ONE loss for every framework -- these are plain torch, so giving a
-  # framework its own would compare training recipes instead of frameworks.
   optimizer:
     type: nadam                 # nadam | adam | adamw | sgd  (unknown name raises)
     lr: 0.002
     weight_decay: 0.0
     momentum: 0.0               # sgd only, ignored by the others
 
-  # cross_entropy = torch's own, neutral across frameworks
-  # mse_count     = snnTorch's; belongs to ONE framework, so not neutral for comparison
   loss: cross_entropy
 
   # none   = learning rate stays constant
@@ -50,13 +39,6 @@ training:
 
   use_amp: false                # true | false. Changes speed AND numerics; state it explicitly.
   grad_accum_steps: 1           # batches accumulated before an optimizer step
-
-
-  # TRADES robustness training: loss = CE(clean) + lambda * KL(clean || adversarial).
-  trades_enabled: false         # adds ~(trades_steps * 2) forward passes per batch
-  trades_epsilon: 0.05          # perturbation budget per element. 0.001 (subtle) .. 0.3 (heavy)
-  trades_lambda: 4.0            # clean accuracy vs robustness. 1.0 (clean) .. 10.0 (robust)
-  trades_steps: 3               # PGD iterations per batch. 1 (fast) .. 40 (strongest)
 
   # Two-sided per-neuron activity regularization on hidden LIF layers. Adds a loss term,
   # so it must be identical across frameworks -- keep off for comparison runs.
@@ -70,7 +52,4 @@ output:
   output_dir: ./outputs
   plot_dir: ./outputs/plots
   data_dir: ./outputs/data
-  # Writes model_checkpoint.pt (model + optimizer state_dict) into the run's results
-  # folder, right after training finishes and before inference starts. false by
-  # default: opt in, since a checkpoint is real disk usage every run doesn't need.
-  save_checkpoint: false
+  save_checkpoint: true

@@ -1,18 +1,3 @@
-"""Numba-JIT-compiled replacements for tonic's two slowest per-sample preprocessing steps:
-denoising (tonic.functional.denoise_numpy) and framing (tonic.functional.to_frame_numpy,
-n_time_bins mode). Both loop over every raw event in pure Python; denoising alone was found
-responsible for ~93% of N-Caltech101's real preprocessing cost, and framing was measured at
-40-66ms/sample against denoising's ~10ms (diagnostics/probe_preprocessing_gil_release.py,
-since deleted -- see docs/results/ToFrame_Acceleration_Case_Study.pdf for the full writeup).
-
-Both kernels here run the same unchanged algorithm as tonic's reference, verified
-byte-identical on real data, only compiled instead of interpreted: denoise_numpy_numba
-(~72x faster) and to_frame_numba (~6.5-12.4x faster; to_frame_numba covers n_time_bins
-framing only -- time_window mode is a different algorithm, not implemented here).
-
-numba is a pinned dependency (requirements.txt), so it is imported directly -- no
-availability fallback.
-"""
 import numpy as np
 from numba import njit
 
@@ -116,18 +101,6 @@ def denoise_numpy_numba(events, filter_time: float = 10000):
     return events[keep]
 
 
-class FastDenoise:
-    """Drop-in replacement for tonic.transforms.Denoise -- a picklable class, not a closure,
-    for Windows' spawn-based multiprocessing (same reason FixedToFrame exists). ~72x faster,
-    verified byte-identical output on real data."""
-
-    def __init__(self, filter_time: float):
-        self.filter_time = filter_time
-
-    def __call__(self, events):
-        return denoise_numpy_numba(events, filter_time=self.filter_time)
-
-
 @njit(cache=True)
 def searchsorted_left(t, target):
     """First index where t[idx] >= target, matching np.searchsorted(t, target, side='left')
@@ -181,7 +154,7 @@ def accumulate_numba(x, y, p, boundaries, n_time_bins, height, width, n_polariti
 def to_frame_numba(events, sensor_size, n_time_bins: int):
     """Drop-in for tonic.functional.to_frame_numpy(..., n_time_bins=n_time_bins) -- same
     (T, P, H, W) int16 output. Does not replicate the empty-events zero-fill branch;
-    callers (FastToFrame below) must guard len(events) == 0 the same way
+    callers (FastPreprocessing below) must guard len(events) == 0 the same way
     tonic.transforms.ToFrame.__call__ does, before this is ever invoked."""
     width, height, n_polarities = sensor_size
     x = events["x"].astype(np.int64)
@@ -193,17 +166,29 @@ def to_frame_numba(events, sensor_size, n_time_bins: int):
     return accumulate_numba(x, y, p, boundaries, n_time_bins, height, width, n_polarities)
 
 
-class FastToFrame:
-    """Drop-in replacement for tonic.transforms.ToFrame (n_time_bins mode only) --
-    a picklable class, not a closure, for Windows' spawn-based multiprocessing (same
-    reason FastDenoise/FixedToFrame are classes, not functions)."""
+class FastPreprocessing:
+    """Drop-in replacement for tonic.transforms.Denoise and tonic.transforms.ToFrame
+    (n_time_bins mode only -- time_window mode is a different algorithm, not implemented
+    here). A picklable class, not a closure, for Windows' spawn-based multiprocessing.
+    Verified byte-identical output to tonic's reference on real data: denoise ~72x
+    faster, to_frame ~6.5-12.4x faster.
 
-    def __init__(self, sensor_size, n_time_bins: int):
+    sensor_size/n_time_bins are optional so denoise() can be used standalone (paired
+    with tonic's own ToFrame) when the caller needs time_window mode instead."""
+
+    def __init__(self, filter_time: float, sensor_size=None, n_time_bins: int | None = None):
+        self.filter_time = filter_time
         self.sensor_size = sensor_size
         self.n_time_bins = n_time_bins
 
-    def __call__(self, events):
+    def denoise(self, events):
+        return denoise_numpy_numba(events, filter_time=self.filter_time)
+
+    def to_frame(self, events):
         if len(events) == 0:
             w, h, p = self.sensor_size
             return np.zeros((self.n_time_bins, p, h, w), dtype=np.int16)
         return to_frame_numba(events, sensor_size=self.sensor_size, n_time_bins=self.n_time_bins)
+
+    def __call__(self, events):
+        return self.to_frame(self.denoise(events))

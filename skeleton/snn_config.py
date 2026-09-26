@@ -14,6 +14,18 @@ FW_TO_CFG_KEY = {
     "sinabs":   "sinabs",
 }
 
+# The non-spiking control (frameworks/cnn_model.py). Deliberately NOT in
+# FW_TO_CFG_KEY: that map means "framework -> its neuron config block", and a ReLU
+# unit has no neuron block to point at. Putting it there made every consumer of that
+# map -- active_fw_cfg, check_network's four-way LIF comparison, the neuron picker --
+# ask for a neuron spec that does not and should not exist.
+CONTROL_MODEL = "cnn"
+
+# What training.framework and --framework accept: the four SNN backends plus the
+# control. One selector for all five, so the control produces the same results row,
+# the same run_id shape and the same plot legend entry as the models it controls for.
+MODEL_CHOICES = sorted(FW_TO_CFG_KEY) + [CONTROL_MODEL]
+
 
 class Settings:
     def __init__(self, config: dict | None = None, overlay: str | None = None):
@@ -52,11 +64,30 @@ class Settings:
         # The conv-SNN architecture: ONLY the network internals. Filter counts, kernel
         # sizes and the pool size are yours to choose; the input shape and the class
         # count are not -- see the properties below.
-        self.CONV1_OUT    = conv.require_int("conv1_out")
-        self.CONV1_KERNEL = conv.require_int("conv1_kernel")
-        self.CONV2_OUT    = conv.require_int("conv2_out")
-        self.CONV2_KERNEL = conv.require_int("conv2_kernel")
+        #
+        # One entry per Conv -> LIF -> MaxPool block, in order. The list is the single
+        # source of truth for the architecture's DEPTH, which is what lets a bigger
+        # dataset get a bigger network without editing any Python.
+        self.CONV_BLOCKS  = conv.require_conv_blocks("blocks")
         self.POOL_KERNEL  = conv.require_int("pool_kernel")
+        # Padding on every conv. 0 is the original no-padding arithmetic.
+        self.CONV_PADDING = conv.require_int("padding")
+        # Hidden fully-connected layers between Flatten and the output layer, one width
+        # per entry. null wires Flatten straight to the output; a single number is one
+        # layer; a list is several. Each fills a lif_fc1, lif_fc2, ... slot.
+        self.FC_HIDDEN    = conv.require_widths("fc_hidden")
+        # BatchNorm2d between each conv and its LIF. Required for any stack deeper than
+        # about three layers -- see frameworks/spiking_net.build_layers for the measured
+        # activity collapse it prevents.
+        self.BATCH_NORM   = conv.require_bool("batch_norm")
+
+        # Named shortcuts to the first two blocks, for the models that are still
+        # hand-written two-block stacks (frameworks/snn_lif.py, frameworks/regression/).
+        # Derived, never configured: CONV_BLOCKS above is the only source.
+        self.CONV1_OUT    = self.CONV_BLOCKS[0]["out"]
+        self.CONV1_KERNEL = self.CONV_BLOCKS[0]["kernel"]
+        self.CONV2_OUT    = self.CONV_BLOCKS[min(1, len(self.CONV_BLOCKS) - 1)]["out"]
+        self.CONV2_KERNEL = self.CONV_BLOCKS[min(1, len(self.CONV_BLOCKS) - 1)]["kernel"]
 
         # Input shape and output classes belong to the DATASET REGISTRY, not to this
         # config. sensor_h / sensor_w / in_channels / num_classes were removed from
@@ -122,10 +153,6 @@ class Settings:
         self.LR_SCHEDULER             = training.require_choice("lr_scheduler",
                                                                  ["none", "cosine"])
 
-        self.TRADES_ENABLED           = training.require_bool("trades_enabled")
-        self.TRADES_EPSILON           = training.require_float("trades_epsilon")
-        self.TRADES_LAMBDA            = training.require_float("trades_lambda")
-        self.TRADES_STEPS             = training.require_int("trades_steps")
 
         self.ACTIVITY_REG_ENABLED     = training.require_bool("activity_reg_enabled")
         self.ACTIVITY_REG_MIN_RATE    = training.require_float("activity_reg_min_rate")
@@ -134,7 +161,7 @@ class Settings:
         self.ACTIVITY_REG_LAMBDA_HIGH = training.require_float("activity_reg_lambda_high")
 
         # Framework selector
-        self.FRAMEWORK = training.require_choice("framework", sorted(FW_TO_CFG_KEY))
+        self.FRAMEWORK = training.require_choice("framework", MODEL_CHOICES)
 
 
         # Dataset control
@@ -232,6 +259,8 @@ class Settings:
         network_architecture.yaml's `neuron:` section; optimizer and loss became one
         shared setting, since neither belongs to any of the four SNN libraries.
         """
+        if self.FRAMEWORK == CONTROL_MODEL:
+            return {}  # the control has no neuron to configure
         if self.FRAMEWORK not in FW_TO_CFG_KEY:
             raise ValueError(
                 f"training.framework='{self.FRAMEWORK}' has no FW_TO_CFG_KEY mapping. "
@@ -240,12 +269,12 @@ class Settings:
         return self.NEURON.get(FW_TO_CFG_KEY[self.FRAMEWORK], {})
 
     def compute_fc_in(self, sensor_h: int, sensor_w: int) -> int:
-        """Flattened size after both conv+pool stages — independent H/W so non-square sensors work."""
-        h = (sensor_h - self.CONV1_KERNEL + 1) // self.POOL_KERNEL
-        h = (h - self.CONV2_KERNEL + 1) // self.POOL_KERNEL
-        w = (sensor_w - self.CONV1_KERNEL + 1) // self.POOL_KERNEL
-        w = (w - self.CONV2_KERNEL + 1) // self.POOL_KERNEL
-        return self.CONV2_OUT * h * w
+        """Flattened size after every conv+pool block — independent H/W so non-square sensors work."""
+        h, w = sensor_h, sensor_w
+        for block in self.CONV_BLOCKS:
+            h = (h + 2 * self.CONV_PADDING - block["kernel"] + 1) // self.POOL_KERNEL
+            w = (w + 2 * self.CONV_PADDING - block["kernel"] + 1) // self.POOL_KERNEL
+        return self.CONV_BLOCKS[-1]["out"] * h * w
 
     def apply_dataset_shape(self, sensor_h: int, sensor_w: int, in_channels: int, num_classes: int):
         """Override conv-input shape and output classes with the selected dataset's actual
@@ -329,14 +358,19 @@ class Settings:
             row("Sensor", "not set yet -- comes from the dataset registry")
         else:
             row("Sensor", f"{sensor_h} × {sensor_w}   ({shape('IN_CHANNELS')} channels)")
-        row("Conv1",           f"{self.CONV1_OUT} filters   {self.CONV1_KERNEL}×{self.CONV1_KERNEL} kernel")
-        row("Conv2",           f"{self.CONV2_OUT} filters   {self.CONV2_KERNEL}×{self.CONV2_KERNEL} kernel")
-        row("Pool",            f"{self.POOL_KERNEL}×{self.POOL_KERNEL} MaxPool   (applied twice)")
+        for index, block in enumerate(self.CONV_BLOCKS, start=1):
+            row(f"Conv{index}", f"{block['out']} filters   {block['kernel']}×{block['kernel']} kernel")
+        row("Pool",            f"{self.POOL_KERNEL}×{self.POOL_KERNEL} MaxPool   "
+                               f"(after each of {len(self.CONV_BLOCKS)} conv blocks)")
+        row("Conv padding",    str(self.CONV_PADDING))
+        row("Batch norm",      "ENABLED" if self.BATCH_NORM else "DISABLED")
         row("FC input (auto)", shape("FC_IN"))
+        row("FC hidden",       " -> ".join(str(w) for w in self.FC_HIDDEN)
+                               if self.FC_HIDDEN else "none (Flatten -> output)")
         num_classes = getattr(self, "NUM_CLASSES", None)
         row("Output classes",  str(num_classes) if num_classes is not None else "N/A (regression target)")
 
-        cfg_key      = FW_TO_CFG_KEY[self.FRAMEWORK]
+        cfg_key      = FW_TO_CFG_KEY.get(self.FRAMEWORK, self.FRAMEWORK)
         neuron_types = self.NEURON_TYPES.get(cfg_key, {})
         section(f"NEURON TYPES — {fw}")
         for layer, ntype in neuron_types.items():
@@ -367,10 +401,6 @@ class Settings:
         row("AMP (mixed prec.)",  "ENABLED" if self.USE_AMP else "DISABLED")
 
         section("REGULARIZATION")
-        if self.TRADES_ENABLED:
-            row("TRADES",       f"ENABLED   eps={self.TRADES_EPSILON}   lambda={self.TRADES_LAMBDA}   steps={self.TRADES_STEPS}")
-        else:
-            row("TRADES",       "DISABLED")
         if self.ACTIVITY_REG_ENABLED:
             row("Activity reg", f"ENABLED   min={self.ACTIVITY_REG_MIN_RATE * 100:.0f}%   max={self.ACTIVITY_REG_MAX_RATE * 100:.0f}%")
         else:

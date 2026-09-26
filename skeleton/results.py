@@ -37,7 +37,7 @@ from typing import Any
 
 import torch
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 class ResultsError(Exception):
@@ -57,22 +57,51 @@ RUN_COLUMNS: list[str] = [
     "denoise_us", "epochs", "optimizer", "lr", "surrogate",
     # integrity -- the fairness evidence travels WITH the numbers
     "trainable_params", "weight_fingerprint",
-    # accuracy
+    # task performance. test_accuracy_pct is the CLASSIFICATION score and stays empty
+    # on a regression row; task_metric/task_score carry whichever score that
+    # application actually has (rmse for pose, epe for flow, accuracy_pct for the two
+    # classification sets) so one column can be plotted across all four.
     "test_accuracy_pct", "train_loss_final", "test_loss_final",
+    "task_metric", "task_score", "task_score_secondary",
     # speed
     "train_time_s", "train_time_per_epoch_s",
     "inference_throughput_samples_per_s",
     "inference_latency_bs1_ms", "inference_latency_bs1_mean_ms",
     "inference_latency_bs1_p90_ms",
-    # activity
-    "spike_rate_pct",
+    "inference_latency_amortised_p50_ms", "inference_latency_amortised_p90_ms",
+    "inference_latency_amortised_p99_ms",
+    # TRAINING-time forward and backward, meaned over epochs. Separate from every
+    # inference_* column above: those time a trained model answering, these time the
+    # learning step, and the backward is the half that carries BPTT's unroll.
+    "train_forward_latency_ms", "train_backward_latency_ms",
+    # architecture -- no longer fixed, so a row must say what network produced it
+    "neuron_model", "conv_blocks", "fc_hidden", "credit_assignment",
+    # activity / internal dynamics. "activation density" is the fair name: for a
+    # spiking layer it is the spike rate, for a ReLU layer the fraction of units
+    # emitting anything. Same measurement either way -- see relu_activation.py.
+    "spike_rate_pct", "test_activation_density_pct",
+    "spikes_per_neuron_per_inference", "cv_isi_mean",
+    "total_spikes_test", "input_to_output_ratio",
+    # operation counts and the energy MODELS built on them (estimates, not
+    # measurements -- the measured NVML joules are the block below)
+    # SynOps kept SEPARATE for the two phases rather than merged. Training runs the
+    # backward pass and many epochs; inference runs one forward pass on a trained
+    # network. A single figure spanning both answers neither question -- the deployment
+    # cost is the inference one, the cost of getting there is the training one.
+    "energy_per_sample_pj",
+    "infer_synops_energy_per_sample_pj", "train_synops_energy_pj_total",
+    "train_synops_energy_pj_per_epoch",
     # memory
     "peak_memory_train_mb", "peak_memory_infer_mb",
     "peak_reserved_train_mb", "peak_reserved_infer_mb",
     # energy (training run only)
     "nvml_update_interval_ms", "idle_power_cold_w", "idle_power_after_train_w",
     "train_energy_duration_s", "train_energy_j", "train_energy_dynamic_j",
+    "infer_energy_j", "infer_energy_dynamic_j",
     "energy_warnings",
+    # runtime GPU diagnostics -- a latency or energy figure is not comparable
+    # across rows without them (SNN_GPU_Evaluation_Metrics.md 2.4b)
+    "gpu_temp_c", "sm_clock_mhz", "mem_clock_mhz",
     # environment
     "gpu_name", "driver", "cuda", "torch_version", "framework_version",
     "python_version", "platform",
@@ -85,11 +114,25 @@ EPOCH_COLUMNS: list[str] = [
     "train_loss", "train_accuracy_pct",
     "test_loss", "test_accuracy_pct",
     "epoch_train_time_s", "spike_rate_pct",
+    # Measured every epoch by SNNTrainer.measure_activity() and written to the run's own
+    # training_results.csv, but previously stopping there -- so the per-epoch trend of
+    # the three metrics the comparison is actually about could not be plotted across
+    # frameworks. Forward and backward are reported separately because the backward pass
+    # through T unrolled timesteps is where BPTT's cost lives, and it is roughly twice
+    # the forward on every framework measured.
+    "forward_latency_ms", "backward_latency_ms",
+    "cv_isi_mean", "synops_energy_pj",
 ]
 
 LAYER_COLUMNS: list[str] = [
     "schema_version", "run_id", "layer_index", "layer_type",
     "neurons", "total_spikes", "opportunities", "spike_rate_pct",
+    # CV(ISI) PER LAYER, not only the network-wide mean. Averaging it across layers
+    # hides the thing it exists to show: firing regularity changes with depth, and a
+    # network whose first layer fires like a clock while its second bursts has the same
+    # mean as one that is uniformly irregular. The per-layer figures are the diagnostic;
+    # the mean is a summary of them, kept in runs.csv for one-number comparison only.
+    "cv_isi", "dense_macs_downstream",
 ]
 
 

@@ -4,7 +4,7 @@
 
 `skeleton/neuron_spec.py` has enforced this for the `neuron:` block since the merge
 began, and this module is the same rule applied to everything else -- `convolution:`,
-`training:`, `framing:`, `temporal_slicing:`, `augmentation:`, `cache:`,
+`training:`, `binning:`, `temporal:`, `cache:`,
 `resource_policy:`.
 
 WHY IT HAD TO SPREAD. The pattern being replaced was `conv.get("conv1_out", 12)`. A
@@ -139,6 +139,35 @@ class Section:
 
     def require_choice(self, key: str, allowed: Sequence[str]) -> str:
         return check_choice(self._fetch(key), self._tag(key), allowed, self._exc)
+
+    def require_widths(self, key: str) -> list[int]:
+        """A list of layer widths. Accepts null (none), a single int (one layer), or a list."""
+        value = self._fetch(key)
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [check_int(entry, f"{self._tag(key)}[{index}]", self._exc)
+                    for index, entry in enumerate(value)]
+        return [check_int(value, self._tag(key), self._exc)]
+
+    def require_conv_blocks(self, key: str) -> list[dict[str, int]]:
+        """A non-empty list of {out, kernel} conv-block mappings, checked entry by entry."""
+        value = self._fetch(key)
+        if not isinstance(value, list) or not value:
+            raise self._exc(
+                f"{self._tag(key)} must be a non-empty list of conv blocks, each a "
+                f"mapping with 'out' and 'kernel'. Got {type(value).__name__}."
+            )
+        blocks = []
+        for index, entry in enumerate(value):
+            if not isinstance(entry, dict):
+                raise self._exc(
+                    f"{self._tag(key)}[{index}] must be a mapping with 'out' and "
+                    f"'kernel', got {type(entry).__name__}"
+                )
+            block = Section(entry, f"{self._tag(key)}[{index}]", self._exc)
+            blocks.append({"out": block.require_int("out"), "kernel": block.require_int("kernel")})
+        return blocks
 
     # ---- nullable ----------------------------------------------------------
     #

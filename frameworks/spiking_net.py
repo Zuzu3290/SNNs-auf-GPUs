@@ -25,17 +25,23 @@ from frameworks.adapters.base import BaseLIF
 
 # The layer slot names the rest of this pipeline already uses: ActivityMonitor's keys,
 # synops_layer_map's keys, and the per-layer neuron picker in network_architecture.yaml.
-LIF_SLOTS = ("lif1", "lif2", "lif_out")
+def lif_slot_names(cfg, spiking_readout: bool = True) -> list[str]:
+    """Every LIF slot this config's architecture asks for, in build order: one lifN per conv block, then lif_fc when a hidden FC is configured, then lif_out unless the readout is linear."""
+    names = [f"lif{index}" for index in range(1, len(cfg.CONV_BLOCKS) + 1)]
+    names += [f"lif_fc{index}" for index in range(1, len(cfg.FC_HIDDEN) + 1)]
+    return names + ["lif_out"] if spiking_readout else names
 
 
 class FlattenSizeMismatch(Exception):
     """cfg.FC_IN and the measured flatten size disagree."""
 
 
-def build_layers(make_lif: Callable[[str], BaseLIF], cfg) -> list[nn.Module]:
-    """Every layer, in order, one line each.
+def build_layers(make_lif: Callable[[str], BaseLIF], cfg,
+                  spiking_readout: bool = True) -> list[nn.Module]:
+    """Every layer, in order: one Conv -> LIF -> MaxPool block per cfg.CONV_BLOCKS entry,
+    then Flatten, then an optional hidden Linear -> LIF, then the Linear -> LIF output.
 
-    Shapes on N-MNIST (34x34, 2 channels), per timestep:
+    Shapes on N-MNIST (34x34, 2 channels, the two-block default), per timestep:
 
         input                    2 x 34 x 34
         Conv2d(2->12, k5)       12 x 30 x 30     34 - 5 + 1 = 30
@@ -52,19 +58,51 @@ def build_layers(make_lif: Callable[[str], BaseLIF], cfg) -> list[nn.Module]:
 
     `make_lif` takes the slot name so the per-layer neuron picker in
     network_architecture.yaml is consulted once per slot -- see frameworks/adapters.
+
+    `convolution.batch_norm` inserts a BatchNorm2d between each conv and its LIF. It is
+    what keeps a DEEP stack alive: every LIF layer attenuates, so without normalisation
+    the firing rate falls roughly fourfold per layer and a six-layer network emits no
+    output spikes at all at initialisation (MEASURED on N-Caltech101: 4.16% -> 1.08% ->
+    0.40% -> 0.10% -> 0.00% -> 0.00%; with normalisation 5.51% -> 10.21% -> 14.61% ->
+    16.81% -> 6.94% -> 0.63%). BatchNorm2d is plain torch.nn, so it is literally the
+    same module in all four frameworks and leaves the neuron -- the thing being compared
+    -- untouched.
+
+    `spiking_readout=False` drops the final LIF, leaving the output Linear's continuous
+    value as the per-timestep prediction. That is what a REGRESSION head needs: a pose
+    or a flow vector is a real number, and a spike count cannot represent one. The conv
+    stack above it is unchanged, so a regression run and a classification run share the
+    same feature extractor and the same measurements.
     """
-    features: list[nn.Module] = [
-        nn.Conv2d(cfg.IN_CHANNELS, cfg.CONV1_OUT, kernel_size=cfg.CONV1_KERNEL),
-        make_lif("lif1"),
-        nn.MaxPool2d(cfg.POOL_KERNEL),
-        nn.Conv2d(cfg.CONV1_OUT, cfg.CONV2_OUT, kernel_size=cfg.CONV2_KERNEL),
-        make_lif("lif2"),
-        nn.MaxPool2d(cfg.POOL_KERNEL),
-        nn.Flatten(),
-    ]
+    features: list[nn.Module] = []
+    in_channels = cfg.IN_CHANNELS
+    for index, block in enumerate(cfg.CONV_BLOCKS, start=1):
+        features.append(nn.Conv2d(in_channels, block["out"], kernel_size=block["kernel"],
+                                   padding=cfg.CONV_PADDING))
+        if cfg.BATCH_NORM:
+            features.append(nn.BatchNorm2d(block["out"]))
+        features.append(name_slot(make_lif(f"lif{index}"), f"lif{index}"))
+        features.append(nn.MaxPool2d(cfg.POOL_KERNEL))
+        in_channels = block["out"]
+    features.append(nn.Flatten())
+
     flat = measure_flat_features(features, cfg)
     check_flat_features(flat, cfg)
-    return features + [nn.Linear(flat, cfg.NUM_CLASSES), make_lif("lif_out")]
+
+    head: list[nn.Module] = []
+    for index, width in enumerate(cfg.FC_HIDDEN, start=1):
+        head += [nn.Linear(flat, width), name_slot(make_lif(f"lif_fc{index}"), f"lif_fc{index}")]
+        flat = width
+    head.append(nn.Linear(flat, cfg.NUM_CLASSES))
+    if spiking_readout:
+        head.append(name_slot(make_lif("lif_out"), "lif_out"))
+    return features + head
+
+
+def name_slot(layer: BaseLIF, name: str) -> BaseLIF:
+    """Tag a LIF with the slot it fills, so named_lif_layers() reports real names at any depth."""
+    layer.slot_name = name
+    return layer
 
 
 def measure_flat_features(layers: list[nn.Module], cfg) -> int:
@@ -77,14 +115,32 @@ def measure_flat_features(layers: list[nn.Module], cfg) -> int:
     computes the same number by formula, ahead of the model, so cfg.display() can print
     it; check_flat_features() below asserts the two agree.
     """
-    probe = torch.zeros(1, cfg.IN_CHANNELS, cfg.SENSOR_H, cfg.SENSOR_W)
+    sequence = any(layer.consumes_sequence() for layer in layers
+                   if isinstance(layer, BaseLIF))
     with torch.no_grad():
-        for layer in layers:
-            probe = layer(probe)
+        if sequence:
+            # The neurons are SKIPPED here, unlike the per-timestep path below, and the
+            # reason is not cosmetic: this probe runs before the model is moved to the
+            # GPU, and SpikingJelly's cupy kernel asserts that every tensor it is handed
+            # is already on a CUDA device. Driving it with a CPU probe fails model
+            # construction outright. Skipping is sound because a LIF returns spikes
+            # shaped exactly like its input -- the line this docstring already relies on
+            # -- so the measured width is unchanged either way.
+            probe = torch.zeros(1, 1, cfg.IN_CHANNELS, cfg.SENSOR_H, cfg.SENSOR_W)
+            for layer in layers:
+                if isinstance(layer, BaseLIF):
+                    continue
+                folded = layer(probe.flatten(0, 1))
+                probe = folded.reshape(1, 1, *folded.shape[1:])
+        else:
+            probe = torch.zeros(1, cfg.IN_CHANNELS, cfg.SENSOR_H, cfg.SENSOR_W)
+            for layer in layers:
+                probe = layer(probe)
     for layer in layers:
         if isinstance(layer, BaseLIF):
             layer.reset()
-    return probe.shape[1]
+            layer.reset_spike_stats()  # the probe must not be counted as real activity
+    return probe.shape[-1]
 
 
 def check_flat_features(measured: int, cfg) -> None:
@@ -109,11 +165,10 @@ def check_flat_features(measured: int, cfg) -> None:
         f"flatten size disagreement: Settings.compute_fc_in() says {expected}, the "
         f"dummy forward pass measured {measured}.\n"
         f"  sensor {cfg.SENSOR_H}x{cfg.SENSOR_W}, in_channels {cfg.IN_CHANNELS}, "
-        f"conv1 {cfg.CONV1_OUT}@k{cfg.CONV1_KERNEL}, conv2 {cfg.CONV2_OUT}@"
-        f"k{cfg.CONV2_KERNEL}, pool {cfg.POOL_KERNEL}\n"
-        f"  The measured value is the real one. compute_fc_in() assumes exactly two "
-        f"conv+pool stages with stride 1 and no padding -- if the layer list in "
-        f"build_layers() has changed, that formula needs to change with it."
+        f"blocks {cfg.CONV_BLOCKS}, pool {cfg.POOL_KERNEL}, padding {cfg.CONV_PADDING}\n"
+        f"  The measured value is the real one. compute_fc_in() walks the same block "
+        f"list with stride 1 -- if the layer list in build_layers() has changed, that "
+        f"formula needs to change with it."
     )
 
 
@@ -138,11 +193,10 @@ class SpikingNet(nn.Module):
 
     def named_lif_layers(self) -> dict[str, BaseLIF]:
         """Slot name -> layer, using the names the rest of this pipeline expects
-        (ActivityMonitor keys, synops_layer_map): lif1, lif2, lif_out."""
-        lifs = self.lif_layers()
+        (ActivityMonitor keys, synops_layer_map): lif1..lifN, lif_fc, lif_out."""
         return {
-            LIF_SLOTS[i] if i < len(LIF_SLOTS) else f"lif{i + 1}": layer
-            for i, layer in enumerate(lifs)
+            getattr(layer, "slot_name", f"lif{index + 1}"): layer
+            for index, layer in enumerate(self.lif_layers())
         }
 
     def dense_after(self, lif_name: str) -> nn.Module | None:
@@ -184,6 +238,10 @@ class SpikingNet(nn.Module):
             for name, layer in self.named_lif_layers().items()
         }
 
+    def consumes_sequence(self) -> bool:
+        """Whether the neurons in this network take the whole stack at once. Asked of the layers rather than configured separately, so the two can never disagree."""
+        return any(layer.consumes_sequence() for layer in self.lif_layers())
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() != 5:
             raise ValueError(
@@ -195,6 +253,9 @@ class SpikingNet(nn.Module):
         # forgotten at a call site.
         self.reset()
 
+        if self.consumes_sequence():
+            return run_sequence(self.layers, x)
+
         out_steps = []
         for step in range(x.shape[0]):
             out = x[step]
@@ -204,11 +265,35 @@ class SpikingNet(nn.Module):
         return torch.stack(out_steps)
 
 
-def build_network(make_lif: Callable[[str], BaseLIF], cfg) -> SpikingNet:
+def run_sequence(layers, x: torch.Tensor) -> torch.Tensor:
+    """The same layer stack, driven once with the whole [T, batch, ...] sequence.
+
+    Only the neurons are sequence-aware. Conv2d, BatchNorm2d, MaxPool2d, Flatten and
+    Linear are plain torch.nn and know nothing about time, so T is folded into the batch
+    dimension for them and unfolded afterwards -- which is what SpikingJelly's own
+    SeqToANNContainer does, written out here so the shared network keeps working for
+    every framework instead of importing one framework's wrapper into the common path.
+
+    Identical to the per-timestep loop for pointwise layers, but NOT for BatchNorm2d:
+    folded, it pools statistics over T and batch together rather than per timestep.
+    """
+    timesteps, batch = x.shape[0], x.shape[1]
+    out = x
+    for layer in layers:
+        if isinstance(layer, BaseLIF):
+            out = layer(out)
+        else:
+            folded = layer(out.flatten(0, 1))
+            out = folded.reshape(timesteps, batch, *folded.shape[1:])
+    return out
+
+
+def build_network(make_lif: Callable[[str], BaseLIF], cfg,
+                   spiking_readout: bool = True) -> SpikingNet:
     """Build the network.
 
     Seeding is the CALLER's job (skeleton.seeding.seed_model_init immediately before
     this), so weight init depends only on the seed and every framework starts from
     byte-identical conv/linear weights.
     """
-    return SpikingNet(build_layers(make_lif, cfg))
+    return SpikingNet(build_layers(make_lif, cfg, spiking_readout=spiking_readout))

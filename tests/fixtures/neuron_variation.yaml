@@ -1,37 +1,20 @@
-# Experiment 2 -- each framework OUT OF THE BOX.
+# TEST FIXTURE -- not an experiment.
 #
-# Experiment 1 forces all four frameworks to compute ONE neuron, so only the
-# implementation can differ. Experiment 2 asks the opposite question:
+# One overlay that moves every framework's neuron away from the shared spec, used by
+# the test suite to prove three things about the config machinery: that an overlay
+# reaches network_architecture.yaml, that a per-framework neuron override actually
+# reaches the built layer, and that equivalence_check reports a deviation when the
+# neurons genuinely differ. It is never run as an experiment and produces no results.
 #
-#     If you follow each framework's own defaults and its own documented example for
-#     event-camera data, what neuron do you actually GET -- and what does that do to
-#     accuracy, speed, spiking activity and memory?
-#
-# SCOPE: only the neuron block moves. Data pipeline, architecture, optimiser, learning
-# rate, loss, timesteps, batch size and seed stay identical to Experiment 1. Adopting
-# each framework's whole recipe instead would make every metric incomparable -- their
-# examples differ in dataset, batch size, architecture and loss all at once, so you
-# would be comparing training recipes rather than frameworks.
-#
-# WHAT "OUT OF THE BOX" MEANS HERE -- two sources, and they sometimes disagree:
-#
-#   (D)  constructor default: what you get from Neuron() with no arguments
-#   (E)  the framework's own EVENT-DATA example passes it explicitly
-#
-# Where they disagree the EXAMPLE wins, because that is what a developer following the
-# framework's own documentation would actually run. Each value below says which it is.
-#
-# Overlays the three files in configuration/. States ONLY what differs.
-# Translated from SNNs_2 config/config_ex2.yaml; see experiments/ex2/README.md for the
-# parameter-by-parameter diff and the source of each value.
+# The four applications live in experiments/.
 
 dataset:
   name: N-MNIST
 
 # ---------------------------------------------------------------------------
-# Binning and recipe: pinned to match SNNs_2 Experiment 1, NOT part of ex2's
+# Binning and recipe: pinned so the fixture is deterministic, NOT part of what it
 # question. This pipeline's base files differ from that reference run, so they are
-# stated here to keep ex2's numbers comparable with ex1's.
+# exercises. Stated here so a test never depends on a base-file value drifting.
 # ---------------------------------------------------------------------------
 binning:
   n_time_bins: 20               # base is 16; ex1 ran at 20. Changing T rebuilds the cache.
@@ -68,7 +51,7 @@ neuron:
     # The surrogate is where (D) and (E) DISAGREE: LIFNode's constructor default is
     # Sigmoid(alpha=4.0), but SpikingJelly's own DVS example (classify_dvsg.py) passes
     # ATan(). The example wins, so atan(2.0) is inherited unchanged -- the one parameter
-    # in this file where ex2 and ex1 coincide by choice rather than by accident.
+    # in this file where the fixture and the base spec coincide by choice.
 
   norse:
     input_scale: 1.0            # ex1: 10.0. Out of the box there is no compensation, so

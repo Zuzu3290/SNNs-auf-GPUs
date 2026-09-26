@@ -75,7 +75,7 @@ def test_base_loads_and_covers_every_section() -> None:
     # duration, moved to temporal in data_workflow.yaml.
     for section in ["training", "output", "dataset",
                     "convolution", "neuron_types", "neuron",
-                    "binning", "temporal", "augmentation", "cache",
+                    "binning", "temporal", "cache",
                     "resource_policy"]:
         suite.check(f"base config has '{section}'", section in base)
 
@@ -128,13 +128,13 @@ def test_overlay_reaches_every_base_file() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         overlay = write_overlay(Path(tmp), "ov.yaml",
                                 "training:\n  epochs: 7\n"       # SNN_module.yaml
-                                "convolution:\n  conv1_out: 16\n"  # network_architecture.yaml
+                                "convolution:\n  blocks:\n    - out: 16\n      kernel: 5\n    - out: 32\n      kernel: 5\n"  # network_architecture.yaml
                                 "binning:\n  n_time_bins: 25\n")   # data_workflow.yaml
         cfg = Settings(config=load_config(overlay))
         wf = WorkflowSettings(config=load_config(overlay))
         suite.check("overlay reaches SNN_module.yaml", cfg.EPOCHS == 7, str(cfg.EPOCHS))
-        suite.check("overlay reaches network_architecture.yaml", cfg.CONV1_OUT == 16,
-                    str(cfg.CONV1_OUT))
+        suite.check("overlay reaches network_architecture.yaml", cfg.CONV_BLOCKS[0]["out"] == 16,
+                    str(cfg.CONV_BLOCKS))
         suite.check("overlay reaches data_workflow.yaml", wf.N_TIME_BINS == 25,
                     str(wf.N_TIME_BINS))
 
@@ -178,24 +178,24 @@ def test_missing_overlay_file_raises() -> None:
                         must_mention=["not found"])
 
 
-def test_shipped_ex2_overlay_is_valid() -> None:
+def test_shipped_neuron_variation_overlay_is_valid() -> None:
     # Each experiment's config lives IN its experiment folder, beside the README that
     # describes it -- not in a separate config/ tree that would drift away from it.
-    path = REPO_ROOT / "experiments" / "ex2" / "config.yaml"
+    path = REPO_ROOT / "tests" / "fixtures" / "neuron_variation.yaml"
     if not path.is_file():
-        suite.check("experiments/ex2/config.yaml exists", False, "missing")
+        suite.check("tests/fixtures/neuron_variation.yaml exists", False, "missing")
         return
     merged = load_config(path)
     cfg = Settings(config=merged)
-    suite.check("ex2 names its dataset", cfg.DATASET_NAME == "N-MNIST", str(cfg.DATASET_NAME))
-    suite.check("ex2 makes sinabs leak-free", cfg.NEURON["sinabs"]["tau_mem"] == float("inf"),
+    suite.check("the fixture names its dataset", cfg.DATASET_NAME == "N-MNIST", str(cfg.DATASET_NAME))
+    suite.check("the fixture makes sinabs leak-free", cfg.NEURON["sinabs"]["tau_mem"] == float("inf"),
                 str(cfg.NEURON["sinabs"]["tau_mem"]))
-    # ex2 is "each framework OUT OF THE BOX", so it varies all four neurons, not just
-    # sinabs -- that is the experiment. Asserted rather than assumed, because an ex2
+    # the neuron-variation fixture is "each framework OUT OF THE BOX", so it varies all four neurons, not just
+    # sinabs -- that is what it exercises. Asserted rather than assumed, because a fixture
     # that only moved one framework would silently be measuring something else.
     base_neuron = load_base()["neuron"]
     varied = [fw for fw in base_neuron if cfg.NEURON[fw] != base_neuron[fw]]
-    suite.check("ex2 varies every framework's neuron, not just one",
+    suite.check("the fixture varies every framework's neuron, not just one",
                 len(varied) == len(base_neuron), f"varied: {sorted(varied)}")
 
 
@@ -252,21 +252,21 @@ def test_generated_experiment_output_is_ignored() -> None:
     """
     run = "20260831_norse_seed0"
     generated = [
-        f"experiments/ex2/results/runs.csv",          # the append-only schema
-        f"experiments/ex2/results/{run}/test.csv",    # per-run CSVs
-        f"experiments/ex2/results/runs/{run}.json",
-        "experiments/ex2/plots/EQ_poisson.png",       # equivalence figures
-        f"experiments/ex2/plots/{run}/loss.png",      # per-run diagnostics
-        "experiments/ex2/figures/F1_accuracy.png",    # make_plots.py comparisons
-        "experiments/ex2/equivalence/EQ_poisson.png",
+        f"experiments/experiment2/results/runs.csv",          # the append-only schema
+        f"experiments/experiment2/results/{run}/test.csv",    # per-run CSVs
+        f"experiments/experiment2/results/runs/{run}.json",
+        "experiments/experiment2/plots/EQ_poisson.png",       # equivalence figures
+        f"experiments/experiment2/plots/{run}/loss.png",      # per-run diagnostics
+        "experiments/experiment2/figures/F1_accuracy.png",    # make_plots.py comparisons
+        "experiments/experiment2/equivalence/EQ_poisson.png",
         "experiments/ex9/some_future_folder/x.npz",   # a subfolder nobody has invented
     ]
     source = [
-        "experiments/ex2/config.yaml",
-        "experiments/ex2/README.md",
-        "experiments/ex2/ex2_design.md",
-        "experiments/ex2/plots/.gitkeep",             # holds the folder in a fresh clone
-        "experiments/ex2/results/.gitkeep",
+        "tests/fixtures/neuron_variation.yaml",
+        "experiments/experiment2/README.md",
+        "experiments/experiment2/notes.md",
+        "experiments/experiment2/plots/.gitkeep",             # holds the folder in a fresh clone
+        "experiments/experiment2/results/.gitkeep",
     ]
     ignored = _git_ignored(generated + source)
     if ignored is None:
@@ -405,8 +405,8 @@ def test_a_missing_key_raises_instead_of_defaulting() -> None:
     run. Every key is now required."""
     from skeleton.strict import ConfigKeyError
 
-    for section_name, key in [("convolution", "conv1_out"), ("training", "epochs"),
-                              ("training", "seed"), ("framing", "n_time_bins"),
+    for section_name, key in [("convolution", "blocks"), ("training", "epochs"),
+                              ("training", "seed"), ("binning", "n_time_bins"),
                               ("resource_policy", "max_batch_size")]:
         broken = load_base()
         broken[section_name] = {k: v for k, v in broken[section_name].items() if k != key}
@@ -421,7 +421,7 @@ def test_a_missing_section_raises() -> None:
     from the code."""
     from skeleton.strict import ConfigKeyError
 
-    for section_name in ("convolution", "training", "framing", "resource_policy"):
+    for section_name in ("convolution", "training", "binning", "resource_policy"):
         broken = {k: v for k, v in load_base().items() if k != section_name}
         suite.expect_raises(
             f"a missing '{section_name}:' section raises", ConfigKeyError,
@@ -451,12 +451,12 @@ def test_null_is_a_stated_choice_but_the_key_must_exist() -> None:
     from skeleton.strict import ConfigKeyError
 
     ok = load_base()
-    ok["framing"] = {**ok["framing"], "denoise_filter_time_us": None}
-    suite.check("framing.denoise_filter_time_us: null is accepted",
+    ok["binning"] = {**ok["binning"], "denoise_filter_time_us": None}
+    suite.check("binning.denoise_filter_time_us: null is accepted",
                 WorkflowSettings(config=ok).DENOISE_FILTER_TIME_US is None)
 
     broken = load_base()
-    broken["framing"] = {k: v for k, v in broken["framing"].items()
+    broken["binning"] = {k: v for k, v in broken["binning"].items()
                          if k != "denoise_filter_time_us"}
     suite.expect_raises("but removing the key entirely raises", ConfigKeyError,
                         lambda: WorkflowSettings(config=broken),
@@ -464,27 +464,27 @@ def test_null_is_a_stated_choice_but_the_key_must_exist() -> None:
 
 
 def test_a_misspelled_overlay_key_raises_with_a_suggestion() -> None:
-    """The failure this whole change exists for. MEASURED before the fix: `conv1_ou: 64`
-    left CONV1_OUT at 12 and `n_time_bin: 40` left N_TIME_BINS at 16, with no error --
+    """The failure this whole change exists for. MEASURED before the fix: `pool_kerne: 4`
+    left POOL_KERNEL at 2 and `n_time_bin: 40` left N_TIME_BINS at 16, with no error --
     the run reported success having ignored the thing the experiment was about."""
     with tempfile.TemporaryDirectory() as tmp:
         overlay = write_overlay(Path(tmp), "typo.yaml",
-                                "convolution:\n  conv1_ou: 64\n"
-                                "framing:\n  n_time_bin: 40\n")
+                                "convolution:\n  pool_kerne: 4\n"
+                                "binning:\n  n_time_bin: 40\n")
         suite.expect_raises("a misspelled overlay key raises", ConfigError,
                             lambda: load_config(overlay),
-                            must_mention=["conv1_ou", "n_time_bin", "conv1_out"])
+                            must_mention=["pool_kerne", "n_time_bin", "pool_kernel"])
 
 
 def test_a_correct_overlay_key_is_accepted() -> None:
     """The check must not block real overrides -- including a deeply nested one."""
     with tempfile.TemporaryDirectory() as tmp:
         overlay = write_overlay(Path(tmp), "fine.yaml",
-                                "convolution:\n  conv1_out: 64\n"
-                                "framing:\n  n_time_bins: 40\n"
+                                "convolution:\n  padding: 1\n"
+                                "binning:\n  n_time_bins: 40\n"
                                 "training:\n  optimizer:\n    lr: 0.01\n")
         merged = load_config(overlay)
-        suite.check("conv1_out override applied", Settings(config=merged).CONV1_OUT == 64)
+        suite.check("padding override applied", Settings(config=merged).CONV_PADDING == 1)
         suite.check("n_time_bins override applied",
                     WorkflowSettings(config=merged).N_TIME_BINS == 40)
         suite.check("a nested optimizer.lr override applied",
@@ -493,7 +493,7 @@ def test_a_correct_overlay_key_is_accepted() -> None:
 
 def test_the_shipped_experiment_overlays_all_pass_the_key_check() -> None:
     """A guard against this check being stricter than the configs it has to accept."""
-    shipped = sorted(REPO_ROOT.glob("experiments/*/config.yaml"))
+    shipped = sorted(REPO_ROOT.glob("experiments/*/*.yaml"))
     suite.check("there is at least one experiment overlay to check", bool(shipped))
     for path in shipped:
         try:
@@ -571,7 +571,7 @@ def test_banner_omits_rows_a_script_does_not_use() -> None:
     from the ones that were merely present in the config. equivalence_check builds ALL
     FOUR frameworks, the poisson pattern carries its own fixed seed, and no dataset is
     ever loaded, so it drops all three."""
-    cfg, _, info = build(parse(["--experiment", "ex2"]))
+    cfg, _, info = build(parse(["--experiment", "n_caltech101"]))
 
     full = run_banner("x.py", cfg, info, writes_results=False)
     for label in ("framework", "seed", "dataset"):
@@ -583,7 +583,7 @@ def test_banner_omits_rows_a_script_does_not_use() -> None:
         suite.check(f"omit drops the {label} row", f"  {label:<14}" not in trimmed)
     suite.check("what identifies the run survives -- config hash",
                 info["config_hash"] in trimmed)
-    suite.check("the experiment survives", "ex2" in trimmed)
+    suite.check("the experiment survives", "n_caltech101" in trimmed)
     suite.check("device survives: make_cfg really does pin it", "device" in trimmed)
 
 
@@ -672,7 +672,7 @@ def main() -> int:
         test_circular_extends_is_caught,
         test_typo_in_an_overlay_section_raises,
         test_missing_overlay_file_raises,
-        test_shipped_ex2_overlay_is_valid,
+        test_shipped_neuron_variation_overlay_is_valid,
         test_experiment_configs_live_in_their_experiment_folder,
         test_generated_experiment_output_is_ignored,
         test_a_missing_key_raises_instead_of_defaulting,

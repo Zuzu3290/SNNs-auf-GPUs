@@ -5,8 +5,8 @@ import torch
 
 class ModelInterface(ABC):
     """
-    Contract every model must satisfy to work with SNNTrainer, SNNTester,
-    and AdversarialEvaluator. PyTorch only — every model here is an
+    Contract every model must satisfy to work with SNNTrainer and SNNTester.
+    PyTorch only — every model here is an
     nn.Module trained via standard PyTorch autograd (loss.backward() +
     optimizer.step()). No non-PyTorch backend (JAX, TensorFlow) is
     supported or accommodated; that flexibility was speculative and never

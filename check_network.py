@@ -1,7 +1,6 @@
 """Build the network and report what it actually is, without touching a dataset.
 
     python check_network.py
-    python check_network.py --config experiments/ex2/config.yaml --framework sinabs --seed 1
     python check_network.py --all
 
 Feeds a dummy tensor of the right shape, so it needs no download, no GPU and no cache.

@@ -13,22 +13,17 @@ from skeleton.results_collect import build_epoch_rows, build_layer_rows, build_r
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder, resolve_dataset_entry
-from learning.robustness import AdversarialEvaluator
 from learning.utilities import (
-    calibrate_batch_size, collect_single_samples, measure_latency,
-    safe_empty_cache, select_inference_mode,
+    calibrate_batch_size, collect_single_samples, measure_activation_density,
+    measure_latency, safe_empty_cache,
 )
 
-# module path, class name -- imported dynamically below, only for cfg.FRAMEWORK.
-# DataLoader worker processes (Windows spawn re-imports this whole file) never
-# touch a model class, only the dataset transform, so keeping these out of the
-# module-level imports means workers don't pay for loading all four ML
-# frameworks (each with its own CUDA extension / JIT backend) just to sit idle.
 FRAMEWORK_MODULES = {
     "norse":    ("frameworks.snn_norse", "SNN_NORSE"),
     "torch":    ("frameworks.snn_torch", "SNN_TORCH"),
     "sj":       ("frameworks.snn_spikingjelly", "SNN_SJ"),
     "sinabs":   ("frameworks.snn_sinabs", "SNN_SINABS"),
+    "cnn":      ("frameworks.cnn_model", "CNNModel"),
 }
 
 def parse_args():
@@ -44,7 +39,7 @@ def parse_args():
         description="Train and evaluate one SNN framework on one event dataset.",
         epilog="examples:\n"
                "  python learning/main.py\n"
-               "  python learning/main.py --config experiments/ex2/config.yaml --experiment ex2 "
+               "  python learning/main.py --config experiments/experiment2/n_caltech101.yaml --experiment experiment2 "
                "--framework sinabs --seed 1\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -200,8 +195,7 @@ if __name__ == "__main__":
         torch.save(model.get_state(), checkpoint_path)
         print(f"  Checkpoint     : {checkpoint_path}")
 
-    visualize = select_inference_mode()
-    tester       = SNNTester(model, test_loader, cfg, device, visualize=visualize)
+    tester       = SNNTester(model, test_loader, cfg, device)
     test_results = tester.run(csv_path=str(run_results_dir / "test.csv"))
     print("\n Testing complete!")
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
@@ -231,6 +225,20 @@ if __name__ == "__main__":
         except Exception as exc:  # a diagnostic must not cost a finished run
             print(f"\n  !! latency (bs=1) not measured: {type(exc).__name__}: {exc}")
 
+    # ---- activation density, its own untimed pass ---------------------------------
+    # The one activity figure that means the same thing for a spiking model and for the
+    # non-spiking control, so the two can be compared at all. See
+    # learning/utilities.measure_activation_density for why the existing spike-rate
+    # figures cannot do this job.
+    density = {}
+    try:
+        density = measure_activation_density(model, test_loader, device)
+        if density.get("hidden_mean") is not None:
+            print(f"  activation density: {density['hidden_mean'] * 100:.2f}%  "
+                  f"(hidden layers, {density['layers_measured']} measured)")
+    except Exception as exc:  # a diagnostic must not cost a finished run
+        print(f"\n  !! activation density not measured: {type(exc).__name__}: {exc}")
+
     try:
         run_row = build_run_row(
             cfg, wf, model, run_info,
@@ -239,6 +247,7 @@ if __name__ == "__main__":
             params=params,
             timesteps=test_results.get("timesteps"), num_workers=num_workers,
             latency=latency,
+            density=density,
             # The SAME id the run folder is named after, so a figure maps to its row.
             run_id=run_id,
             notes=" ".join(f"{k}={v}" for k, v in (run_info.get("overrides") or {}).items()),
@@ -247,7 +256,11 @@ if __name__ == "__main__":
             results_dir,
             run_row=run_row,
             epoch_rows=build_epoch_rows(epoch_log),
-            layer_rows=build_layer_rows(model, activity_snapshot),
+            layer_rows=build_layer_rows(
+                model, activity_snapshot,
+                cv_isi=test_results.get("cv_isi_per_layer"),
+                dense_macs=test_results.get("dense_macs_per_layer"),
+            ),
             json_payload={"run": run_row, "config_path": run_info.get("config_path"),
                           "neuron": model.describe_neuron(),
                           "test": {k: v for k, v in test_results.items()
@@ -261,10 +274,3 @@ if __name__ == "__main__":
         print()
         print(f"!! results not written: {type(exc).__name__}: {exc}")
 
-    RUN_ADVERSARIAL_EVAL = False
-
-    if RUN_ADVERSARIAL_EVAL:
-        evaluator = AdversarialEvaluator(model, test_loader, cfg, device)
-        # Routed like every other artefact. Called bare it would default to
-        # ./outputs/data/ and be left behind on a Colab runtime.
-        evaluator.evaluate(csv_path=str(run_results_dir / "adversarial_robustness.csv"))

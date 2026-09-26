@@ -6,7 +6,6 @@ import logging
 from pathlib import Path
 from contextlib import contextmanager, nullcontext
 import torch
-import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
 import matplotlib.pyplot as plt
@@ -19,35 +18,6 @@ logger = logging.getLogger(__name__)
 
 # Neuromorphic SynOps energy constant — see SNN_GPU_Evaluation_Metrics.md §2.4/§4.4
 SYNOPS_ENERGY_PJ_PER_MAC = 4.6
-
-
-def generate_trades_adversarial(model: torch.nn.Module, data: torch.Tensor, clean_prob: torch.Tensor, epsilon: float, steps: int) -> torch.Tensor:
-    """Find the worst-case input within the epsilon-ball by maximising KL divergence
-    from the clean prediction.
-
-    Using torch.autograd.grad so model parameter gradients are never accumulated,
-    keeping gradient accumulation in the outer training loop intact.
-    clean_prob must be a detached softmax probability tensor [B, C].
-    """
-    alpha = 2.0 * epsilon / steps
-    adv = torch.clamp(
-        data + 0.001 * torch.randn_like(data),
-        data - epsilon,
-        data + epsilon,
-    ).detach()
-
-    model.activity.pause()
-    try:
-        for _ in range(steps):
-            adv = adv.requires_grad_(True)
-            adv_logits = aggregate_spike_output(model(adv).float())
-            kl   = F.kl_div(F.log_softmax(adv_logits, dim=1), clean_prob, reduction="batchmean")
-            grad = torch.autograd.grad(kl, adv)[0]
-            adv  = torch.clamp((adv + alpha * grad.sign()).detach(), data - epsilon, data + epsilon)
-    finally:
-        model.activity.resume()
-
-    return adv
 
 
 def aggregate_spike_output(spk_rec: torch.Tensor) -> torch.Tensor:
@@ -127,7 +97,7 @@ class SNNTrainer:
     def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
         """Single forward pass, adapting tensor layout to what the model expects.
 
-        Shared by every call site in train() (clean pass, TRADES adversarial pass)
+        Shared by every call site in train()
         so the tensor_format() transpose isn't repeated at each one.
         """
         if self.model.tensor_format() == "BT":
@@ -290,7 +260,7 @@ class SNNTrainer:
         autocast_ctx = (torch.autocast(device_type="cuda", dtype=torch.float16) if self.use_amp else nullcontext())
 
         # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4.
-        # self.train_loader is a PrefetchedLoader — probe_data is already device-resident.
+        # self.train_loader is a DeviceLoader — probe_data is already device-resident.
         probe_data, _ = next(iter(self.train_loader))
         timesteps = probe_data.shape[0]  # loader yields [T, B, C, H, W] — the real BPTT unroll length, not a config value
         self.timesteps = timesteps
@@ -331,7 +301,7 @@ class SNNTrainer:
             self.model.zero_grad()
             mem_breakdown: dict = {}
 
-            # self.train_loader is a PrefetchedLoader (event_data_workflow.data_pipeline) —
+            # self.train_loader is a DeviceLoader (event_data_workflow.data_pipeline) —
             # batches arrive already device-resident, no .to(device) needed below.
             for i, (data, targets) in enumerate(self.train_loader):
                 # Checked BEFORE the work, not after. Previously this sat at the end of
@@ -350,58 +320,18 @@ class SNNTrainer:
                 if measure_mem:
                     torch.cuda.reset_peak_memory_stats(self.device)
 
-                if self.cfg.TRADES_ENABLED:
-                    reset = getattr(self.model, "reset_state", None)
-                    with torch.no_grad():
-                        if reset is not None:
-                            reset()
-                        clean_prob = F.softmax(
-                            aggregate_spike_output(self.forward_pass(data).float()), dim=1
+                with autocast_ctx:
+                    with self.timed(self.fwd_events):
+                        spk_rec   = self.forward_pass(data)
+                    task_loss = self.model.loss_fn(spk_rec, targets)
+                    if self.cfg.ACTIVITY_REG_ENABLED:
+                        task_loss = task_loss + self.model.activity.regularization_loss(
+                            min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
+                            max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
+                            lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
+                            lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
                         )
-                    adv_data = generate_trades_adversarial(self.model, data, clean_prob, self.cfg.TRADES_EPSILON, self.cfg.TRADES_STEPS
-                                                           )
-                    with autocast_ctx:
-                        if reset is not None:
-                            reset()
-                        with self.timed(self.fwd_events):
-                            spk_rec = self.forward_pass(data)
-                        if reset is not None:
-                            reset()
-                        # Adversarial forward pass isn't separately timed — the
-                        # "forward latency" metric tracks one T-timestep clean
-                        # inference, matching the doc's definition; TRADES'
-                        # extra forward passes are an internal training cost.
-                        spk_rec_adv  = self.forward_pass(adv_data)
-                        clean_logits = aggregate_spike_output(spk_rec.float())
-                        adv_logits   = aggregate_spike_output(spk_rec_adv.float())
-                        ce_loss  = F.cross_entropy(clean_logits, targets)
-                        kl_loss  = F.kl_div(
-                            F.log_softmax(adv_logits,           dim=1),
-                            F.softmax(clean_logits.detach(),    dim=1),
-                            reduction="batchmean",
-                        )
-                        act_penalty = torch.zeros(1, device=self.device)
-                        if self.cfg.ACTIVITY_REG_ENABLED:
-                            act_penalty = self.model.activity.regularization_loss(
-                                min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
-                                max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
-                                lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
-                                lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
-                            )
-                        loss_val = (ce_loss + self.cfg.TRADES_LAMBDA * kl_loss + act_penalty) / accum
-                else:
-                    with autocast_ctx:
-                        with self.timed(self.fwd_events):
-                            spk_rec   = self.forward_pass(data)
-                        task_loss = self.model.loss_fn(spk_rec, targets)
-                        if self.cfg.ACTIVITY_REG_ENABLED:
-                            task_loss = task_loss + self.model.activity.regularization_loss(
-                                min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
-                                max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
-                                lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
-                                lambda_high= self.cfg.ACTIVITY_REG_LAMBDA_HIGH,
-                            )
-                        loss_val = task_loss / accum
+                    loss_val = task_loss / accum
 
                 if measure_mem:
                     mem_breakdown["forward_peak_gb"] = torch.cuda.max_memory_allocated(self.device) / (1024 ** 3)
@@ -419,7 +349,7 @@ class SNNTrainer:
                 step_count += 1
 
                 per_batch_loss = loss_val.detach() * accum
-                logits = clean_logits.detach() if self.cfg.TRADES_ENABLED else aggregate_spike_output(spk_rec.detach().float())
+                logits = aggregate_spike_output(spk_rec.detach().float())
                 per_batch_acc = (logits.argmax(dim=1) == targets).float().mean()
                 per_batch_spike = spk_rec.detach().float().mean()
 
@@ -674,7 +604,8 @@ class SNNTrainer:
         print(f"  • Spikes/neuron  : {spikes_per_inference:.4f} per inference  (rate x T)")
         print(f"  • Spike Buffer   : {buf_report}")
         print(f"  • Fwd/Bwd Latency: {avg_fwd_ms:.3f} ms / {avg_bwd_ms:.3f} ms  ({credit_assignment})")
-        print(f"  • CV_ISI (net)   : {cv_isi_mean:.3f}")
+        print(f"  • CV_ISI (net)   : {cv_isi_mean:.3f}  "
+              f"({cv_isi.get('coverage_network_wide', 0.0):.1f}% of trains qualified)")
         print(f"  • SynOps Energy  : {synops_pj:.2f} pJ (estimated, per epoch)")
         print(f"  • LR             : {record['current_lr']:.6f}")
         print(f"  • Wall time      : {record['epoch_duration']:.2f}s")

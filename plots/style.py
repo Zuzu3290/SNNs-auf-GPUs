@@ -69,7 +69,7 @@ FRAMEWORKS: dict[str, Identity] = {
     #
     # Adding a fourth entry here is safe for the existing experiments. Results
     # .conditions filters FRAMEWORK_ORDER by what is actually PRESENT in the data
-    # (see src/plots/data.py), so ex1 and ex2 figures drawn from runs that contain
+    # (see src/plots/data.py), so figures drawn from runs that contain
     # no sinabs rows are unchanged.
     "sinabs": Identity("sinabs", "Sinabs", OKABE_ITO["reddish_purple"], "D", "-."),
 }

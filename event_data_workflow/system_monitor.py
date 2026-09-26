@@ -292,11 +292,10 @@ class BoundViolation:
 class PipelineMonitor:
     """
     Continuous background sampler for CPU + GPU utilization/power/clock/
-    memory + RAM, shared by the offline diagnostics harness
-    (diagnostics/gpu_utilization_harness.py) and by real training/inference
-    runs (SNNTrainer, SNNTester) — the same probing SystemResourceMonitor
-    does point-in-time for cache decisions, extended into a running, phase-
-    taggable trace with sustained-violation ("out of bounds") flagging.
+    memory + RAM, used by real training/inference runs (SNNTrainer,
+    SNNTester) — the same probing SystemResourceMonitor does point-in-time
+    for cache decisions, extended into a running, phase-taggable trace with
+    sustained-violation ("out of bounds") flagging.
 
     Sampling is NVML/psutil driver queries only — never touches a CUDA
     tensor or calls torch.cuda.synchronize() — so it never perturbs the
@@ -306,7 +305,7 @@ class PipelineMonitor:
     SNN_module.yaml is cpu | cuda | auto — never an indexed cuda:N), so
     there's no device index to take here — it's always device 0.
 
-    Usage — free-form phases (diagnostics harness):
+    Usage — free-form phases:
         pm = PipelineMonitor()
         pm.start()
         pm.set_phase("fetch")

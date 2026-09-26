@@ -39,7 +39,8 @@ from skeleton.snn_config import Settings
 class SNNModel(ModelInterface, nn.Module):
     """The comparison model. Which framework it uses comes from cfg.FRAMEWORK."""
 
-    def __init__(self, cfg: Settings, framework: str | None = None):
+    def __init__(self, cfg: Settings, framework: str | None = None,
+                 spiking_readout: bool = True):
         """`framework` overrides cfg.FRAMEWORK, and is also written BACK onto cfg.
 
         The write-back matters: cfg.display(), cfg.active_fw_cfg and the results row all
@@ -53,7 +54,10 @@ class SNNModel(ModelInterface, nn.Module):
         self.framework = cfg.FRAMEWORK
         self.device = torch.device(cfg.DEVICE)
 
-        self.net = build_network(lif_factory(self.framework, cfg), cfg)
+        # spiking_readout=False leaves the output Linear's continuous value as the
+        # prediction -- what the regression datasets need. See spiking_net.build_layers.
+        self.net = build_network(lif_factory(self.framework, cfg), cfg,
+                                  spiking_readout=spiking_readout)
         self.to(self.device)
 
         # ONE optimizer and ONE loss, read straight from Settings -- not from a
@@ -62,9 +66,12 @@ class SNNModel(ModelInterface, nn.Module):
         self.optimizer = build_optimizer(self.parameters(), cfg)
         self.loss_fn = build_loss(cfg)
 
+        # Every hidden LIF, not a hardcoded first two: a deeper `convolution.blocks`
+        # list would otherwise leave lif3 onward unmeasured. lif_out is excluded --
+        # the readout's spikes are counted separately by the tester.
         named = self.net.named_lif_layers()
         self.activity = ActivityMonitor(
-            {name: named[name] for name in ("lif1", "lif2") if name in named}
+            {name: layer for name, layer in named.items() if name != "lif_out"}
         )
 
     # ---- ModelInterface ---------------------------------------------------------
@@ -125,7 +132,9 @@ class SNNModel(ModelInterface, nn.Module):
         """Derived from the layer list rather than hand-written per framework, so it
         cannot fall out of sync with the architecture."""
         mapping = {}
-        for name in ("lif1", "lif2"):
+        for name in self.net.named_lif_layers():
+            if name == "lif_out":
+                continue
             downstream = self.net.dense_after(name)
             if downstream is not None:
                 mapping[name] = downstream

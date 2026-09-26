@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import torch
 from spikingjelly.activation_based import neuron, surrogate
 
@@ -14,6 +15,28 @@ from skeleton.neuron_spec import (
 SURROGATES = {"atan": surrogate.ATan, "sigmoid": surrogate.Sigmoid}
 
 
+def restore_np_int_alias() -> None:
+    """Make the cupy backend runnable on NumPy 2, without changing the pinned SpikingJelly.
+
+    spikingjelly 0.0.0.0.14 -- the latest PyPI release, and the version every recorded
+    run used -- validates kernel argument dtypes in auto_cuda/base.py:249 with
+    `value.dtype == np.int`. NumPy removed that alias in 2.0, so merely READING it
+    raises AttributeError and every cupy forward dies inside a dtype assertion, before
+    any kernel runs. The fix exists only on SpikingJelly's master branch.
+
+    Upgrading to master would mean running the cupy arm on a different SpikingJelly than
+    the four runs it is meant to be compared against, which is exactly the variable the
+    arm is supposed to isolate. So the alias is restored instead, to the value it always
+    had: `np.int` was documented as a plain alias for the builtin `int`, and
+    `dtype == int` is still valid in NumPy 2. The assertion therefore behaves as its
+    author wrote it, and nothing else about either library moves.
+
+    Called only when backend='cupy' is requested -- a torch-backend run never touches it.
+    """
+    if not hasattr(np, "int"):
+        np.int = int
+
+
 def build_lif(cfg) -> neuron.LIFNode:
     n = neuron_cfg(cfg, "spikingjelly")
     stype, salpha = require_surrogate(n)
@@ -23,15 +46,17 @@ def build_lif(cfg) -> neuron.LIFNode:
         )
 
     step_mode = require_choice(n, "step_mode", ["s", "m"])
-    if step_mode != "s":
-        # The shared network hands every layer ONE timestep, so multi-step cannot be
-        # wired in here. Refused outright rather than silently ignored: 'm' is also the
-        # only mode that supports the fused cupy backend, so accepting it here would
-        # imply an optimisation that is not actually running.
+    backend = require_choice(n, "backend", ["torch", "cupy"])
+    if backend == "cupy":
+        restore_np_int_alias()
+    if backend == "cupy" and step_mode != "m":
+        # SpikingJelly ignores backend='cupy' under step_mode='s' rather than refusing
+        # it, so this configuration would run the plain torch path while the run record
+        # claimed the fused one.
         raise ValueError(
-            "neuron.spikingjelly.step_mode must be 's' for the shared per-timestep "
-            "network. 'm' (and the cupy backend it enables) is a separate experiment -- "
-            "verified equivalent in spikes, different only in speed."
+            "neuron.spikingjelly.backend = 'cupy' requires step_mode = 'm'. "
+            "SpikingJelly silently falls back to the torch path otherwise, which would "
+            "record a fused-kernel run that never happened."
         )
 
     return neuron.LIFNode(
@@ -46,7 +71,7 @@ def build_lif(cfg) -> neuron.LIFNode:
         # 6-step test. False matches snnTorch, whose reset path also carries gradient.
         detach_reset=require_bool(n, "detach_reset"),
         step_mode=step_mode,
-        backend=require_choice(n, "backend", ["torch", "cupy"]),
+        backend=backend,
     )
 
 
@@ -67,6 +92,10 @@ class SpikingJellyLIF(BaseLIF):
         # Instance method, not the module-level functional.reset_net(), so this resets
         # THIS layer only.
         self.lif.reset()
+
+    def consumes_sequence(self) -> bool:
+        """step_mode='m' is exactly the multi-step contract: the whole [T, batch, ...] stack in one call, which is what lets the cupy backend fuse the timestep loop into a single kernel."""
+        return self.lif.step_mode == "m"
 
     def has_state(self) -> bool:
         # v is the scalar 0.0 before the first forward, a tensor afterwards.

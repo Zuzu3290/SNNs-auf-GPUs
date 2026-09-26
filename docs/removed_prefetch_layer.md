@@ -1,3 +1,55 @@
+# The prefetch layer, removed 2026-09-23
+
+Kept here as a record. The code below was live in `event_data_workflow/` until it was
+measured and found to buy nothing, and it is preserved in full so a future attempt at
+overlapping data loading with computation can start from it rather than from scratch.
+
+## Why it was removed
+
+It was built to stop the GPU paying the CPU's batch-preparation time as idle time: a
+background thread pulled batches from the DataLoader into a queue, and a second stage
+copied them to the GPU on a separate CUDA stream, several batches ahead.
+
+The repository's own A/B (`diagnostics/pipeline_objective_gpu_overlap.py`) recorded
+prefetch ON at 11.53 s against OFF at 12.20 s over 25 batches -- a 5.5% win. That was a
+single unrepeated pass per condition with ON always running first.
+
+Re-measured under alternation, six rounds of 24 batches each on cached DVS128 Gesture,
+same samples in the same order, single-process loading in both conditions:
+
+| round | prefetch ON | prefetch OFF |
+|---|---|---|
+| 1 | 2.81 s | 2.81 s |
+| 2 | 3.16 s | 2.89 s |
+| 3 | 3.31 s | 3.11 s |
+| 4 | 3.33 s | 3.29 s |
+| 5 | 3.45 s | 3.49 s |
+| 6 | 3.10 s | 2.91 s |
+| **mean** | **3.19 s +/- 0.23** | **3.08 s +/- 0.27** |
+
+Prefetching was 3.5% SLOWER on average and lost four rounds of six, with the spreads
+overlapping. The earlier 5.5% win did not reproduce.
+
+The likely reason it never paid: the DataLoader already runs worker processes that
+prepare the next batch while the GPU computes, and the frames come from a warm disk
+cache rather than from live event decoding, so there was little CPU time left to hide.
+The queue and the extra stream added their own synchronisation and allocator pressure.
+
+What replaced it: a synchronous `.to(device)` per batch, in `DeviceLoader`, which keeps
+the contract every call site depends on -- batches arrive device-resident -- in about
+fifteen lines.
+
+## What was also deleted with it
+
+* `resource_policy` keys `calibrate_prefetch_depth`, `prefetch_depth_fallback`,
+  `prefetch_vram_fraction`, `prefetch_depth_min`, `prefetch_depth_max`
+* `NeuromorphicEncoder.compute_prefetch_depth()`, reproduced below
+* the prefetcher section of `tests/unit_pipeline_integration.py`, including a
+  regression test for a real depth=1 data-loss bug described in the code below
+
+## `event_data_workflow/prefetch.py`
+
+```python
 """
 Gets the next batch of data ready before the GPU asks for it, so training
 never has to stop and wait.
@@ -167,3 +219,82 @@ class CudaPrefetcher:
                 if not preload_one():
                     break
             yield data, targets
+```
+
+## `PrefetchedLoader`, from `event_data_workflow/data_pipeline.py`
+
+```python
+class PrefetchedLoader:
+    """The class training and testing actually use. Underneath, it just
+    combines the two prefetchers in prefetch.py: one to fetch data on the
+    CPU, one to move it onto the GPU ahead of time."""
+
+    def __init__(self, loader, device: torch.device, depth: int = 1, queue_size: int | None = None):
+        self.loader = loader
+        self.device = device
+        self.depth = max(1, depth)
+        # Unset queue_size defaults to depth: the raw CPU-side buffer feeding
+        # the CUDA-stream copies must be at least as deep as the device-
+        # resident buffer it feeds, or it becomes the tighter bottleneck and
+        # throttles the GPU below what `depth` was chosen to sustain.
+        self.queue_size = max(1, queue_size if queue_size is not None else self.depth)
+        self.current: CudaPrefetcher | None = None
+        # ONE copy stream for this loader's whole life, not one per epoch.
+        #
+        # __iter__ below builds a fresh CudaPrefetcher every pass, and that used to
+        # build a fresh torch.cuda.Stream with it. PyTorch's caching allocator pools
+        # free blocks PER STREAM, so each epoch allocated its prefetch queue from CUDA
+        # again while the previous epoch's queue stayed free-but-unreachable: reserved
+        # memory climbed by one queue per epoch (measured: +1.48 GB, T=20/batch 256/
+        # depth 32) with memory actually in use flat. See CudaPrefetcher.__init__.
+        #
+        # A stream is a long-lived handle, not per-iteration state -- nothing about
+        # re-iterating invalidates it, and stop() only ends the CPU-side feeder thread.
+        # Only one iterator is ever live per loader (see __iter__), so nothing else can
+        # be issuing copies on it at the same time.
+        self.stream = torch.cuda.Stream(device=device) if device.type == "cuda" else None
+
+    def __len__(self) -> int:
+        return len(self.loader)
+
+    def __iter__(self):
+        if self.current is not None:
+            self.current.stop()
+        async_stage = AsyncGPUPrefetcher(self.loader, queue_size=self.queue_size)
+        self.current = CudaPrefetcher(async_stage, self.device, depth=self.depth,
+                                      stream=self.stream)
+        try:
+            yield from self.current
+        finally:
+            self.current.stop()  # closes any abandoned iteration immediately, not just on the next __iter__() call — else the leaked thread races the global RNG (num_workers=0) against whatever runs next
+```
+
+## `NeuromorphicEncoder.compute_prefetch_depth()`
+
+```python
+    def compute_prefetch_depth(self, batch_size: int) -> int:
+        """How many batches to keep queued ahead of the GPU, sized from live
+        VRAM and this dataset's real per-sample size — not a fixed constant,
+        so a large-sensor dataset (bigger batches) or a smaller card (less
+        headroom) both get a depth that actually fits, instead of one number
+        tuned for whichever dataset/GPU it happened to be set on.
+
+        This runs after calibrate_batch_size() has already freed its own
+        probe allocations but before real training has claimed anything —
+        a live VRAM snapshot at this point looks more available than it's
+        about to be. Subtracting batch_vram_fraction of total VRAM (the
+        share calibrate_batch_size already earmarked for the real training
+        step) before sizing the queue keeps the two from double-booking the
+        same memory. Fraction/min/max all read from resource_policy in
+        data_workflow.yaml, not fixed here."""
+        if not self.wf.CALIBRATE_PREFETCH_DEPTH:
+            return self.wf.PREFETCH_DEPTH_FALLBACK
+        batch_bytes = self.batch_sample_bytes * batch_size
+        metrics = monitor.snapshot()
+        reserved_for_training_gb = metrics.gpu_memory_gb * self.wf.BATCH_VRAM_FRACTION
+        true_available_gb = max(0.0, metrics.gpu_available_gb - reserved_for_training_gb)
+        if batch_bytes <= 0 or true_available_gb <= 0:
+            return self.wf.PREFETCH_DEPTH_MIN
+        budget_bytes = true_available_gb * self.wf.PREFETCH_VRAM_FRACTION * (1024 ** 3)
+        return max(self.wf.PREFETCH_DEPTH_MIN, min(int(budget_bytes / batch_bytes), self.wf.PREFETCH_DEPTH_MAX))
+```

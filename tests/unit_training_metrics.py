@@ -221,7 +221,7 @@ def test_batch_size_is_recorded(  ) -> None:
 # 5. spike recording is outside every timed region
 # ---------------------------------------------------------------------------
 class FakeLoader:
-    """Stands in for PrefetchedLoader: yields already-device-resident batches."""
+    """Stands in for DeviceLoader: yields already-device-resident batches."""
 
     def __init__(self, batches: int, cfg, timesteps: int = 6, batch: int = 2):
         self.batches, self.cfg, self.T, self.B = batches, cfg, timesteps, batch
@@ -386,8 +386,13 @@ def test_run_row_bs1_columns_come_from_the_real_measurement() -> None:
     source = inspect.getsource(results_collect.build_run_row)
     suite.check("bs1 columns read the latency dict",
                 '(latency or {}).get("latency_ms")' in source)
-    suite.check("they no longer read the amortised per-sample figure",
-                "median_latency_per_sample_ms" not in source)
+    for column in ("inference_latency_bs1_ms", "inference_latency_bs1_mean_ms",
+                   "inference_latency_bs1_p90_ms"):
+        line = next(l for l in source.splitlines() if f'"{column}"' in l)
+        suite.check(f"{column} is not filled from the amortised figure",
+                    "latency_per_sample" not in line, line.strip())
+    suite.check("the amortised figure is reported in its own columns instead",
+                '"inference_latency_amortised_p50_ms"' in source)
     suite.check("build_run_row accepts a latency argument",
                 "latency" in inspect.signature(results_collect.build_run_row).parameters)
 
@@ -494,14 +499,18 @@ def test_run_id_ties_the_folder_to_the_results_row() -> None:
     suite.check("nesting only happens when routed", 'run_info["routed"]' in source)
 
 
-def test_adversarial_evaluator_is_routed_in_main() -> None:
+def test_main_runs_no_adversarial_pass() -> None:
+    """The testing pipeline evaluates the trained model and stops there. Adversarial
+    evaluation was removed: perturbing a framed event tensor by a gradient step produces
+    fractional event counts no camera can emit, so it never answered the question it
+    appeared to."""
     import inspect
 
     from learning import main as main_module
 
     source = inspect.getsource(main_module)
-    suite.check("evaluate() is given an explicit csv_path",
-                "evaluate(csv_path=" in source)
+    for token in ("AdversarialEvaluator", "RUN_ADVERSARIAL_EVAL", "adversarial"):
+        suite.check(f"main.py does not reference {token}", token not in source)
 
 
 def test_training_memory_peaks_reach_runs_csv() -> None:
@@ -554,23 +563,15 @@ def test_runs_csv_records_the_timesteps_that_ran() -> None:
 
 def main() -> int:
     return suite.run([
-<<<<<<< HEAD
-        test_window_is_none_when_not_knowable,
-        test_window_from_a_stated_sample_duration,
-        test_window_derived_from_time_window_framing,
-        test_window_from_temporal_slicing_by_time,
-        test_stated_duration_wins_over_derivation,
-=======
         test_training_writes_every_csv_beside_the_given_path,
         test_per_run_folder_keeps_two_frameworks_apart,
         test_run_id_ties_the_folder_to_the_results_row,
-        test_adversarial_evaluator_is_routed_in_main,
+        test_main_runs_no_adversarial_pass,
         test_collect_single_samples_gives_batch_of_one,
         test_measure_latency_is_a_real_per_sample_measurement,
         test_measure_latency_refuses_an_empty_sample_list,
         test_run_row_bs1_columns_come_from_the_real_measurement,
         test_latency_samples_is_configurable,
->>>>>>> pipelines_merged
         test_the_attribute_the_old_code_read_does_not_exist,
         test_spikes_per_inference_is_time_unit_free,
         test_warmup_leaves_the_weights_untouched,

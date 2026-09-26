@@ -298,13 +298,35 @@ def test_sinabs_neuron_parameters_are_frozen() -> None:
 # ---------------------------------------------------------------------------
 # 5. refusals -- settings the adapter must not silently accept
 # ---------------------------------------------------------------------------
-def test_spikingjelly_refuses_multi_step() -> None:
-    """The shared network hands every layer ONE timestep, so 'm' cannot run here.
-    Accepting it would also imply the fused cupy backend was in play when it is not."""
+def test_spikingjelly_multi_step_is_accepted_and_declares_itself() -> None:
+    """'m' is buildable now -- the shared network has a sequence path for it.
+
+    What must NOT happen is a layer switching its calling convention without saying so:
+    the spike-rate shape, the ActivityMonitor buffers and SpikingNet.forward all branch
+    on consumes_sequence(), and a layer that took whole sequences while reporting
+    per-timestep would mis-measure SynOps and CV(ISI) silently rather than fail.
+    """
     cfg = fresh_cfg()
     cfg.NEURON["spikingjelly"]["step_mode"] = "m"
-    suite.expect_raises("SpikingJelly refuses step_mode 'm'", ValueError,
-                        lambda: single_neuron("sj", cfg), must_mention=["step_mode"])
+    layer = single_neuron("sj", cfg)
+    suite.check("SpikingJelly builds under step_mode 'm'", layer is not None)
+    suite.check("step_mode 'm' declares itself as sequence-consuming",
+                layer.consumes_sequence(), str(layer.consumes_sequence()))
+
+    cfg = fresh_cfg()
+    suite.check("step_mode 's' does not claim to consume sequences",
+                not single_neuron("sj", cfg).consumes_sequence())
+
+
+def test_spikingjelly_refuses_cupy_without_multi_step() -> None:
+    """SpikingJelly ignores backend='cupy' under 's' instead of refusing it, so this
+    pairing would record a fused-kernel run that never actually ran one."""
+    cfg = fresh_cfg()
+    cfg.NEURON["spikingjelly"]["backend"] = "cupy"
+    cfg.NEURON["spikingjelly"]["step_mode"] = "s"
+    suite.expect_raises("SpikingJelly refuses cupy under step_mode 's'", ValueError,
+                        lambda: single_neuron("sj", cfg),
+                        must_mention=["cupy", "step_mode"])
 
 
 def test_unknown_surrogate_is_refused() -> None:
@@ -326,7 +348,7 @@ def test_sinabs_surrogate_is_actually_read() -> None:
 
 
 def test_sinabs_honours_the_selected_surrogate() -> None:
-    """ex2 selects periodic_exponential. Check the object actually reaches the layer."""
+    """The neuron-variation fixture selects periodic_exponential. Check the object actually reaches the layer."""
     cfg = fresh_cfg()
     cfg.NEURON["sinabs"]["surrogate"] = {
         "type": "periodic_exponential", "grad_width": 0.5, "grad_scale": 1.0,
@@ -516,7 +538,7 @@ def test_a_module_that_drifts_from_its_config_is_flagged() -> None:
     from sinabs.activation import MembraneReset, SingleSpike
 
     # Stated, not inherited: the swap has to land on the OTHER option than the config
-    # names, and fresh_cfg() is the base config rather than ex2's.
+    # names, and fresh_cfg() is the base config rather than the fixture's.
     cfg = fresh_cfg()
     cfg.NEURON["sinabs"]["spike_fn"] = "multi"
     cfg.NEURON["sinabs"]["reset_mechanism"] = "subtract"
@@ -680,7 +702,8 @@ def main() -> int:
         test_describe_names_the_framework_and_its_real_parameters,
         test_sinabs_reports_its_frozen_time_constant,
         test_sinabs_neuron_parameters_are_frozen,
-        test_spikingjelly_refuses_multi_step,
+        test_spikingjelly_multi_step_is_accepted_and_declares_itself,
+        test_spikingjelly_refuses_cupy_without_multi_step,
         test_unknown_surrogate_is_refused,
         test_sinabs_surrogate_is_actually_read,
         test_sinabs_honours_the_selected_surrogate,

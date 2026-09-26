@@ -101,6 +101,23 @@ class BaseLIF(nn.Module):
     def reset(self) -> None:
         """Drop all neuron state. Called at the start of every batch."""
 
+    def consumes_sequence(self) -> bool:
+        """Does this layer take the WHOLE [T, batch, ...] stack in one call?
+
+        False for the per-timestep contract above, which is what every framework uses
+        by default. True only for a framework configured into a fused multi-step kernel
+        (SpikingJelly's step_mode='m' with the cupy backend), where the whole point is
+        that the timestep loop moves off Python and into one CUDA launch.
+
+        This is asked rather than assumed because three things downstream count calls
+        and would silently mis-measure a sequence-consuming layer: SpikingNet.forward
+        drives the stack, _record below reads the shape, and ActivityMonitor's hook
+        fires once per call. Sinabs already produced exactly that failure once -- no
+        SynOps, no CV(ISI) and no activity penalty at all -- so the mode is declared by
+        the layer and honoured everywhere, not inferred at each site.
+        """
+        return False
+
     def has_state(self) -> bool:
         """Is any neuron state currently held?
 
@@ -136,7 +153,11 @@ class BaseLIF(nn.Module):
         if not self.count_spikes:
             return
         if self.spike_shape is None:
-            self.spike_shape = tuple(spikes.shape[1:])  # drop the batch dimension
+            # One sample's shape, so neurons() counts neurons and not neurons x T. A
+            # per-timestep layer is handed [batch, ...] and a sequence-consuming one
+            # [T, batch, ...], so the number of leading dimensions to drop differs.
+            leading = 2 if self.consumes_sequence() else 1
+            self.spike_shape = tuple(spikes.shape[leading:])
         self.spike_total = self.spike_total + spikes.detach().sum()
         self.spike_slots += spikes.numel()
 

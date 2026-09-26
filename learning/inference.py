@@ -23,14 +23,13 @@ SYNOPS_ENERGY_PJ_PER_MAC = 4.6
 
 class SNNTester:
 
-    def __init__(self, model, test_loader, cfg: Settings, device: torch.device, visualize: bool = False):
+    def __init__(self, model, test_loader, cfg: Settings, device: torch.device):
         self.model       = model
         self.test_loader = test_loader
         self.cfg         = cfg
         self.device      = device
         self.num_classes = cfg.NUM_CLASSES
         self.batch_log   = []
-        self.visualize   = visualize
         self.viz_window  = None  # lazily built on first use — see show_frame()
         self.pipeline_monitor = PipelineMonitor(enabled=getattr(cfg, "ENABLE_PIPELINE_MONITOR", True))
 
@@ -112,6 +111,15 @@ class SNNTester:
         monitor.enter_phase("testing")
         self.model.eval_mode()
 
+        # Recording back ON. SNNTrainer pauses it before its timed regions and leaves it
+        # paused (its measure_activity() re-pauses in a finally), so a tester handed a
+        # just-trained model inherits hooks that return immediately. Every buffer then
+        # stays empty, firing_rate_tensor() returns None, and BOTH the SynOps estimate
+        # and CV(ISI) come out as a clean, plausible 0.0 for every batch of every run --
+        # which is exactly what they did until this line existed.
+        self.model.activity.resume()
+        self.model.activity.clear()
+
         # T is read from the DATA below, per batch. It used to come from a
         # `cfg.TIMESTEPS` that is also defined nowhere, so it was always the 25 in the
         # getattr default regardless of framing.n_time_bins.
@@ -136,7 +144,7 @@ class SNNTester:
         self.pipeline_monitor.reset_epoch_memory()
         t_run_start = time.perf_counter()
 
-        # self.test_loader is a PrefetchedLoader (event_data_workflow.data_pipeline) —
+        # self.test_loader is a DeviceLoader (event_data_workflow.data_pipeline) —
         # batches arrive already device-resident.
         with torch.no_grad():
             for batch_idx, (data, targets) in enumerate(self.test_loader):
@@ -306,7 +314,10 @@ class SNNTester:
         print(f"  • Avg Input / Sample      : {avg_input_spikes_per_sample:.2f}")
         print(f"  • Framework Ratio (in/out): {framework_ratio:.3f}" if framework_ratio is not None else "  • Framework Ratio (in/out): N/A (zero output spikes)")
         print(f"  • Avg Spikes/neuron       : {avg_spikes_per_inference:.4f} per inference  (rate x T)")
-        print(f"  • CV_ISI (network-wide)   : {cv_isi_mean:.3f}  (last batch)")
+        # Coverage travels with the value: over a window this short most neurons never
+        # produce an interval, so the number is only readable next to how many did.
+        print(f"  • CV_ISI (network-wide)   : {cv_isi_mean:.3f}  (last batch, "
+              f"{cv_isi.get('coverage_network_wide', 0.0):.1f}% of trains qualified)")
         print(f"  • Avg Batch Latency       : {avg_latency_ms:.2f} ms")
         print(f"  • Avg Latency / Sample    : {avg_latency_per_sample:.3f} ms")
         print(f"  • Median Latency / Sample : {median_latency_per_sample_ms:.3f} ms  (p50)")
@@ -357,6 +368,10 @@ class SNNTester:
             "avg_spikes_per_sample":     avg_spikes_per_sample,
             "avg_spikes_per_neuron_per_inference": avg_spikes_per_inference,
             "cv_isi_mean":               cv_isi_mean,
+            # The whole per-layer mapping, not only its mean: layers.csv records one
+            # row per layer, and firing regularity is a per-layer property.
+            "cv_isi_per_layer":          cv_isi,
+            "dense_macs_per_layer":      dict(self.dense_macs_per_layer),
             "avg_latency_ms":            avg_latency_ms,
             "avg_latency_per_sample_ms": avg_latency_per_sample,
             "median_latency_per_sample_ms": median_latency_per_sample_ms,

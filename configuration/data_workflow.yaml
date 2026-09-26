@@ -1,18 +1,11 @@
-# Optional: splits ONE recording into several independent samples (tonic
-# SliceByTime), before binning ever runs. Off by default -- each recording is
-# then one sample, and binning below runs on the whole thing.
 temporal:
-  enabled: true                # true | false
+  enabled: false               # true | false
 
-  # Slice length in MICROSECONDS, used when slicing by time. Also what turns a spike
-  # rate into Hz (see utilities.firing_window_seconds). Moved here from
-  # SNN_module.yaml's architecture block, where it was separated from the rest of the
-  # slicing settings.
+  # Slice length in MICROSECONDS, used when slicing by time. 
   slice_duration_us: 15000
 
 # Always runs: turns ONE sample (one recording, or one slice above if temporal
 # slicing is on) into its T frames (tonic ToFrame). Independent of `temporal`
-# above -- it is not conditional on slicing being enabled.
 binning:
   mode: n_time_bins       # "n_time_bins" (fixed T per sample, no padding — recommended for Conv-SNN)
                           # "time_window" (variable T, different samples span different durations — for analysis)
@@ -20,21 +13,6 @@ binning:
   time_window_ms: 15.0
 
   denoise_filter_time_us: 10000
-
-temporal_slicing:
-  enabled: false
-  # Slice length in MICROSECONDS, used when slicing by time. Moved here from
-  # SNN_module.yaml's architecture block, where it was separated from the rest of the
-  # slicing settings.
-  slice_duration_us: 15000
-
-  events_per_slice: null        # null = slice by time; a number = slice by event count
-  calibrate_events_per_slice: false   # true = derive the event count from the dataset
-
-# Train-only augmentation. Applied after ToFrame, on the dense frame — a
-# rotated frame interpolates, so spike counts on an augmented sample becomefractional.
-augmentation:
-  random_rotation_enabled: true
 
 cache:
   path: "./cache"
@@ -48,24 +26,18 @@ resource_policy:
   memory_cache_threshold_gb: 6.0   # min free RAM before the "memory" cache tier is even considered
   gpu_pressure_threshold: 0.75     # VRAM utilization ratio above which cache decisions avoid RAM,
                                     # to not compete with CUDA's pinned-memory allocator
-  batch_vram_fraction: 0.35        # target VRAM fraction for auto-calibrated batch size (training AND inference --
+  batch_vram_fraction: 0.45        # target VRAM fraction for auto-calibrated batch size (training AND inference --
                                     # one policy covers both, see docs/functions.md). Also the band's upper edge for
                                     # reporting -- the search never deliberately lands above its own target.
-  batch_vram_band_min: 0.30        # reporting band lower edge -- below this, the log flags "outside policy band"
+  batch_vram_band_min: 0.40        # reporting band lower edge -- below this, the log flags "outside policy band"
   max_batch_size: 256              # learning-quality ceiling on calibrated batch size (see docs/functions.md)
-  calibrate_prefetch_depth: true   # true: live VRAM probe (see compute_prefetch_depth(), docs/functions.md).
-                                    # false: prefetch_depth_fallback below is used exactly as written.
-  prefetch_depth_fallback: 8       # only used when calibrate_prefetch_depth is false
-  prefetch_vram_fraction: 0.10     # share of true-available VRAM the prefetch queue itself may occupy
-  prefetch_depth_min: 1            # floor on calibrated prefetch depth
-  prefetch_depth_max: 32           # ceiling on calibrated prefetch depth
   memory_tier_headroom_fraction: 0.7   # dataset must fit under this fraction of available RAM to pick the "memory" cache tier
   disk_tier_headroom_multiple: 1.2     # free disk space must exceed dataset size by this multiple to pick the "disk" cache tier
   worker_ram_fraction: 0.25            # share of available RAM DataLoader workers' in-flight buffers may occupy; caps num_workers for large-sensor datasets
   
   dataloader_worker_timeout_s: 120.0   # a stuck worker (num_workers > 0) raises TimeoutError after this long instead of hanging the run forever; 0 disables (PyTorch default)
   calibrate_workers: false              # true: adaptive, RAM/spawn-reload-safe sizing (recommended, the normal setting). false: worker_count_fallback.
-  worker_count_fallback: 16            # only used when calibrate_workers is false.
+  worker_count_fallback: 8             # only used when calibrate_workers is false. Each Windows spawn worker costs ~2GB of commit charge, which worker_ram_fraction does not count.
 
 # batch_size lives in SNN_module.yaml (training section)
 

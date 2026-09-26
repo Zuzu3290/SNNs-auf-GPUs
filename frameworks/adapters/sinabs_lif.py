@@ -57,7 +57,7 @@ def build_surrogate(n: dict) -> Any:
     Only the keys belonging to the CHOSEN type are read, so a config carries the
     parameters of one surrogate rather than the union of all five.
 
-    Wired explicitly rather than left to sinabs' own default: ex2 selects
+    Wired explicitly rather than left to sinabs' own default: the neuron-variation fixture selects
     `periodic_exponential`, and a default-only adapter would accept that config and
     silently run single_exponential instead.
     """

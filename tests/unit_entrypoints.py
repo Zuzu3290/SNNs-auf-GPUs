@@ -114,11 +114,11 @@ def test_check_network_single_framework_shows_shapes() -> None:
 
 def test_check_network_honours_the_overlay() -> None:
     code, out = run_script("check_network",
-                           ["--config", "experiments/ex2/config.yaml", "--framework", "sinabs"])
+                           ["--config", "tests/fixtures/neuron_variation.yaml", "--framework", "sinabs"])
     suite.check("overlay run exits 0", code == 0, f"exit {code}")
-    suite.check("the banner names the overlay", "experiments/ex2/config.yaml" in out)
+    suite.check("the banner names the overlay", "tests/fixtures/neuron_variation.yaml" in out)
     suite.check("the dataset came from the overlay, not a prompt", "N-MNIST" in out)
-    suite.check("ex2's leak-free sinabs is reported", "inf" in out)
+    suite.check("the fixture's leak-free sinabs is reported", "inf" in out)
 
 
 # ---------------------------------------------------------------------------
@@ -205,20 +205,20 @@ def test_equivalence_reports_agreement_on_the_base_config() -> None:
 
 
 def test_equivalence_measures_but_does_not_judge() -> None:
-    """The flaw found while wiring this up: a hard PASS/FAIL called ex2's own result an
-    error. ex2 deliberately gives sinabs no leak, multi-spike and a subtract reset, so
+    """The flaw found while wiring this up: a hard PASS/FAIL called the fixture's own result an
+    error. the neuron-variation fixture deliberately gives sinabs no leak, multi-spike and a subtract reset, so
     a large deviation IS the experiment's finding. It must be reported, and must not
     fail the run."""
-    code, out = run_script("equivalence_check", ["--config", "experiments/ex2/config.yaml"])
+    code, out = run_script("equivalence_check", ["--config", "tests/fixtures/neuron_variation.yaml"])
     suite.check("a deliberately divergent config still exits 0", code == 0, f"exit {code}")
     suite.check("sinabs is reported as differing", "sinabs" in out and "differing" in out)
-    # ex2 moves ALL FOUR neurons to their own defaults, so only the reference agrees
+    # the neuron-variation fixture moves ALL FOUR neurons to their own defaults, so only the reference agrees
     # with itself -- 2 of 8 framework-patterns (torch, in both patterns). A wholesale
     # divergence IS the result here, which is exactly why this script does not gate.
     suite.check("every non-reference framework is reported as differing",
                 "2/8 framework-patterns" in out, out[-400:])
     for framework in ("norse", "sj", "sinabs"):
-        suite.check(f"{framework} differs under ex2", f"{framework} (" in out)
+        suite.check(f"{framework} differs under the fixture", f"{framework} (" in out)
     suite.check("it says the deviation may be the intended result",
                 "this IS the" in out or "deliberately varies" in out)
     suite.check("no PASS/FAIL verdict is issued", "GATE A3" not in out)
@@ -254,15 +254,15 @@ def test_main_parses_the_full_flag_set() -> None:
     from learning.main import parse_args
 
     saved = sys.argv
-    sys.argv = ["main.py", "--config", "experiments/ex2/config.yaml", "--experiment", "ex2",
+    sys.argv = ["main.py", "--config", "tests/fixtures/neuron_variation.yaml", "--experiment", "n_caltech101",
                 "--framework", "sinabs", "--seed", "3",
                 "--results-root", "/drive/runs", "--cache-root", "/content/cache"]
     try:
         args = parse_args()
     finally:
         sys.argv = saved
-    suite.check("--config parsed", args.config == "experiments/ex2/config.yaml")
-    suite.check("--experiment parsed", args.experiment == "ex2")
+    suite.check("--config parsed", args.config == "tests/fixtures/neuron_variation.yaml")
+    suite.check("--experiment parsed", args.experiment == "n_caltech101")
     suite.check("--framework parsed", args.framework == "sinabs")
     suite.check("--seed parsed as an int", args.seed == 3 and isinstance(args.seed, int))
     suite.check("--results-root parsed", args.results_root == "/drive/runs")
@@ -292,7 +292,7 @@ def test_entrypoints_follow_an_architecture_change() -> None:
     """An overlay that widens conv1 must flow all the way through: FC_IN recomputed,
     the probe agreeing with it, and the parameter count changing."""
     with tempfile.TemporaryDirectory() as tmp:
-        overlay = write_overlay(Path(tmp), "wide.yaml", "convolution:\n  conv1_out: 20\n")
+        overlay = write_overlay(Path(tmp), "wide.yaml", "convolution:\n  blocks:\n    - out: 20\n      kernel: 5\n    - out: 32\n      kernel: 5\n")
         code, out = run_script("check_network", ["--config", str(overlay), "--all"])
         suite.check("check_network handles a wider conv1", code == 0, f"exit {code}")
         suite.check("the parameter count is no longer the default 18,254",
@@ -401,7 +401,7 @@ def test_check_network_banner_claims_only_what_it_uses() -> None:
     than cfg.FRAMEWORK. The `shape` row already names the dataset, with its size, class
     count and provenance.
     """
-    code, out = run_script("check_network", ["--config", "experiments/ex2/config.yaml", "--all"])
+    code, out = run_script("check_network", ["--config", "tests/fixtures/neuron_variation.yaml", "--all"])
     suite.check("--all still passes", code == 0, f"exit {code}")
     rows = _banner_rows(out)
     for absent in ("device", "dataset", "framework"):
@@ -413,7 +413,7 @@ def test_check_network_banner_claims_only_what_it_uses() -> None:
 
     # Without --all exactly one framework IS inspected, so naming it is correct.
     code, out = run_script("check_network",
-                           ["--config", "experiments/ex2/config.yaml", "--framework", "sinabs"])
+                           ["--config", "tests/fixtures/neuron_variation.yaml", "--framework", "sinabs"])
     suite.check("single-framework run passes", code == 0, f"exit {code}")
     rows = _banner_rows(out)
     suite.check("without --all the framework IS named", rows.get("framework") == "sinabs",
@@ -422,14 +422,14 @@ def test_check_network_banner_claims_only_what_it_uses() -> None:
 
 
 def test_norse_warning_is_not_repeated_per_layer() -> None:
-    """ex2 selects norse's own 'super' surrogate, whose alpha norse 1.1.0 ignores. The
+    """the neuron-variation fixture selects norse's own 'super' surrogate, whose alpha norse 1.1.0 ignores. The
     warning is worth printing; printing it once per LIF layer, four networks over, read
     as a dozen separate problems."""
     from frameworks.adapters import norse_lif
 
     norse_lif.reset_alpha_warning()
     _code, out = run_script("check_network",
-                            ["--config", "experiments/ex2/config.yaml", "--all"])
+                            ["--config", "tests/fixtures/neuron_variation.yaml", "--all"])
     hits = out.count("IGNORES alpha")
     suite.check("the whole --all run warns at most once", hits <= 1, f"{hits} times")
     suite.check("torch's namedtuple pytree noise is filtered at the norse import",
@@ -453,7 +453,7 @@ def test_check_network_fails_when_a_neuron_drifts_from_its_config() -> None:
     snntorch_lif.build_lif = drifting
     try:
         code, out = run_script("check_network",
-                               ["--config", "experiments/ex2/config.yaml", "--all"])
+                               ["--config", "tests/fixtures/neuron_variation.yaml", "--all"])
     finally:
         snntorch_lif.build_lif = real_build
 
@@ -467,7 +467,7 @@ def test_check_network_fails_when_a_neuron_drifts_from_its_config() -> None:
 
     # And the clean config must still pass, so the check above is not just noise.
     code, out = run_script("check_network",
-                           ["--config", "experiments/ex2/config.yaml", "--all"])
+                           ["--config", "tests/fixtures/neuron_variation.yaml", "--all"])
     suite.check("the unmodified config still passes", code == 0, f"exit {code}")
     suite.check("both checks report PASS", out.count("  PASS  ") == 2, out[-400:])
 

@@ -8,13 +8,13 @@ trustworthy -- the spec CLAIMS all four blocks describe one neuron, and nothing 
 that but this script. Run it after any change to a neuron parameter.
 
     python equivalence_check.py
-    python equivalence_check.py --config experiments/ex2/config.yaml --experiment ex2
-    python equivalence_check.py --config experiments/ex1/config.yaml --experiment ex1 \
+    python equivalence_check.py --config experiments/experiment2/n_caltech101.yaml --experiment experiment2
+    python equivalence_check.py --config experiments/experiment1/snntorch.yaml --experiment experiment1 \
         --results-root /content/drive/MyDrive/snn_runs --formats png,pdf
 
 It MEASURES and does not judge: no pass/fail verdict, always exits 0. One threshold
 cannot serve both uses -- ex1 forces the neurons to agree (so ~1e-07 means the
-translation worked), while ex2 deliberately varies one of them (so a large deviation
+translation worked), while the neuron-variation fixture deliberately varies them (so a large deviation
 IS the result). The hard gate on agreement lives in tests/unit_adapters.py and
 tests/unit_shared_net.py instead.
 
@@ -292,7 +292,7 @@ def main() -> int:
     #
     #   ex1  forces all four neurons to agree, so ~1e-07 means the translation worked
     #        and anything larger is a bug
-    #   ex2  deliberately gives sinabs its out-of-box behaviour (no leak, multi-spike,
+    #   the neuron-variation fixture deliberately gives sinabs its out-of-box behaviour (no leak, multi-spike,
     #        subtract reset), so a LARGE deviation is the experiment's result, not a
     #        failure -- a gate here would report the finding as an error
     #

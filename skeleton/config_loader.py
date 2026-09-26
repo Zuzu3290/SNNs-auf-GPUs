@@ -10,7 +10,7 @@ TWO WAYS TO RUN, BOTH SUPPORTED
 2. One overlay file per experiment, stating ONLY what differs. Everything it does not
    mention is inherited from the three base files:
 
-       python learning/main.py --config experiments/ex2/config.yaml --experiment ex2
+       python learning/main.py --config experiments/experiment2/n_caltech101.yaml --experiment experiment2
 
 WHY A FLAT OVERLAY WORKS
 ------------------------
@@ -18,7 +18,7 @@ The three base files share no top-level section name:
 
     SNN_module.yaml            architecture, training, output
     network_architecture.yaml  convolution, neuron_types, neuron
-    data_workflow.yaml         framing, temporal_slicing, augmentation, cache,
+    data_workflow.yaml         binning, temporal, cache,
                                resource_policy
 
 so they can be merged into one dict without ambiguity, and one flat overlay can reach
@@ -168,7 +168,14 @@ def check_overlay_sections(overlay: dict[str, Any], config_dir: Path | str = CON
 # mu/sigma/grad_scale), so the base file can only show one set. These are not
 # unchecked -- frameworks/adapters/sinabs_lif.py reads them through SURROGATE_PARAMS
 # and raises on a wrong or missing one.
-KEY_CHECK_EXEMPT = ("neuron.*.surrogate",)
+# Paths an overlay may introduce without the base config already naming them.
+#
+# neuron_types.*.* -- the LIF slot names are DERIVED from convolution.blocks, not fixed:
+# a four-block overlay legitimately needs lif3 and lif4, and a fc_hidden overlay needs
+# lif_fc, none of which the two-block base file can enumerate. Exempting them is not a
+# hole in the typo check: a slot that is misspelled here still fails loudly at build
+# time, because frameworks/adapters raises on a slot it was asked for and cannot find.
+KEY_CHECK_EXEMPT = ("neuron.*.surrogate", "neuron_types.*.*")
 
 
 def _paths(node: Any, prefix: str = "") -> list[str]:
