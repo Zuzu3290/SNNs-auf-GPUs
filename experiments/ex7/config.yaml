@@ -76,12 +76,14 @@ training:
                                    # `none` is what actually holds the LR constant.
                                    # optimizer.lr stays at the base 0.002.
 
-  epochs: 15                      # ASSUMPTION, not a validated number -- see README §3.
-                                   # No prior run of this pipeline on N-Caltech101 exists
-                                   # to calibrate against. 30 is a starting point; check
-                                   # the first rung's own training curve (is train
-                                   # accuracy still climbing at epoch 30?) before
-                                   # trusting the Filter Ceiling comparison across rungs.
+  epochs: 50                      # RAISED from 15 after the first f16 run (2026-09-29).
+                                   # 15 was an assumption and it proved too short: train
+                                   # accuracy was still climbing at epoch 15 (28.6 ->
+                                   # 59.6%, ~+1.5pp/epoch, train loss still falling
+                                   # monotonically), so the budget was too short for
+                                   # EVERY rung, not just f16 -- see README §5. 50 is
+                                   # ~3.3x the old budget, the ratio README §6 expresses.
+                                   # Every rung must use the same budget to be comparable.
 
   use_amp: false                  # NOT overridden -- base default is already false.
                                    # Stated in prose: VRAM is a cost metric this
