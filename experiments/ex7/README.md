@@ -80,30 +80,41 @@ GPU utilization before trusting its own epoch-time numbers.
 
 | file | filters (both stages) | epochs | purpose |
 |---|---|---|---|
-| `f16.yaml` | 16 | 30 | smallest rung |
-| `f32.yaml` | 32 | 30 | today's default width |
-| `f64.yaml` | 64 | 30 | — |
-| `f128.yaml` | 128 | 30 | largest rung (matches ex6 arm C's filter count, different dataset) |
-| `f16_extended.yaml` | 16 | 100 | structural-ceiling check, see §6 |
+| `f16.yaml` | 16 | 50 | smallest rung |
+| `f32.yaml` | 32 | 50 | today's default width |
+| `f64.yaml` | 64 | 50 | — |
+| `f128.yaml` | 128 | 50 | largest rung (matches ex6 arm C's filter count, different dataset) |
+| `f16_extended.yaml` | 16 | 50 | was the structural-ceiling check — see §6, now collapsed into the standard budget |
 
 All five `extend` a shared `config.yaml` (dataset, timesteps, LR schedule,
 `compute_capacity_metrics: true`) and change only what's named in the table.
 
-**30 epochs is an assumption, not a validated number** — no prior run of this pipeline
-on N-Caltech101 exists to calibrate against. Check `f16.yaml`'s own training curve
-first: if train accuracy is still climbing meaningfully at epoch 30, the whole ladder's
-epoch count needs raising before the Filter Ceiling comparison can be trusted, since
-every rung must train for the same budget to be comparable.
+**The budget was 15, and measurement proved it too short.** The first f16 run
+(`20260929_155737_sj_seed0`, 2026-09-29) ended with train accuracy still climbing —
+28.6% at epoch 1 to 59.6% at epoch 15, gaining ~1.5pp/epoch across epochs 10-15, train
+loss falling monotonically 3.777 → 1.854. Nothing had plateaued. Per this section's own
+rule, that raises the budget for **every** rung, not just f16: `config.yaml` now sets
+`epochs: 50`. That run is superseded and must not be compared against 50-epoch rungs.
 
 ## 6. The extended-epoch check
 
-`f16_extended.yaml` trains the *smallest* rung for ~3.3x the standard budget (100 vs.
-30 epochs). Purpose: prove the smallest rung's ceiling is **structural** — the network
-genuinely cannot represent more, not "it just needed more training." This is the first
-objection anyone reviewing a Filter Ceiling claim will raise, so it's answered up front
-rather than after the fact. If train accuracy at epoch 100 has clearly plateaued well
-before then, the ceiling is structural. If it's still climbing meaningfully, the
-30-epoch budget was too short for every rung, not just this one.
+**This check has temporarily collapsed into the standard budget and needs re-deciding.**
+
+Original design: train the *smallest* rung ~3.3x past the standard budget, to prove its
+ceiling is **structural** — the network genuinely cannot represent more, not "it just
+needed more training." That is the first objection anyone reviewing a Filter Ceiling
+claim will raise, so it is answered up front rather than after the fact.
+
+What happened: the 15-epoch budget failed (§5), and the extended arm's 3.3x figure — 50
+epochs — was adopted as the *new standard* budget for every rung. So `f16_extended.yaml`
+(50) and `f16.yaml` (50) are now the same run, and no extended arm exists.
+
+**Open decision, once the 50-epoch f16 curve is in hand:**
+- If train accuracy has clearly plateaued by epoch 50, the structural claim is already
+  proven by the standard run and no separate extended arm is needed — delete
+  `f16_extended.yaml` and say so here.
+- If it is still climbing at 50, the budget is *still* too short: raise it again for
+  every rung, and re-create the extended arm at ~3.3x whatever the new budget becomes.
 
 ## 7. The stopping rule — the Filter Ceiling
 
