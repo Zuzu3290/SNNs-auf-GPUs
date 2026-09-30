@@ -64,18 +64,33 @@ A third dataset (DVS128 Gesture) appeared in the first draft as a held-back
 generalization test. **It is out of scope for this study** — see §9. The
 "does it generalize or just memorize" question is instead answered by the **train −
 test accuracy gap** on N-Caltech101 itself — not a stored column, but a two-number
-subtraction from the final epoch's `train_accuracy_pct` / `test_accuracy_pct`, which
-`epochs.csv` already logs per epoch, per run.
+subtraction: `train_accuracy_pct` from the **last row of `epochs.csv`**, minus
+`test_accuracy_pct` from **`runs.csv`**.
+
+> **Corrected 2026-09-29.** This section previously said `epochs.csv` logs
+> `test_accuracy_pct` per epoch. It does not — those columns are always empty, because
+> testing runs once in `SNNTester` after training completes, by design. The consequence
+> is one test number per run, so a test-accuracy peak occurring mid-training is
+> invisible. Report the gap with that limitation stated.
 
 ## 3. Frameworks
 
 Four backends exist in this pipeline: **SpikingJelly, SNNTorch, Norse, Sinabs**.
 
-The width/depth ladder (ex7–ex9) runs on **SpikingJelly only**, on purpose — the point
-of that part of the study is to isolate network *size* as the only variable, and
-changing frameworks at the same time would confound that. Once the ladder has found the
-sizes that matter, **ex10** replays just those sizes on the other three frameworks, to
-see whether each framework's scalability curve bends at the same place or not.
+**Revised 2026-09-29.** The **width ladder (ex7) now runs on all four frameworks**, at
+every rung, per direct instruction from the study designer. **ex8 and ex9 remain
+SpikingJelly-only** — for those, isolating network *size* as the single variable still
+holds, and changing frameworks at the same time would confound it.
+
+The original design ran ex7-ex9 on SpikingJelly alone and deferred all cross-framework
+work to **ex10**, a replay of just the sizes that mattered. Since ex7 now covers all
+four frameworks from the start, **ex10 is redundant as originally scoped** — see §6 and
+`experiments/ex7/README.md` §13 for the re-scoping decision, which is deferred until ex8
+is designed.
+
+Cost consequence: ex7 becomes 4 rungs × 4 frameworks = **16 runs**, roughly 60-100
+GPU-hours. Run the SpikingJelly rungs first so the ladder's shape is known before the
+other three frameworks are committed to.
 
 ## 4. What gets locked before anything else runs — ex6
 
@@ -108,11 +123,25 @@ documentation.
 
 | # | subject | plain English | built already? |
 |---|---|---|---|
-| 1 | **Mutual Information** I(Z;Y) | how much the network's internal spike patterns still retain about the task labels | ✅ **built** — `learning/capacity_metrics.py`, opt-in behind `training.compute_capacity_metrics`. **Revised:** I(X;Z) is unreliable at these sample sizes and is dropped; only I(Z;Y) remains, computed over the full test set (not one probe batch), reported raw. See design doc §6e for rationale. |
+| 1 | **Mutual Information** I(Z;Y) | how much the network's internal spike patterns still retain about the task labels | ✅ **built, I(X;Z) deliberately excluded** — `learning/capacity_metrics.py` implements `mutual_information_zy` only, opt-in behind `training.compute_capacity_metrics`, computed over the full test set (not one probe batch), reported raw. I(X;Z) was evaluated and rejected on 2026-09-29 — see the note below this table. |
 | 2 | **Participation Ratio** (effective dimension, via PCA on spike rates) | are the extra neurons doing genuinely different work, or all copying each other | ✅ **built** — same module and flag. **Revised:** now computed over the full test set (not one probe batch), measured per-channel (not per-pixel), and reported both raw and normalized (PR/N). See design doc §6b-6d for rationale and the sample-size fix. |
 | 3 | **Spike-train entropy** (population coding entropy) | too orderly = the network is ignoring the input; too chaotic = noise, not information | ✅ **built** — same module and flag (distinct from CV-ISI, which measures firing *regularity*, not population entropy). **Revised:** now computed over the full test set (not one probe batch), measured per-channel (not per-pixel), and reported both raw and normalized (H/log₂N). See design doc §6b-6d. |
 | 4 | **Task Performance Decoherence** — accuracy vs. scale | does accuracy fall off a cliff or decline gently as the network shrinks / the task gets harder | ✅ **no new code needed** — a plot over accuracy data every run already produces |
 | 5 | **Hardware Overhead Proxy** — memory, wall-clock, spike count as an energy proxy | what does this size cost, on this GPU | ✅ **fully built** — `measure_dense_macs`/SynOps energy and VRAM calibration in `learning/utilities.py` and `learning/inference.py`; this is the "few metrics already in place" the colleague meant |
+
+> **Resolved 2026-09-29: I(X;Z) stays out, on purpose.** `Scalability.pdf` p.3 names
+> I(X;Z) as the ceiling test ("a hard ceiling when I(X;Z) plateaus"), but checked against
+> this experiment's real numbers rather than the general design-doc argument: one
+> N-Caltech101 sample is ~1.38M raw values (180×240×2 channels ×16 timesteps) against a
+> 1,742-sample test set, and the estimator (PCA to k≤3 dims, quantile-binned into up to
+> 216 symbols per side) would need a 216×216 joint table filled from 1,742 points —
+> badly undersampled, where a saturated estimator and a real bottleneck are
+> indistinguishable. I(Z;Y) doesn't have this problem (Y is 101 exact class labels, not a
+> lossy PCA summary), and is arguably the more direct signal for this research question
+> anyway: it asks whether *task-relevant* information survives, which is what "the
+> network can't represent the task" actually means. Evidence for the bottleneck claim:
+> **PR + entropy + I(Z;Y) together**. Full reasoning: `experiments/ex7/README.md` §9,
+> gap 1.
 
 ### Named separately in the brief, not part of the 5 subjects
 
@@ -170,33 +199,44 @@ Two study-level outputs, built across runs rather than inside one:
 ```
    ex6   PILOT + POOLING        settle pool_kernel, batch size, sanity-check meters
           ↓
-   ex7   WIDTH LADDER           where is the FILTER CEILING?          ← the main event
+   ex7   WIDTH LADDER           where are the TWO EQUILIBRIUM POINTS?   ← the main event
+          f8/f16/f32/f64 x 4 frameworks
           ↓
    ex8   DEPTH LADDER           where is the DEPTH CEILING?
           ↓
    ex9   COMBINE + STRESS       does the winner survive noise and confirm it's learning, not memorizing?
           ↓
-   ex10  CROSS-FRAMEWORK REPLAY do the other 3 frameworks scale the same way at the sizes that mattered?
+   ex10  (REDUNDANT AS SCOPED)  ex7 now covers all 4 frameworks -- re-scope or drop, see §3
 ```
 
 | # | in plain English | dataset | framework(s) | seeds |
 |---|---|---|---|---|
 | **ex6** | Settle pooling (1 vs 2) and confirm the biggest planned network fits in VRAM | N-MNIST | SpikingJelly | 1 |
-| **ex7** | Add filters step by step, keep everything else fixed, find where it stops being worth it | N-Caltech101 | SpikingJelly | 1 per rung; **3 seeds on the winning rung** |
+| **ex7** | Add filters step by step (8/16/32/64), keep everything else fixed, find where each regime settles | N-Caltech101 | **all four** | 1 per rung; **3 seeds on the equilibrium rung (SpikingJelly)** |
 | **ex8** | Lock in the best width, add layers step by step instead, find where *that* stops being worth it | N-Caltech101 | SpikingJelly | 1 per rung; **3 seeds on the winning rung** |
 | **ex9** | Combine the best width + best depth. Confirm it works, then stress it with corrupted input, then check the train−test gap | N-Caltech101 | SpikingJelly | 3 seeds throughout (this is what backs the "stable = variance <2%" claim) |
-| **ex10** | Re-run just the sizes that mattered (smallest, width winner, depth winner, combined winner) on the other 3 frameworks | N-Caltech101 | SNNTorch, Norse, Sinabs | 1 per config (or 3, if ex9's variance turns out to matter for the comparison — decide when ex10 is scoped) |
+| **ex10** | **Redundant as originally scoped** — ex7 now runs all four frameworks itself (§3). Re-scope to the *depth* winner only, or drop. Decision deferred until ex8 is designed. | N-Caltech101 | SNNTorch, Norse, Sinabs | TBD |
 
 ### What each is for, and its stopping rule
 
 **Quick reference — don't mix these up:**
 
-| experiment | varies | stopping signal |
+| experiment | varies | signal |
 |---|---|---|
-| ex7 (width) | filters | accuracy vs. **VRAM** |
+| ex7 (width) | filters | **two** equilibrium points: capacity metrics plateauing (bottleneck side) and cost rising without return (fragility side) |
 | ex8 (depth) | layers | accuracy vs. **time/params**, gradient norms watched only as a diagnostic |
 
-- **ex7 — Width ladder.** Stop a rung early if it gives **<1% accuracy gain for >10% VRAM increase** — that's the Filter Ceiling. Includes one extended-epoch arm on the *smallest* rung (train it far past the normal budget) to confirm that rung's ceiling is structural rather than "it just needed more training" — this is the first objection anyone reviewing the result will raise, so it's cheap insurance folded into ex7 rather than its own experiment.
+- **ex7 — Width ladder.** **Revised 2026-09-29** — the target is no longer the single
+  highest-accuracy rung but the **two equilibrium points** the brief asks for
+  (`Scalability.pdf` p.2, Strategy item 4): the size at which the small network stops
+  gaining representational capacity, and the size past which the large network's cost
+  grows without return. These are reported as **two separate trade-off tables** and are
+  not required to be the same number. Every rung runs — the old "<1% accuracy gain for
+  >10% VRAM" rule becomes an analysis criterion applied afterward, not an abort rule.
+  Epochs are fixed at **50** for every rung (the 15-epoch budget was measured as too
+  short). The separate extended-epoch arm has been retired into that budget; the
+  structural-vs-under-trained question is now answered by the smallest rung's own
+  50-epoch curve. Full design: `experiments/ex7/README.md` §0 and §7.
 - **ex8 — Depth ladder.** Requires adding a configurable FC hidden layer to `frameworks/spiking_net.py` first — right now the network goes straight `Flatten → Linear(classes) → lif_out`, with no hidden FC layer to grow. (The results schema already has `fc_hidden_layers` / `fc_hidden_size` columns waiting for this.) Stop a rung early at **<1% accuracy gain for >10% time/parameter increase** — the Depth Ceiling. Gradient norms are recorded per layer throughout, but as a diagnostic, not a trigger (see §9 for why this differs from the original scalability.md design).
 - **ex9 — Combine + stress.** Three arms: (1) baseline confirmation of best-width+best-depth on N-Caltech101, (2) the same config on corrupted/perturbed input, as the robustness boundary, (3) read off the train−test gap as the generalization signal. This is also where the three named landmark configs (Stable / Unstable / Factory-Correct, §7) get their final multi-seed confirmation.
 - **ex10 — Cross-framework replay.** No new ceiling-finding — the sizes are already fixed by ex7-ex9. Purely: does SNNTorch/Norse/Sinabs's cost/accuracy curve at these same sizes match SpikingJelly's, or does one framework hit its own wall earlier?
@@ -210,20 +250,22 @@ study scale:
 | name | roughly | how we'll know |
 |---|---|---|
 | **Unstable** | small end of the ladder | accuracy variance across seeds >2%, or gradient norms spike/collapse, or VRAM grows non-linearly |
-| **Factory-Correct** | the winning rung(s) from ex7+ex8 | <1% accuracy gain from going further, resources are efficiently used, generalizes (train−test gap stays small) |
+| **Factory-Correct** | the equilibrium rung(s) from ex7+ex8 | <1% accuracy gain from going further, resources are efficiently used, generalizes (train−test gap stays small) |
 | **Stable but not optimal** | between the two | consistent gradient norms, predictable VRAM, but not yet at the accuracy ceiling |
 
 ## 8. Deliverables
 
 | deliverable | comes from |
 |---|---|
-| Filter Ceiling — a number | ex7 |
+| **Small-network equilibrium** — a filter count (bottleneck side) | ex7 |
+| **Large-network equilibrium** — a filter count (fragility side) | ex7 |
+| **Two trade-off tables** — pros/cons per regime, kept separate | ex7 |
 | Depth Ceiling — a number | ex8 |
 | Trade-off curve — quality vs. cost, every rung | ex7 + ex8 |
 | Stable / Unstable / Factory-Correct — three named configs | ex7 + ex8 + ex9 |
 | Confusion matrices across the ladder | ex7, ex8 |
 | Correlation matrix across all tracked metrics | all runs |
-| Per-framework comparison at the sizes that mattered | ex10 |
+| Per-framework comparison, all 4 rungs | **ex7** (moved from ex10 — see §3) |
 
 ## 9. Decisions made while rebuilding this plan
 
@@ -293,6 +335,16 @@ recovered and a fresh call was needed:
    implementation record.
 3. **Remaining:** add a configurable FC hidden layer to `frameworks/spiking_net.py`
    (needed for ex8).
-4. **Remaining:** write `experiments/ex7/README.md` and configs the way `ex6/README.md`
-   did — concrete filter counts, epoch counts, and the extended-epoch arm — now that
-   ex6's results are in hand to base the ladder's starting point on.
+4. ✅ **Done.** `experiments/ex7/README.md` and the rung configs are written
+   (`f8/f16/f32/f64.yaml` over a shared `config.yaml`). Revised 2026-09-29 for the
+   four-framework scope, the 8-64 rung range, and the 50-epoch fixed budget — see that
+   file's §0 for the full change record.
+
+5. **Remaining, before the ex7 write-up:** settle the **I(X;Z) disagreement** flagged in
+   §5 — either implement it or justify its absence in the report.
+
+6. **Remaining, nice-to-have:** SynOps (`synops_energy_pj`) is computed but lives only in
+   each run's own `training_results.csv`, not in `runs.csv`/`layers.csv`. The brief's
+   "spikes rise without accuracy" diagnostic needs it compared across runs, so either
+   bump the schema to v5 with a SynOps column or aggregate it in the analysis script.
+   See `experiments/ex7/README.md` §9, gap 2.

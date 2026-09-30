@@ -1,0 +1,20 @@
+# Experiment 7, rung 1 of 4 -- filters=8 (the smallest rung).
+#
+# ADDED 2026-09-29, when the ladder was re-centred on the small-network regime (see
+# README.md §5): the brief's research question is where a SMALL network's information
+# bottleneck gives way to a large network's fragility, so the ladder was shifted down
+# a step -- f8 added at the bottom, f128 retired from the top.
+#
+# Inherits everything from config.yaml and changes ONLY the filter counts. Both conv
+# stages use the SAME filter count (symmetric F/F), matching every other rung.
+#
+# This is the rung most likely to show a genuine bottleneck: 8 filters over a 180x240
+# sensor and 101 classes. If Participation Ratio and spike entropy do not separate this
+# rung from f16, the ladder is not resolving the bottleneck at all and needs a rung
+# below this one.
+
+extends: config.yaml
+
+convolution:
+  conv1_out: 8
+  conv2_out: 8

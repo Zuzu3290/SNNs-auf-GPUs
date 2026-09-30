@@ -83,10 +83,10 @@ before proposing new experiment design.
    decision reproducible across machines. This is unrelated to the RAM leak
    above — keep both fixes.
 4. **ex7's classifier-dominance caveat** (documented, not architecturally
-   fixed) — on N-Caltech101, the final linear classifier holds 98.7-99.8% of
-   total parameters regardless of conv filter count, because the flattened
-   conv output feeding it is large. Width-scaling conclusions from ex7 should
-   be read with this caveat; see `experiments/ex7/README.md`.
+   fixed) — on N-Caltech101, the final linear classifier holds 99.3-99.9% of
+   total parameters across the f8-f64 ladder, because the flattened conv
+   output feeding it is large. Width-scaling conclusions from ex7 should be
+   read with this caveat; see `experiments/ex7/README.md` section 3.
 
 ## Working agreements (how Haseeb wants this project run)
 
@@ -102,6 +102,41 @@ before proposing new experiment design.
   wholesale when the overlapping file has moved on independently on both
   sides (see the RAM-leak fix above for why — a `git merge-tree` simulation
   is a safe way to check this before deciding).
+
+## ex7 redesign, 2026-09-29 (read before touching the scalability ladder)
+
+The width ladder was re-scoped after the study designer re-read the brief
+(`scalability_tests/Scalability.pdf`). Four changes, all recorded in
+`experiments/ex7/README.md` section 0:
+
+1. **Goal is the sweet spot, not peak accuracy.** Two separate equilibrium
+   points — the bottleneck side (capacity metrics plateau) and the fragility
+   side (cost grows without return) — reported as two trade-off tables, not
+   averaged into one number. Brief p.2, Strategy item 4.
+2. **Rungs are now 8/16/32/64**, not 16/32/64/128. `f8.yaml` added, `f128.yaml`
+   retired (kept on disk, out of the ladder).
+3. **All four frameworks**, not SpikingJelly only — 4 rungs x 4 backends = 16
+   runs. This absorbs ex10, which is now redundant as originally scoped.
+   ex8/ex9 stay SpikingJelly-only.
+4. **Epochs fixed at 50** (was 15). Measured: the first f16 run ended with train
+   accuracy still climbing (28.6 -> 59.6% over 15 epochs, ~+1.5pp/epoch, loss
+   still falling), so 15 was too short for every rung. The separate
+   extended-epoch arm collapsed into this budget and is retired.
+
+**Two known gaps in the instrumentation vs. the brief**, both flagged in
+`experiments/ex7/README.md` section 9 and `experiment_plan_final.md` section 5:
+- **I(X;Z) is not implemented** — and it is the brief's central bottleneck
+  metric (p.3). We compute I(Z;Y) instead, deliberately (design doc section 6e).
+  Needs an explicit decision before the write-up, not a silent omission.
+- **SynOps is not in the cross-run schema** — `synops_energy_pj` lives only in
+  each run's own `training_results.csv`, so the brief's "spikes rise without
+  accuracy" diagnostic can't be read across rungs without extra aggregation.
+
+**Also worth knowing when running:** `skeleton/results.py`'s `write_results()`
+writes `runs.csv`/`epochs.csv`/`layers.csv` only AFTER training *and* inference
+finish. An interrupted or timed-out run loses everything — there are no partial
+results. On Kaggle that means committing (Save & Run All), not interactive
+sessions, and projecting total runtime before starting a long rung.
 
 ## Open / unresolved as of 2026-09-29
 

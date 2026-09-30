@@ -45,9 +45,12 @@ resource_policy:
   worker_count_fallback: 1
 
 training:
-  # framework: NOT overridden -- base default is already `sj`, and the whole study
-  # (ex6-ex9) is SpikingJelly-only by design. Stated here in prose so the record is
-  # explicit even though no line is needed.
+  # framework: NOT overridden -- base default is `sj`, but ex7 is NO LONGER
+  # SpikingJelly-only. REVISED 2026-09-29: the width ladder now runs on all four
+  # backends (sj, snntorch, norse, sinabs), selected per run with --framework, which
+  # absorbs the old ex10 into this experiment. ex8/ex9 remain SpikingJelly-only.
+  # See README.md section 0 item 3. Leaving this key unset means --framework decides,
+  # which is exactly what a 4-framework sweep needs.
 
   seed: 0                        # single seed per rung by design -- see
                                   # experiment_plan_final.md §9 (seed policy). The

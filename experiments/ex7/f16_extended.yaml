@@ -1,3 +1,8 @@
+# RETIRED 2026-09-29 -- collapsed into the standard budget, see README.md section 6.
+# The standard budget was raised 15 -> 50 after measurement, and 50 was this arm's own
+# figure, so this file and f16.yaml now describe the same run. Kept only until the
+# 50-epoch f16 curve confirms whether a genuinely longer arm is still needed.
+#
 # Experiment 7, extended-epoch check -- filters=16, trained far past the normal budget.
 #
 # Inherits everything from f16.yaml (which already inherits config.yaml) and changes

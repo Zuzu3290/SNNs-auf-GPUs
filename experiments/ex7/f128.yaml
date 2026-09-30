@@ -1,3 +1,8 @@
+# RETIRED 2026-09-29 -- NOT part of the ex7 ladder any more.
+# The ladder was shifted down to 8/16/32/64 (README.md section 0, item 2) because the
+# brief's research question is about the SMALL-network regime. Run this only if f64
+# shows no sign of the fragility regime and the ladder needs extending upward again.
+#
 # Experiment 7, rung 4 of 4 -- filters=128 (the largest rung).
 #
 # Inherits everything from config.yaml and changes ONLY the filter counts.
