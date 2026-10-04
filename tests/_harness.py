@@ -34,7 +34,7 @@ MODEL_CLASSES = {
     "sinabs": ("frameworks.snn_sinabs", "SNN_SINABS"),
 }
 FRAMEWORKS = list(MODEL_CLASSES)
-SLOTS = ["lif1", "lif2", "lif_out"]
+SLOTS = ["lif1", "lif2", "lif_hidden", "lif_out"]
 
 
 class Suite:

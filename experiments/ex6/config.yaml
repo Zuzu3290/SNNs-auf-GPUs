@@ -42,7 +42,7 @@ training:
   # question; sj is the base default and is stated here so the record is unambiguous.
   # Overridable per-run with --framework, but do NOT vary it inside the study.
   framework: sj
-  seed: 0                       # single seed by design -- see experiment_plan.md section 6
+  seed: 0                       # single seed by design -- see scalability_tests/experiment_plan_final.md section 9
                                 # for the three points where multi-seed IS required.
 
   # ---- the batch size must be PINNED -------------------------------------------

@@ -256,7 +256,7 @@ On a machine where results must survive the session, add `--results-root <path>`
 | # | deliverable | destination |
 |---|---|---|
 | 1 | **the pooling value + measured evidence** | reported onward for use in a second pipeline — flagged as high priority |
-| 2 | confirmed batch size for the N-MNIST pilot | `experiment_plan.md` |
+| 2 | confirmed batch size for the N-MNIST pilot | `scalability_tests/experiment_plan_final.md` §4 |
 | 3 | baseline reference row (arm B) | `runs.csv`, the point every later rung is compared against |
 | 4 | instrumentation pass/fail per metric | note here once known |
 

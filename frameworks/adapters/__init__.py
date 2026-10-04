@@ -15,6 +15,7 @@ The per-layer, per-framework picker in network_architecture.yaml decides:
       snntorch:
         lif1: lif
         lif2: lif
+        lif_hidden: lif   # every hidden FC layer, when fc_hidden.layers > 0
         lif_out: lif
 
 Only `lif` is implemented. The other names below are recognised -- so a typo is told

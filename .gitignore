@@ -60,7 +60,9 @@ notes.txt
 /comparison
 scalability.md
 frameworks/regression/
-scalability_tests
+# scalability_tests/ stays local, EXCEPT the master plan (the study's single source of truth).
+scalability_tests/*
+!scalability_tests/experiment_plan_final.md
 temp-folder-scalability
 
 

@@ -30,6 +30,20 @@ convolution:
   pool_kernel:  2
 
 # ---------------------------------------------------------------------------
+# fc_hidden: optional hidden fully-connected layers between Flatten and the classifier.
+#
+#   Flatten -> [Linear(size) -> LIF] x layers -> Linear(classes) -> LIF (lif_out)
+#
+# This is the DEPTH axis of the scalability study (ex8, Factor B). layers: 0 is the
+# original architecture, unchanged -- every experiment before ex8 runs with it.
+# Every hidden layer has the same size; each one's neuron is picked by the single
+# `lif_hidden` key under neuron_types below. Both keys are REQUIRED.
+# ---------------------------------------------------------------------------
+fc_hidden:
+  layers: 0
+  size:   128
+
+# ---------------------------------------------------------------------------
 # neuron_types: WHICH neuron fills each LIF slot, per framework.
 #
 # There is no default. A missing or misspelled key RAISES rather than falling back --
@@ -58,18 +72,22 @@ neuron_types:
   snntorch:
     lif1:    lif
     lif2:    lif
+    lif_hidden: lif   # every fc_hidden layer (only built when fc_hidden.layers > 0)
     lif_out: lif
   norse:
     lif1:    lif
     lif2:    lif
+    lif_hidden: lif   # every fc_hidden layer (only built when fc_hidden.layers > 0)
     lif_out: lif
   spikingjelly:
     lif1:    lif
     lif2:    lif
+    lif_hidden: lif   # every fc_hidden layer (only built when fc_hidden.layers > 0)
     lif_out: lif
   sinabs:
     lif1:    lif
     lif2:    lif
+    lif_hidden: lif   # every fc_hidden layer (only built when fc_hidden.layers > 0)
     lif_out: lif
 
 # ---------------------------------------------------------------------------

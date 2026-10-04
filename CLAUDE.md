@@ -19,7 +19,7 @@ width/depth and measure how cost and "capacity" metrics scale.
   branch and this one are in sync. Coordination happens by hand-porting
   specific fixes, not merging wholesale (see "RAM leak" below for why).
 
-**Start here:** `experiment_plan_final.md` at repo root is the master plan —
+**Start here:** `scalability_tests/experiment_plan_final.md` is the master plan —
 what ex6 through ex10 are, why, and the current status of each. Read it
 before proposing new experiment design.
 
@@ -117,8 +117,9 @@ The width ladder was re-scoped after the study designer re-read the brief
    retired (kept on disk, out of the ladder).
 3. **All four frameworks**, not SpikingJelly only — 4 rungs x 4 backends = 16
    runs. This absorbs ex10, which is now redundant as originally scoped.
-   ex8/ex9 stay SpikingJelly-only.
-4. **Epochs fixed at 50** (was 15). Measured: the first f16 run ended with train
+   ex8/ex9 stay SpikingJelly-only. (Superseded 2026-10-04 for ex8 — see below.)
+4. **Epochs fixed at 50** (was 15) — *reverted to 15 on 2026-09-30, see "Open /
+   unresolved" below.* Measured: the first f16 run ended with train
    accuracy still climbing (28.6 -> 59.6% over 15 epochs, ~+1.5pp/epoch, loss
    still falling), so 15 was too short for every rung. The separate
    extended-epoch arm collapsed into this budget and is retired.
@@ -138,7 +139,50 @@ finish. An interrupted or timed-out run loses everything — there are no partia
 results. On Kaggle that means committing (Save & Run All), not interactive
 sessions, and projecting total runtime before starting a long rung.
 
-## Open / unresolved as of 2026-09-29
+## ex8 depth design, final as of 2026-10-04
+
+Full design in `scalability_tests/experiment_plan_final.md` §6 ("ex8 design") and §9.
+- **All four frameworks** (not SJ-only). **ex10 dropped** — ex7 + ex8 cover all four.
+- **Width fixed at f12** (`conv1_out = conv2_out = 12`) for ex8/ex9; ex7's best accuracy
+  was f8, f12 chosen between f8 and f16 (the original 12-filter size).
+- **Depth = count of hidden FC layers, size fixed at 128.** Ladder d0/d1/d2/d4.
+  At f12 the flatten feeding the FC part is 28,728; output is 101 (`lif_out`).
+- **No 3-seed pass in ex7** (width fixed at f12, seeded via ex8's winning rung and ex9).
+  ex7's rung ordering is single-seed — report it as a caveat.
+- Stop rule (<1% acc for >10% time/params) applied afterwards, not as abort. Theoretical
+  expectations in the plan are hypotheses, not acceptance criteria.
+- **Built 2026-10-04:** `fc_hidden: {layers, size}` in `network_architecture.yaml`
+  (default `layers: 0` = original net), hidden blocks in `frameworks/spiking_net.py`,
+  neuron key `neuron_types.<fw>.lif_hidden`, `experiments/ex8/` (README + d0/d1/d2/d4,
+  extends ex7's config). Run instructions: `experiments/ex8/README.md` §9.
+
+## Open / unresolved as of 2026-10-03
+
+- **Epoch budget reverted 15 -> 50 -> 15.** `experiments/ex7/config.yaml` briefly set
+  `epochs: 50` (2026-09-29), then was reverted to 15 the next day (commit
+  "ex7 epochs now 15") by deliberate decision — the goal is comparing width, not
+  reaching peak accuracy, so every rung uses the same fixed early checkpoint rather
+  than a converged one. Known, accepted trade-off: rungs/frameworks may differ in how
+  far along their own convergence curve they are at epoch 15, mixing "effect of width"
+  with "effect of convergence speed." See the config.yaml comment at that line for the
+  full note. **Stale reference:** the "ex7 redesign" section above still says "Epochs
+  fixed at 50" (item 4) — that was true 2026-09-29, no longer true as of the revert.
+- **Cross-framework convergence-rate check — not yet done, do before trusting the
+  4-framework comparison.** A standalone SpikingJelly calibration run (f16, 50 epochs,
+  interrupted at epoch 47 but complete through 46 — logged in
+  `experiments/ex7/calibration_runs/f16_50ep_20260930_180757_incomplete/`) found f16's
+  train accuracy still climbing ~0.8pp/epoch at epoch 15, plateauing around epoch
+  25-30. That calibration was SpikingJelly-only. The other three frameworks
+  (snnTorch/Norse/Sinabs) may converge at different rates than SJ even on an identical
+  config — same confound as the width axis, just across frameworks instead. Cheap
+  first check once each framework's normal 15-epoch f16 run is in: compare their
+  `train_accuracy_pct` at epoch 15 against SJ's 53.9%. Close and still climbing at a
+  similar rate -> SJ's calibration likely transfers, skip further checks for that
+  framework. Very different (much lower and barely moving, or already flat) -> that
+  framework needs its own extended (~50-epoch) calibration run before its 15-epoch
+  numbers are compared against the others. Don't commit to 3 blanket extended runs
+  without checking this first — expensive and the normal runs already carry the signal
+  needed to decide which frameworks actually need one.
 
 - `PR_Entropy_Sample_Size_Question.md` (repo root) is **untracked** — a short
   doc for Zuhair about the PR/entropy sample-size ceiling. Decide whether to

@@ -25,7 +25,14 @@ from frameworks.adapters.base import BaseLIF
 
 # The layer slot names the rest of this pipeline already uses: ActivityMonitor's keys,
 # synops_layer_map's keys, and the per-layer neuron picker in network_architecture.yaml.
+# With fc_hidden.layers > 0, hidden FC LIFs sit between lif2 and lif_out and are named
+# lif3, lif4, ... by named_lif_layers().
 LIF_SLOTS = ("lif1", "lif2", "lif_out")
+
+# The neuron-picker key for EVERY hidden FC LIF layer. One key rather than one per
+# layer, so the depth ladder needs no config edit per rung -- the picker still runs
+# once per layer built.
+HIDDEN_SLOT = "lif_hidden"
 
 
 class FlattenSizeMismatch(Exception):
@@ -50,6 +57,15 @@ def build_layers(make_lif: Callable[[str], BaseLIF], cfg) -> list[nn.Module]:
 
     Pooling comes AFTER the LIF, so it pools on spikes rather than on membrane voltages.
 
+    With fc_hidden.layers = N > 0 (the depth ladder, ex8), N hidden blocks are inserted
+    between Flatten and the classifier, each `Linear -> LIF`, all of size S:
+
+        Flatten                      800
+        Linear(800 -> S)  + LIF (lif3)
+        Linear(S -> S)    + LIF (lif4)     ... N blocks in total
+        Linear(S -> classes)
+        LIF   (lif_out)
+
     `make_lif` takes the slot name so the per-layer neuron picker in
     network_architecture.yaml is consulted once per slot -- see frameworks/adapters.
     """
@@ -64,7 +80,14 @@ def build_layers(make_lif: Callable[[str], BaseLIF], cfg) -> list[nn.Module]:
     ]
     flat = measure_flat_features(features, cfg)
     check_flat_features(flat, cfg)
-    return features + [nn.Linear(flat, cfg.NUM_CLASSES), make_lif("lif_out")]
+
+    hidden: list[nn.Module] = []
+    width = flat
+    for _ in range(cfg.FC_HIDDEN_LAYERS):
+        hidden += [nn.Linear(width, cfg.FC_HIDDEN_SIZE), make_lif(HIDDEN_SLOT)]
+        width = cfg.FC_HIDDEN_SIZE
+
+    return features + hidden + [nn.Linear(width, cfg.NUM_CLASSES), make_lif("lif_out")]
 
 
 def measure_flat_features(layers: list[nn.Module], cfg) -> int:

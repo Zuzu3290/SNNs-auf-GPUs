@@ -48,14 +48,16 @@ training:
   # framework: NOT overridden -- base default is `sj`, but ex7 is NO LONGER
   # SpikingJelly-only. REVISED 2026-09-29: the width ladder now runs on all four
   # backends (sj, snntorch, norse, sinabs), selected per run with --framework, which
-  # absorbs the old ex10 into this experiment. ex8/ex9 remain SpikingJelly-only.
+  # absorbs the old ex10 into this experiment. ex8 (which extends this file) also runs
+  # all four as of 2026-10-04; ex9 remains SpikingJelly-only.
   # See README.md section 0 item 3. Leaving this key unset means --framework decides,
   # which is exactly what a 4-framework sweep needs.
 
   seed: 0                        # single seed per rung by design -- see
-                                  # experiment_plan_final.md §9 (seed policy). The
-                                  # winning rung gets re-run at 2 more seeds afterward,
-                                  # once it's known which rung that is -- not before.
+                                  # scalability_tests/experiment_plan_final.md §9 (seed
+                                  # policy). No multi-seed pass in ex7 (dropped
+                                  # 2026-10-04); ex8 re-runs ITS winning rung at seeds
+                                  # 1 and 2 by passing --seed, not by editing this file.
 
   # ---- batch size is NOT pinned for this experiment -----------------------------
   # This is a REVERSAL of ex6's own approach, made after the study's designer reviewed
@@ -79,14 +81,21 @@ training:
                                    # `none` is what actually holds the LR constant.
                                    # optimizer.lr stays at the base 0.002.
 
-  epochs: 15                      # RAISED from 15 after the first f16 run (2026-09-29).
-                                   # 15 was an assumption and it proved too short: train
-                                   # accuracy was still climbing at epoch 15 (28.6 ->
-                                   # 59.6%, ~+1.5pp/epoch, train loss still falling
-                                   # monotonically), so the budget was too short for
-                                   # EVERY rung, not just f16 -- see README §5. 50 is
-                                   # ~3.3x the old budget, the ratio README §6 expresses.
-                                   # Every rung must use the same budget to be comparable.
+  epochs: 15                      # REVERTED to 15 on 2026-09-30 (commit "ex7 epochs now
+                                   # 15"), after briefly being raised to 50. The 15-epoch
+                                   # f16 run showed train accuracy still climbing (28.6 ->
+                                   # 59.6%, ~+1.5pp/epoch, loss still falling) -- so 15
+                                   # does NOT give a converged snapshot. Kept at 15 anyway
+                                   # by deliberate decision: the goal is comparing width,
+                                   # not reaching peak accuracy, so an equal, fixed, early
+                                   # checkpoint across rungs is being used as the budget
+                                   # rather than a converged one. Known trade-off: rungs
+                                   # may differ in how far along their own training curve
+                                   # they are at epoch 15, which risks mixing "effect of
+                                   # width" with "effect of convergence speed" -- see the
+                                   # 2026-09-30 discussion in README §5/§6 for the open
+                                   # question this leaves. Every rung must still use the
+                                   # same budget (15) to be comparable at all.
 
   use_amp: false                  # NOT overridden -- base default is already false.
                                    # Stated in prose: VRAM is a cost metric this

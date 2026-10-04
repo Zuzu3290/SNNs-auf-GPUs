@@ -17,7 +17,7 @@ WHY A FLAT OVERLAY WORKS
 The three base files share no top-level section name:
 
     SNN_module.yaml            architecture, training, output
-    network_architecture.yaml  convolution, neuron_types, neuron
+    network_architecture.yaml  convolution, fc_hidden, neuron_types, neuron
     data_workflow.yaml         framing, temporal_slicing, augmentation, cache,
                                resource_policy
 

@@ -58,6 +58,19 @@ class Settings:
         self.CONV2_KERNEL = conv.require_int("conv2_kernel")
         self.POOL_KERNEL  = conv.require_int("pool_kernel")
 
+        # Hidden FC layers between Flatten and the classifier -- the depth axis (ex8).
+        # 0 is the original architecture. Range-checked because a negative count or a
+        # zero size would build a network that silently is not the one configured.
+        fc_hidden = section(self.config, "fc_hidden")
+        self.FC_HIDDEN_LAYERS = fc_hidden.require_int("layers")
+        self.FC_HIDDEN_SIZE   = fc_hidden.require_int("size")
+        if self.FC_HIDDEN_LAYERS < 0:
+            raise ConfigKeyError(
+                f"fc_hidden.layers must be 0 or more, got {self.FC_HIDDEN_LAYERS}")
+        if self.FC_HIDDEN_SIZE < 1:
+            raise ConfigKeyError(
+                f"fc_hidden.size must be at least 1, got {self.FC_HIDDEN_SIZE}")
+
         # Input shape and output classes belong to the DATASET REGISTRY, not to this
         # config. sensor_h / sensor_w / in_channels / num_classes were removed from
         # network_architecture.yaml because apply_dataset_shape() overwrote all four on
@@ -336,6 +349,10 @@ class Settings:
         row("Conv2",           f"{self.CONV2_OUT} filters   {self.CONV2_KERNEL}×{self.CONV2_KERNEL} kernel")
         row("Pool",            f"{self.POOL_KERNEL}×{self.POOL_KERNEL} MaxPool   (applied twice)")
         row("FC input (auto)", shape("FC_IN"))
+        if self.FC_HIDDEN_LAYERS:
+            row("FC hidden",   f"{self.FC_HIDDEN_LAYERS} × {self.FC_HIDDEN_SIZE} neurons")
+        else:
+            row("FC hidden",   "none")
         num_classes = getattr(self, "NUM_CLASSES", None)
         row("Output classes",  str(num_classes) if num_classes is not None else "N/A (regression target)")
 

@@ -1,0 +1,33 @@
+# Experiment 8 -- depth ladder (Factor B). Shared base for all rungs.
+#
+# THIS FILE IS NOT ITSELF A RUNNABLE RUNG. Every run uses d0.yaml / d1.yaml / d2.yaml /
+# d4.yaml, each of which `extends:` this file and states only its hidden-layer count.
+#
+# Inherits EVERYTHING ex7 holds fixed (dataset N-Caltech101, T=16, 1 worker, seed 0,
+# constant LR, 15 epochs, AMP off, capacity metrics on, calibrated batch size) by
+# extending ex7's shared config rather than copying it -- so ex7 and ex8 cannot drift
+# apart. See ../ex7/config.yaml for the reasoning behind each of those values.
+# Design: README.md here, and scalability_tests/experiment_plan_final.md §6 "ex8 design".
+
+extends: ../ex7/config.yaml
+
+# ---------------------------------------------------------------------------
+# convolution: width FIXED at f12 for every ex8 rung (decided 2026-10-04).
+# ex7's highest-accuracy rung was f8; f12 sits between f8 and f16 and is the pipeline's
+# original 12-filter size. Symmetric F/F, same as every ex7 rung.
+# Flatten width at 180x240: 12 x 42 x 57 = 28,728.
+# ---------------------------------------------------------------------------
+convolution:
+  conv1_out: 12
+  conv2_out: 12
+
+# ---------------------------------------------------------------------------
+# fc_hidden: size FIXED at 128 for every rung; only `layers` varies (set per rung).
+# 128 = smallest power of 2 that is >= 101 classes (a narrower layer would itself be a
+# bottleneck). See README.md §3.
+# ---------------------------------------------------------------------------
+fc_hidden:
+  size: 128
+
+# training.framework: NOT set -- all four frameworks run every rung, chosen per run with
+# --framework, same as ex7.

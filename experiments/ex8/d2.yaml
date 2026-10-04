@@ -1,0 +1,9 @@
+# Experiment 8, rung d2 -- two hidden layers of 128.
+# Total parameters ~3.71M at f12 on N-Caltech101.
+#
+# Inherits everything from config.yaml and changes ONLY the hidden-layer count.
+
+extends: config.yaml
+
+fc_hidden:
+  layers: 2

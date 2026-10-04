@@ -199,8 +199,10 @@ def test_model_interface_surface() -> None:
 
         check(f"tensor_format is TB: {framework}", model.tensor_format() == "TB",
               model.tensor_format())
+        # Every named LIF slot, lif_out included (since 7f9e5937) -- not a fixed 2.
         check(f"ActivityMonitor is hooked: {framework}",
-              len(model.activity.buffers) == 2, str(len(model.activity.buffers)))
+              len(model.activity.buffers) == len(model.net.named_lif_layers()),
+              str(len(model.activity.buffers)))
         check(f"synops_layer_map is populated: {framework}",
               len(model.synops_layer_map()) == 2, str(len(model.synops_layer_map())))
         check(f"cfg.FRAMEWORK is written back: {framework}",

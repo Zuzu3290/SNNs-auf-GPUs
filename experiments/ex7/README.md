@@ -4,8 +4,9 @@
 **Position:** the main event of the scalability study. Runs after ex6 (pilot, complete)
 and before ex8 (depth ladder).
 **Dataset:** N-Caltech101 · **Backends:** all four (`sj`, `snntorch`, `norse`, `sinabs`)
-· **Rungs:** 4 (f8, f16, f32, f64) · **Epochs:** 50, fixed · **Seeds:** 1 per rung now,
-3 on the equilibrium rung once known
+· **Rungs:** 4 (f8, f16, f32, f64) · **Epochs:** 15 (set to 50 on 2026-09-29, reverted
+2026-09-30 — see `config.yaml`) · **Seeds:** 1 per rung (multi-seed pass dropped
+2026-10-04, see §8)
 
 > **Revised 2026-09-29.** Three things changed after the study designer re-read the
 > brief (`scalability_tests/Scalability.pdf`). They are recorded in §0 so the earlier
@@ -272,6 +273,12 @@ With four frameworks now in scope (§0 item 3), apply the multi-seed pass to the
 equilibrium rung **on SpikingJelly only** unless a cross-framework difference turns out
 to sit inside seed noise, in which case the seeds are what settle it.
 
+> **Superseded 2026-10-04: no multi-seed pass in ex7.** Width for ex8/ex9 is fixed at
+> **f12** (not an ex7 rung — chosen between f8, the highest-accuracy rung, and f16).
+> f12 gets its seeds downstream instead: ex8's winning depth rung (3 seeds, at f12) and
+> ex9 (3 seeds throughout). **Report caveat:** ex7's rung ordering (e.g. f8 > f16) is
+> single-seed, so small accuracy differences between rungs may sit inside seed noise.
+
 ## 9. What gets recorded — every metric in the brief, and where it lands
 
 Verified against the code on 2026-09-29. Three shared CSVs at
@@ -355,6 +362,35 @@ The same way ex6 checked its own instrumentation:
   rungs (§4). ex6 saw 22-37% on its smaller arms, meaning it was timing the data loader
   rather than the network.
 
+### Cross-framework convergence-rate check — do this once every framework's f16 run is in
+
+The epoch budget (15, see §5) was calibrated on **SpikingJelly only** — a standalone
+50-epoch f16 run (interrupted at epoch 47, complete through 46, logged in
+`experiments/ex7/calibration_runs/f16_50ep_20260930_180757_incomplete/`) found SJ's
+train accuracy at **53.9% at epoch 15, still climbing ~0.8pp/epoch**, plateauing around
+epoch 25-30. Nothing confirms the other three frameworks (snnTorch, Norse, Sinabs)
+converge at a similar rate on an identical config — different surrogate-gradient
+numerics, neuron update order, and optimizer internals can converge faster or slower in
+epoch-count terms, independent of the network itself. If they don't, "15 epochs, same
+for every framework" puts them at different points in their own training curves, mixing
+"effect of framework" with "effect of convergence speed" — the same confound already
+flagged for width (§5), just on the framework axis.
+
+**Check, cheap, no extra GPU time:** once each framework's normal 15-epoch f16 run is
+in, compare `train_accuracy_pct` at epoch 15 (last row of that run's `epochs.csv`)
+against SJ's 53.9%.
+- **Close, and still climbing at a similar rate** → SJ's calibration likely transfers;
+  no further action needed for that framework.
+- **Far off** (much lower and barely moving, or already flat) → that framework needs
+  its own extended (~50-epoch) calibration run before its 15-epoch numbers are compared
+  against the others — record this in §12 as a known caveat on that framework's results
+  if the extended run isn't done.
+
+This is a required check before trusting §10's per-framework comparison deliverable,
+not optional polish — report the epoch-15 train accuracy per framework in §12 either
+way, since it's a good indicator of whether the cross-framework comparison is apples-
+to-apples even by itself.
+
 ## 10. Deliverables
 
 | # | deliverable | destination |
@@ -366,6 +402,7 @@ The same way ex6 checked its own instrumentation:
 | 5 | Per-framework comparison at all 4 rungs | absorbs the old ex10, see §13 |
 | 6 | Confusion matrix per rung | the confusion-matrix data each run already produces |
 | 7 | First real capacity-metric readings for the study | `layers.csv`, all rungs |
+| 8 | Cross-framework convergence-rate check — epoch-15 train accuracy per framework, confirms (or flags) whether the fixed epoch budget is comparable across frameworks | §12, see §9 above |
 
 ## 11. How to run it
 
@@ -381,7 +418,7 @@ python equivalence_check.py --config experiments/ex7/f8.yaml --experiment ex7
 Then 4 rungs × 4 frameworks = **16 runs**, each its own process:
 
 ```bash
-for FW in sj snntorch norse sinabs; do
+for FW in sj torch norse sinabs; do   # "torch" is snnTorch's key in FRAMEWORK_MODULES, not "snntorch"
   for RUNG in f8 f16 f32 f64; do
     python learning/main.py --config experiments/ex7/$RUNG.yaml --experiment ex7 \
         --framework $FW --seed 0 --inference stats \
@@ -420,14 +457,47 @@ Catching a problem here costs one run; catching it at the end costs sixteen.
 
 ### Per-rung readings, SpikingJelly
 
-| rung | filters | batch | neurons | test acc | train acc (ep50) | train−test | peak VRAM | PR (lif1/lif2) | entropy (lif1/lif2) | I(Z;Y) (lif2) | SynOps |
+| rung | filters | batch | neurons | test acc | train acc (ep15) | train−test | peak VRAM | PR (lif1/lif2) | entropy (lif1/lif2) | I(Z;Y) (lif2) | SynOps |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 1 | 8 | | 408,997 | | | | | | | | |
 | 2 | 16 | | 817,893 | | | | | | | | |
 | 3 | 32 | | 1,635,685 | | | | | | | | |
 | 4 | 64 | | 3,271,269 | | | | | | | | |
 
-*(repeat this table per framework: `snntorch`, `norse`, `sinabs`)*
+*(repeat this table per framework: `torch`, `norse`, `sinabs`)*
+
+### Cross-framework convergence-rate check (§9)
+
+SpikingJelly's own epoch-15 train accuracy, for reference: **53.9%**, still climbing
+~0.8pp/epoch at that point (from the 50-epoch calibration run, not a merged ex7 run).
+
+| framework | f16 train acc @ epoch 15 | still climbing? | verdict |
+|---|---|---|---|
+| sj | 53.9% *(reference, not from a merged run)* | yes, ~0.8pp/epoch | — |
+| torch | **68.45%** (run `20261003_081414_torch_seed0`) | yes, +1.71pp in epoch 15 alone | **FAR OFF — needs its own extended calibration run** |
+| norse | **54.32%** (run `20261003_092426_norse_seed0`) | yes, in line with SJ's own rate | **CLOSE — SJ's calibration likely transfers, no extended run needed** |
+| sinabs | _pending_ | _pending_ | _pending_ |
+
+**torch triggers the check, in the opposite direction from what was anticipated** — not
+lagging SJ, running **+14.5pp ahead of it** at the same epoch count, and still climbing
+fast. snnTorch converges meaningfully faster than SpikingJelly per epoch on this config.
+15 epochs does not put these two frameworks at comparable points in their own training
+curves — confirms the concern §9 raised was real, on the first framework checked.
+
+**A second, equally real finding sits right next to it: train accuracy ahead, test
+accuracy not.** torch's test accuracy (35.19%) is within noise of SJ's own 15-epoch f16
+test accuracy (35.02%, run `20260929_155737_sj_seed0`) despite torch's 8.8pp higher
+train accuracy (68.45% vs 59.6%). torch's train−test gap at epoch 15 is **33.3pp**,
+noticeably wider than SJ's **24.6pp** — faster convergence here is not translating to
+better generalization, it may just be reaching §3's overfitting pressure sooner. Worth
+carrying into the write-up as its own observation, independent of the epoch-budget
+question: a framework that "learns faster" by this measure isn't necessarily the one
+that generalizes best, which is exactly the kind of result ex7's design (comparing
+frameworks under one shared budget) exists to surface.
+
+Given torch's divergence, running its own ~50-epoch f16 calibration (mirroring the SJ
+one) before trusting a torch-vs-sj comparison elsewhere in the ladder is the recommended
+next step — same reasoning as §9, now backed by a real number instead of a hypothetical.
 
 ### Table A — the small-network regime (bottleneck)
 
@@ -460,6 +530,10 @@ start.
 re-scoped** once ex8 (depth) is designed — most plausibly as the cross-framework replay
 of the *depth* winner only, since ex8 remains SpikingJelly-only for now. That decision
 is deferred, not made here.
+
+> **Decided 2026-10-04: ex10 is dropped.** ex8 (depth) also runs on all four frameworks,
+> so nothing is left for ex10 to replay. See `scalability_tests/experiment_plan_final.md`
+> §3 and §9.
 
 Cost note: 16 runs at 3-10h each is roughly 60-100 GPU-hours. Kaggle allows ~30 GPU-hours
 per account per week, so this is a multi-account, multi-week schedule — plan it as one,
