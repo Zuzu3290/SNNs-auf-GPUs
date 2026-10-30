@@ -1,4 +1,4 @@
-"""The LIF neuron as arithmetic, owned by no framework: ground truth for equivalence_check and the spec the cuSNN kernel must reproduce.
+"""The LIF neuron as arithmetic, owned by no framework: the spec the cuSNN kernel must reproduce.
 
     tau * dv/dt = -(v - v_leak) + R * I(t),  spike when v >= v_th, then hard reset
 

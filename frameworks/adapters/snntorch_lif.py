@@ -6,22 +6,15 @@ an snnTorch default -- those defaults differ from the other three frameworks, wh
 how the original per-framework config ended up with a 40x spread in firing threshold.
 """
 from __future__ import annotations
-
-from typing import Any
-
 import snntorch as snn
 import torch
 from snntorch import surrogate
-
 from frameworks.adapters.base import BaseLIF, reconcile
-from skeleton.config import (
-    neuron_cfg, require_bool, require_choice, require_float, require_surrogate,
-)
 
 SURROGATES = {"atan": surrogate.atan, "fast_sigmoid": surrogate.fast_sigmoid}
 
 
-def _live_surrogate(spike_grad) -> tuple[str, Any]:
+def _live_surrogate(spike_grad) -> tuple:
     """(type, alpha) of the surrogate the module is actually holding.
 
     snnTorch's `surrogate.atan(alpha=2.0)` returns a nested `inner` function rather than
@@ -37,22 +30,18 @@ def _live_surrogate(spike_grad) -> tuple[str, Any]:
 
 
 def build_lif(cfg) -> snn.Leaky:
-    n = neuron_cfg(cfg, "snntorch")
-    stype, salpha = require_surrogate(n)
-    if stype not in SURROGATES:
-        raise ValueError(
-            f"neuron.snntorch.surrogate.type = {stype!r}; options are {sorted(SURROGATES)}"
-        )
+    n = cfg.NEURON["snntorch"]
+    stype, salpha = n["surrogate"]["type"], n["surrogate"]["alpha"]
     return snn.Leaky(
-        beta=require_float(n, "beta"),
-        threshold=require_float(n, "threshold"),
+        beta=n["beta"],
+        threshold=n["threshold"],
         spike_grad=SURROGATES[stype](salpha),
         # snnTorch defaults to "subtract" (soft reset). The other three hard-reset.
-        reset_mechanism=require_choice(n, "reset_mechanism", ["zero", "subtract"]),
+        reset_mechanism=n["reset_mechanism"],
         # snnTorch defaults reset_delay=True, applying a spike's reset on the FOLLOWING
         # timestep. The other three reset immediately. Left at the default, snnTorch's
         # membrane reads a different value than the others after every spike.
-        reset_delay=require_bool(n, "reset_delay"),
+        reset_delay=n["reset_delay"],
         # init_hidden=False so state is passed explicitly -- see forward().
         init_hidden=False,
     )
@@ -72,7 +61,7 @@ class SnnTorchLIF(BaseLIF):
         super().__init__()
         self.cfg = cfg
         self.lif = build_lif(cfg)
-        self.mem: torch.Tensor | None = None
+        self.mem = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.mem is None:
@@ -84,26 +73,20 @@ class SnnTorchLIF(BaseLIF):
     def reset(self) -> None:
         self.mem = None
 
-    def has_state(self) -> bool:
-        return self.mem is not None
-
-    def membrane(self) -> torch.Tensor | None:
-        return self.mem
-
-    def describe(self) -> dict[str, Any]:
+    def describe(self) -> dict:
         """Read off the BUILT snn.Leaky -- these are the values training will use."""
-        n = neuron_cfg(self.cfg, "snntorch")
-        stype, salpha = require_surrogate(n)
+        n = self.cfg.NEURON["snntorch"]
+        stype, salpha = n["surrogate"]["type"], n["surrogate"]["alpha"]
         live_type, live_alpha = _live_surrogate(self.lif.spike_grad)
         return {
             "framework": "snntorch",
-            "beta": reconcile(self.lif.beta, require_float(n, "beta")),
-            "threshold": reconcile(self.lif.threshold, require_float(n, "threshold")),
+            "beta": reconcile(self.lif.beta, n["beta"]),
+            "threshold": reconcile(self.lif.threshold, n["threshold"]),
             "reset_mechanism": reconcile(
                 self.lif.reset_mechanism,
-                require_choice(n, "reset_mechanism", ["zero", "subtract"]),
+                n["reset_mechanism"],
             ),
-            "reset_delay": reconcile(self.lif.reset_delay, require_bool(n, "reset_delay")),
+            "reset_delay": reconcile(self.lif.reset_delay, n["reset_delay"]),
             "surrogate": reconcile(f"{live_type}(alpha={live_alpha})",
                                    f"{stype}(alpha={salpha})"),
         }

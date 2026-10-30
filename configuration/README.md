@@ -9,4 +9,3 @@ falling back to a default.
 | `network_architecture.yaml` | Convolution blocks, BatchNorm, hidden layers, and each framework's LIF neuron parameters | `skeleton/config.py` |
 | `data_workflow.yaml` | Time bins, denoising, cache strategy, DataLoader workers, VRAM target for the batch size | `skeleton/config.py` |
 
-An experiment can override any key with its own YAML file passed as `--config`; only the keys it names change.

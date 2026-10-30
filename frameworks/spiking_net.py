@@ -23,21 +23,11 @@ import torch.nn as nn
 
 from frameworks.adapters.base import BaseLIF
 
-# The layer slot names the rest of this pipeline already uses: ActivityMonitor's keys,
-# synops_layer_map's keys, and the per-layer neuron picker in network_architecture.yaml.
-def lif_slot_names(cfg, spiking_readout: bool = True) -> list[str]:
-    """Every LIF slot this config's architecture asks for, in build order: one lifN per conv block, then lif_fc when a hidden FC is configured, then lif_out unless the readout is linear."""
-    names = [f"lif{index}" for index in range(1, len(cfg.CONV_BLOCKS) + 1)]
-    names += [f"lif_fc{index}" for index in range(1, len(cfg.FC_HIDDEN) + 1)]
-    return names + ["lif_out"] if spiking_readout else names
-
-
 class FlattenSizeMismatch(Exception):
     """cfg.FC_IN and the measured flatten size disagree."""
 
 
-def build_layers(make_lif: Callable[[str], BaseLIF], cfg,
-                  spiking_readout: bool = True) -> list[nn.Module]:
+def build_layers(make_lif: Callable[[], BaseLIF], cfg) -> list[nn.Module]:
     """Every layer, in order: one Conv -> LIF -> MaxPool block per cfg.CONV_BLOCKS entry,
     then Flatten, then an optional hidden Linear -> LIF, then the Linear -> LIF output.
 
@@ -56,8 +46,6 @@ def build_layers(make_lif: Callable[[str], BaseLIF], cfg,
 
     Pooling comes AFTER the LIF, so it pools on spikes rather than on membrane voltages.
 
-    `make_lif` takes the slot name so the per-layer neuron picker in
-    network_architecture.yaml is consulted once per slot -- see frameworks/adapters.
 
     `convolution.batch_norm` inserts a BatchNorm2d between each conv and its LIF. It is
     what keeps a DEEP stack alive: every LIF layer attenuates, so without normalisation
@@ -68,11 +56,6 @@ def build_layers(make_lif: Callable[[str], BaseLIF], cfg,
     same module in all four frameworks and leaves the neuron -- the thing being compared
     -- untouched.
 
-    `spiking_readout=False` drops the final LIF, leaving the output Linear's continuous
-    value as the per-timestep prediction. That is what a REGRESSION head needs: a pose
-    or a flow vector is a real number, and a spike count cannot represent one. The conv
-    stack above it is unchanged, so a regression run and a classification run share the
-    same feature extractor and the same measurements.
     """
     features: list[nn.Module] = []
     in_channels = cfg.IN_CHANNELS
@@ -81,7 +64,7 @@ def build_layers(make_lif: Callable[[str], BaseLIF], cfg,
                                    padding=cfg.CONV_PADDING))
         if cfg.BATCH_NORM:
             features.append(nn.BatchNorm2d(block["out"]))
-        features.append(name_slot(make_lif(f"lif{index}"), f"lif{index}"))
+        features.append(name_slot(make_lif(), f"lif{index}"))
         features.append(nn.MaxPool2d(cfg.POOL_KERNEL))
         in_channels = block["out"]
     features.append(nn.Flatten())
@@ -91,11 +74,10 @@ def build_layers(make_lif: Callable[[str], BaseLIF], cfg,
 
     head: list[nn.Module] = []
     for index, width in enumerate(cfg.FC_HIDDEN, start=1):
-        head += [nn.Linear(flat, width), name_slot(make_lif(f"lif_fc{index}"), f"lif_fc{index}")]
+        head += [nn.Linear(flat, width), name_slot(make_lif(), f"lif_fc{index}")]
         flat = width
     head.append(nn.Linear(flat, cfg.NUM_CLASSES))
-    if spiking_readout:
-        head.append(name_slot(make_lif("lif_out"), "lif_out"))
+    head.append(name_slot(make_lif(), "lif_out"))
     return features + head
 
 
@@ -199,7 +181,7 @@ class SpikingNet(nn.Module):
             for index, layer in enumerate(self.lif_layers())
         }
 
-    def dense_after(self, lif_name: str) -> nn.Module | None:
+    def dense_after(self, lif_name: str):
         """The first dense (Conv2d/Linear) module DOWNSTREAM of a given LIF slot.
 
         Used for the SynOps estimate, whose per-layer term is
@@ -288,12 +270,11 @@ def run_sequence(layers, x: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def build_network(make_lif: Callable[[str], BaseLIF], cfg,
-                   spiking_readout: bool = True) -> SpikingNet:
+def build_network(make_lif: Callable[[], BaseLIF], cfg) -> SpikingNet:
     """Build the network.
 
     Seeding is the CALLER's job (skeleton.seeding.seed_model_init immediately before
     this), so weight init depends only on the seed and every framework starts from
     byte-identical conv/linear weights.
     """
-    return SpikingNet(build_layers(make_lif, cfg, spiking_readout=spiking_readout))
+    return SpikingNet(build_layers(make_lif, cfg))

@@ -11,7 +11,6 @@ import logging
 import sys
 import types
 import warnings
-from typing import Any
 
 
 def _block_tensorboard_import() -> None:
@@ -39,7 +38,7 @@ def _block_tensorboard_import() -> None:
     if name in sys.modules:
         return  # something imported the real one first; leave it alone
 
-    def _refuse(*_args: Any, **_kwargs: Any):
+    def _refuse(*_args, **_kwargs):
         raise RuntimeError(
             "tensorboard is not a dependency of this pipeline -- frameworks/adapters/"
             "norse_lif.py replaced it with a stub so that importing norse cannot pull "
@@ -68,34 +67,20 @@ import torch
 from norse.torch.functional.reset import reset_subtract, reset_value
 
 from frameworks.adapters.base import BaseLIF, reconcile, scalar
-from skeleton.config import (
-    neuron_cfg, require_choice, require_float, require_surrogate,
-)
 
 logger = logging.getLogger(__name__)
 
 RESETS = {"value": reset_value, "subtract": reset_subtract}
-SURROGATES = ("circ", "super", "heaviside", "tanh", "triangle", "heavi_erfc")
 
 # Guards the SuperSpike alpha warning below -- see build_lif for why once per process.
 _ALPHA_WARNING_SHOWN = False
 
 
-def reset_alpha_warning() -> None:
-    """Re-arm the once-per-process SuperSpike warning. For tests only: a suppression
-    that cannot be cleared is a suppression nothing can prove still fires."""
-    global _ALPHA_WARNING_SHOWN
-    _ALPHA_WARNING_SHOWN = False
-
-
 def build_lif(cfg) -> norse.LIFBoxCell:
     global _ALPHA_WARNING_SHOWN
-    n = neuron_cfg(cfg, "norse")
-    require_choice(n, "cell", ["lif_box"])
+    n = cfg.NEURON["norse"]
 
-    stype, salpha = require_surrogate(n)
-    if stype not in SURROGATES:
-        raise ValueError(f"neuron.norse.surrogate.type = {stype!r}; options {sorted(SURROGATES)}")
+    stype, salpha = n["surrogate"]["type"], n["surrogate"]["alpha"]
     if stype == "super" and not _ALPHA_WARNING_SHOWN:
         # MEASURED against norse 1.1.0: SuperSpike's backward never references
         # ctx.alpha, so every alpha gives byte-identical gradients -- it behaves as
@@ -114,15 +99,15 @@ def build_lif(cfg) -> norse.LIFBoxCell:
         )
 
     params = norse.LIFBoxParameters(
-        tau_mem_inv=torch.as_tensor(require_float(n, "tau_mem_inv"), dtype=torch.float32),
-        v_leak=torch.as_tensor(require_float(n, "v_leak"), dtype=torch.float32),
-        v_th=torch.as_tensor(require_float(n, "v_th"), dtype=torch.float32),
-        v_reset=torch.as_tensor(require_float(n, "v_reset"), dtype=torch.float32),
+        tau_mem_inv=torch.as_tensor(n["tau_mem_inv"], dtype=torch.float32),
+        v_leak=torch.as_tensor(n["v_leak"], dtype=torch.float32),
+        v_th=torch.as_tensor(n["v_th"], dtype=torch.float32),
+        v_reset=torch.as_tensor(n["v_reset"], dtype=torch.float32),
         method=stype,
         alpha=torch.as_tensor(salpha, dtype=torch.float32),
-        reset_method=RESETS[require_choice(n, "reset_method", sorted(RESETS))],
+        reset_method=RESETS[n["reset_method"]],
     )
-    return norse.LIFBoxCell(p=params, dt=require_float(n, "dt"))
+    return norse.LIFBoxCell(p=params, dt=n["dt"])
 
 
 class NorseLIF(BaseLIF):
@@ -142,7 +127,7 @@ class NorseLIF(BaseLIF):
         super().__init__()
         self.cfg = cfg
         self.lif = build_lif(cfg)
-        self.input_scale = require_float(neuron_cfg(cfg, "norse"), "input_scale")
+        self.input_scale = cfg.NEURON["norse"]["input_scale"]
         self.state = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -153,32 +138,24 @@ class NorseLIF(BaseLIF):
     def reset(self) -> None:
         self.state = None
 
-    def has_state(self) -> bool:
-        return self.state is not None
-
-    def membrane(self) -> torch.Tensor | None:
-        return None if self.state is None else self.state.v
-
-    def describe(self) -> dict[str, Any]:
+    def describe(self) -> dict:
         """Read off the BUILT LIFBoxCell -- these are the values training will use.
 
         Everything except dt lives in `p`, the LIFBoxParameters namedtuple the cell was
         constructed with, so the values below are the ones its forward step reads.
         """
-        n = neuron_cfg(self.cfg, "norse")
-        stype, salpha = require_surrogate(n)
+        n = self.cfg.NEURON["norse"]
+        stype, salpha = n["surrogate"]["type"], n["surrogate"]["alpha"]
         p = self.lif.p
-        reset_key = require_choice(n, "reset_method", sorted(RESETS))
+        reset_key = n["reset_method"]
         return {
             "framework": "norse",
-            # Not reconciled: this adapter builds exactly one cell type, and build_lif
-            # already rejects any other value for `cell`.
             "cell": type(self.lif).__name__,
-            "dt": reconcile(self.lif.dt, require_float(n, "dt")),
-            "tau_mem_inv": reconcile(p.tau_mem_inv, require_float(n, "tau_mem_inv")),
-            "v_th": reconcile(p.v_th, require_float(n, "v_th")),
-            "v_reset": reconcile(p.v_reset, require_float(n, "v_reset")),
-            "v_leak": reconcile(p.v_leak, require_float(n, "v_leak")),
+            "dt": reconcile(self.lif.dt, n["dt"]),
+            "tau_mem_inv": reconcile(p.tau_mem_inv, n["tau_mem_inv"]),
+            "v_th": reconcile(p.v_th, n["v_th"]),
+            "v_reset": reconcile(p.v_reset, n["v_reset"]),
+            "v_leak": reconcile(p.v_leak, n["v_leak"]),
             # norse stores the reset as a FUNCTION, so the check is identity against the
             # one this adapter's table maps the config key to, not a name comparison.
             "reset_method": reconcile(getattr(p.reset_method, "__name__", p.reset_method),

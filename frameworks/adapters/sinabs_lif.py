@@ -17,7 +17,6 @@ conversion guarantee sinabs exists to provide. It is simply a different goal.
 """
 from __future__ import annotations
 
-from typing import Any
 
 import sinabs.layers as sl
 import torch
@@ -27,10 +26,6 @@ from sinabs.activation import (
 )
 
 from frameworks.adapters.base import BaseLIF, reconcile, scalar
-from skeleton.config import (
-    NeuronSpecError, neuron_cfg, optional_float, require_bool, require_choice,
-    require_float,
-)
 
 SPIKE_FNS = {"single": SingleSpike, "multi": MultiSpike}
 RESETS = {"zero": MembraneReset, "subtract": MembraneSubtract}
@@ -40,8 +35,7 @@ RESETS = {"zero": MembraneReset, "subtract": MembraneSubtract}
 # sinabs does NOT use the name `alpha` for any of them, so this project's usual
 # `surrogate.alpha` key does not apply here -- each type declares its own real
 # parameter names instead. Pretending they were all `alpha` would misreport what was
-# actually configured, which is why this adapter reads the surrogate itself rather than
-# going through require_surrogate() like the other three.
+# actually configured, which is why this adapter reads the surrogate itself.
 SURROGATE_PARAMS = {
     "single_exponential": ("grad_width", "grad_scale"),
     "periodic_exponential": ("grad_width", "grad_scale"),
@@ -51,7 +45,7 @@ SURROGATE_PARAMS = {
 }
 
 
-def build_surrogate(n: dict) -> Any:
+def build_surrogate(n: dict):
     """Construct the surrogate gradient object from the sinabs neuron block.
 
     Only the keys belonging to the CHOSEN type are read, so a config carries the
@@ -61,25 +55,11 @@ def build_surrogate(n: dict) -> Any:
     `periodic_exponential`, and a default-only adapter would accept that config and
     silently run single_exponential instead.
     """
-    # The strict neuron helpers key off the LAST path segment, so the surrogate sub-block
-    # has to be fetched first and read from directly; the dotted path is only there to
-    # make the error message name the full location.
-    if "surrogate" not in n:
-        raise NeuronSpecError(
-            "neuron.sinabs.surrogate is not set. State it explicitly -- sinabs' own "
-            f"default is single_exponential. Keys present: {sorted(n)}"
-        )
     surrogate_block = n["surrogate"]
-    if not isinstance(surrogate_block, dict):
-        raise NeuronSpecError(
-            f"neuron.sinabs.surrogate must be a mapping with a 'type', got "
-            f"{surrogate_block!r}"
-        )
-
-    kind = require_choice(surrogate_block, "sinabs.surrogate.type", sorted(SURROGATE_PARAMS))
+    kind = surrogate_block["type"]
 
     def param(name: str) -> float:
-        return require_float(surrogate_block, f"sinabs.surrogate.{name}")
+        return surrogate_block[name]
 
     if kind == "single_exponential":
         return SingleExponential(
@@ -107,7 +87,7 @@ SURROGATE_CLASSES = {
 }
 
 
-def _live_surrogate_description(fn: Any) -> str:
+def _live_surrogate_description(fn) -> str:
     """The same string _surrogate_description produces, built from the OBJECT the module
     holds so the two can be compared directly. Falls back to the class name for a
     surrogate this adapter does not build."""
@@ -131,10 +111,10 @@ def _surrogate_description(n: dict) -> str:
 
 
 def build_lif(cfg) -> sl.LIF:
-    n = neuron_cfg(cfg, "sinabs")
-    reset_key = require_choice(n, "reset_mechanism", sorted(RESETS))
+    n = cfg.NEURON["sinabs"]
+    reset_key = n["reset_mechanism"]
     if reset_key == "zero":
-        reset_fn = MembraneReset(reset_value=require_float(n, "v_reset"))
+        reset_fn = MembraneReset(reset_value=n["v_reset"])
     else:
         # MembraneSubtract's subtract_value=None means "subtract the threshold".
         reset_fn = MembraneSubtract()
@@ -142,15 +122,15 @@ def build_lif(cfg) -> sl.LIF:
     return sl.LIF(
         # In timesteps. sinabs has no dt, so tau_mem IS the time constant -- no unit
         # conversion, unlike norse's dt * tau_mem_inv.
-        tau_mem=require_float(n, "tau_mem"),
+        tau_mem=n["tau_mem"],
         # null = first-order (membrane only). A number adds a synaptic state.
-        tau_syn=optional_float(n, "tau_syn"),
-        spike_threshold=torch.as_tensor(require_float(n, "spike_threshold")),
-        spike_fn=SPIKE_FNS[require_choice(n, "spike_fn", sorted(SPIKE_FNS))],
+        tau_syn=n["tau_syn"],
+        spike_threshold=torch.as_tensor(n["spike_threshold"]),
+        spike_fn=SPIKE_FNS[n["spike_fn"]],
         reset_fn=reset_fn,
-        min_v_mem=optional_float(n, "min_v_mem"),
-        train_alphas=require_bool(n, "train_alphas"),
-        norm_input=require_bool(n, "norm_input"),
+        min_v_mem=n["min_v_mem"],
+        train_alphas=n["train_alphas"],
+        norm_input=n["norm_input"],
         # BACKWARD PASS ONLY -- forward membrane/spike dynamics are identical whatever
         # this is. Set explicitly so a config that names a surrogate actually gets it.
         surrogate_grad_fn=build_surrogate(n),
@@ -213,8 +193,7 @@ class SinabsLIF(BaseLIF):
              `handle_state_batch_size_mismatch` path, which resamples the state with
              `torch.randint` -- it fills each neuron's membrane by copying a RANDOM
              other sample's. Harmless only while the buffer happens to be all zeros.
-          2. `is_state_initialised()` would keep returning True after a reset, so
-             has_state() could not honestly report whether the reset worked.
+          2. `is_state_initialised()` would keep returning True after a reset.
 
         Restoring the zero-size tensor that register_buffer originally held makes
         is_state_initialised() False again, so the next forward re-infers the shape
@@ -224,22 +203,12 @@ class SinabsLIF(BaseLIF):
         for name, buffer in list(self.lif.named_buffers()):
             self.lif.register_buffer(name, torch.zeros((0), device=buffer.device))
 
-    def has_state(self) -> bool:
-        """Sinabs' own test: reads shapes only, so it forces no host/device sync."""
-        return bool(self.lif.is_state_initialised())
-
-    def membrane(self) -> torch.Tensor | None:
-        if not self.lif.is_state_initialised():
-            return None
-        # Shaped (batch, 1, ...) because forward() feeds one timestep at a time.
-        return self.lif.v_mem.squeeze(1) if self.lif.v_mem.dim() > 1 else self.lif.v_mem
-
-    def describe(self) -> dict[str, Any]:
+    def describe(self) -> dict:
         """Read off the BUILT sl.LIF -- these are the values training will use."""
-        n = neuron_cfg(self.cfg, "sinabs")
+        n = self.cfg.NEURON["sinabs"]
         lif = self.lif
-        reset_key = require_choice(n, "reset_mechanism", sorted(RESETS))
-        spike_key = require_choice(n, "spike_fn", sorted(SPIKE_FNS))
+        reset_key = n["reset_mechanism"]
+        spike_key = n["spike_fn"]
         # From the module, so the decay/gain pair below describes the neuron that will
         # actually run rather than the one the file asked for.
         tau_mem = float(scalar(lif.tau_mem))
@@ -248,10 +217,10 @@ class SinabsLIF(BaseLIF):
         gain = (1.0 - decay) if norm_input else 1.0
         return {
             "framework": "sinabs",
-            "tau_mem": reconcile(lif.tau_mem, require_float(n, "tau_mem")),
-            "tau_syn": reconcile(lif.tau_syn, optional_float(n, "tau_syn")),
+            "tau_mem": reconcile(lif.tau_mem, n["tau_mem"]),
+            "tau_syn": reconcile(lif.tau_syn, n["tau_syn"]),
             "spike_threshold": reconcile(lif.spike_threshold,
-                                         require_float(n, "spike_threshold")),
+                                         n["spike_threshold"]),
             # sinabs holds CLASSES and OBJECTS where the config holds keys, so these
             # three compare identity against this adapter's own tables.
             "spike_fn": reconcile(lif.spike_fn.__name__, spike_key,
@@ -264,11 +233,11 @@ class SinabsLIF(BaseLIF):
             # to show the neuron that was BUILT. Reporting v_reset unconditionally read
             # as "the built neuron resets to 0.0", which under subtract it does not.
             "v_reset": (reconcile(getattr(lif.reset_fn, "reset_value", None),
-                                  require_float(n, "v_reset")) if reset_key == "zero"
+                                  n["v_reset"]) if reset_key == "zero"
                         else "n/a -- subtract reset has no reset level"),
-            "min_v_mem": reconcile(lif.min_v_mem, optional_float(n, "min_v_mem")),
-            "norm_input": reconcile(lif.norm_input, require_bool(n, "norm_input")),
-            "train_alphas": reconcile(lif.train_alphas, require_bool(n, "train_alphas")),
+            "min_v_mem": reconcile(lif.min_v_mem, n["min_v_mem"]),
+            "norm_input": reconcile(lif.norm_input, n["norm_input"]),
+            "train_alphas": reconcile(lif.train_alphas, n["train_alphas"]),
             # Always False here, by the freeze in __init__. Recorded rather than
             # assumed: sinabs makes the time constant trainable by default, so "we
             # switched it off" is a fact about the run, not about the config.

@@ -1,16 +1,12 @@
 """SpikingJelly LIF, behind BaseLIF."""
 from __future__ import annotations
 
-from typing import Any
 
 import numpy as np
 import torch
 from spikingjelly.activation_based import neuron, surrogate
 
 from frameworks.adapters.base import BaseLIF, reconcile
-from skeleton.config import (
-    neuron_cfg, require_bool, require_choice, require_float, require_surrogate,
-)
 
 SURROGATES = {"atan": surrogate.ATan, "sigmoid": surrogate.Sigmoid}
 
@@ -38,15 +34,11 @@ def restore_np_int_alias() -> None:
 
 
 def build_lif(cfg) -> neuron.LIFNode:
-    n = neuron_cfg(cfg, "spikingjelly")
-    stype, salpha = require_surrogate(n)
-    if stype not in SURROGATES:
-        raise ValueError(
-            f"neuron.spikingjelly.surrogate.type = {stype!r}; options are {sorted(SURROGATES)}"
-        )
+    n = cfg.NEURON["spikingjelly"]
+    stype, salpha = n["surrogate"]["type"], n["surrogate"]["alpha"]
 
-    step_mode = require_choice(n, "step_mode", ["s", "m"])
-    backend = require_choice(n, "backend", ["torch", "cupy"])
+    step_mode = n["step_mode"]
+    backend = n["backend"]
     if backend == "cupy":
         restore_np_int_alias()
     if backend == "cupy" and step_mode != "m":
@@ -60,16 +52,16 @@ def build_lif(cfg) -> neuron.LIFNode:
         )
 
     return neuron.LIFNode(
-        tau=require_float(n, "tau"),
+        tau=n["tau"],
         # SpikingJelly defaults decay_input=True, which divides the input by tau and
         # drops the input gain to 1/tau. False keeps gain at 1.0 like the others.
-        decay_input=require_bool(n, "decay_input"),
-        v_threshold=require_float(n, "v_threshold"),
-        v_reset=require_float(n, "v_reset"),
+        decay_input=n["decay_input"],
+        v_threshold=n["v_threshold"],
+        v_reset=n["v_reset"],
         surrogate_function=SURROGATES[stype](alpha=salpha),
         # MEASURED: flipping this changed d(spikes)/d(weight) from 2.64 to 4.34 on a
         # 6-step test. False matches snnTorch, whose reset path also carries gradient.
-        detach_reset=require_bool(n, "detach_reset"),
+        detach_reset=n["detach_reset"],
         step_mode=step_mode,
         backend=backend,
     )
@@ -97,18 +89,10 @@ class SpikingJellyLIF(BaseLIF):
         """step_mode='m' is exactly the multi-step contract: the whole [T, batch, ...] stack in one call, which is what lets the cupy backend fuse the timestep loop into a single kernel."""
         return self.lif.step_mode == "m"
 
-    def has_state(self) -> bool:
-        # v is the scalar 0.0 before the first forward, a tensor afterwards.
-        return isinstance(getattr(self.lif, "v", 0.0), torch.Tensor)
-
-    def membrane(self) -> torch.Tensor | None:
-        v = getattr(self.lif, "v", None)
-        return v if isinstance(v, torch.Tensor) else None
-
-    def describe(self) -> dict[str, Any]:
+    def describe(self) -> dict:
         """Read off the BUILT LIFNode -- these are the values training will use."""
-        n = neuron_cfg(self.cfg, "spikingjelly")
-        stype, salpha = require_surrogate(n)
+        n = self.cfg.NEURON["spikingjelly"]
+        stype, salpha = n["surrogate"]["type"], n["surrogate"]["alpha"]
         node, fn = self.lif, self.lif.surrogate_function
         # SpikingJelly names its surrogate classes ATan / Sigmoid while the config keys
         # are lower case, so the comparison is on the class the table maps `stype` to
@@ -116,14 +100,14 @@ class SpikingJellyLIF(BaseLIF):
         wanted_class = SURROGATES.get(stype)
         return {
             "framework": "spikingjelly",
-            "tau": reconcile(node.tau, require_float(n, "tau")),
-            "decay_input": reconcile(node.decay_input, require_bool(n, "decay_input")),
-            "v_threshold": reconcile(node.v_threshold, require_float(n, "v_threshold")),
-            "v_reset": reconcile(node.v_reset, require_float(n, "v_reset")),
-            "detach_reset": reconcile(node.detach_reset, require_bool(n, "detach_reset")),
-            "step_mode": reconcile(node.step_mode, require_choice(n, "step_mode", ["s", "m"])),
+            "tau": reconcile(node.tau, n["tau"]),
+            "decay_input": reconcile(node.decay_input, n["decay_input"]),
+            "v_threshold": reconcile(node.v_threshold, n["v_threshold"]),
+            "v_reset": reconcile(node.v_reset, n["v_reset"]),
+            "detach_reset": reconcile(node.detach_reset, n["detach_reset"]),
+            "step_mode": reconcile(node.step_mode, n["step_mode"]),
             "backend": reconcile(node.backend,
-                                 require_choice(n, "backend", ["torch", "cupy"])),
+                                 n["backend"]),
             "surrogate": reconcile(
                 f"{type(fn).__name__}(alpha={getattr(fn, 'alpha', '?')})",
                 f"{stype}(alpha={salpha})",
@@ -133,5 +117,5 @@ class SpikingJellyLIF(BaseLIF):
         }
 
 
-def _agree_alpha(live: Any, wanted: Any) -> bool:
+def _agree_alpha(live, wanted) -> bool:
     return live is not None and abs(float(live) - float(wanted)) < 1e-9

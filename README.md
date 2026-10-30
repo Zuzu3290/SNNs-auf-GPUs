@@ -10,11 +10,10 @@ changes between runs.
 ```
 configuration/        The three YAML files every run reads (see configuration/README.md)
 event_data_workflow/  Event data: dataset registry, denoising, framing, caching, DataLoaders, resource monitor
-frameworks/           The shared spiking network, the model interface and one LIF adapter per framework
+frameworks/           The shared spiking network and one LIF adapter per framework
 learning/             Entry point, training loop, testing, metrics
 skeleton/             Settings, config loading and validation, seeding, results files
 docs/                 Background notes, design records and earlier reports
-equivalence_check.py  Drives one LIF layer per framework with the same input and compares the traces
 ```
 
 ## Running
@@ -28,10 +27,11 @@ writes the results. Installation, options and the Colab setup are in [HOW_TO_RUN
 
 ## Datasets
 
-Five datasets are registered in `event_data_workflow/dataset_registry.py`: N-MNIST, N-Caltech101,
-DVS128 Gesture (classification), and DAVIS Camera Pose and Eye Tracking (regression; their output
-stage is not built yet). A new classification dataset only needs a registry entry with its loader,
-sensor size and number of classes; input size, output layer and batch size follow automatically.
+Three classification datasets train end to end: N-MNIST, N-Caltech101 and DVS128 Gesture. The
+registry in `event_data_workflow/dataset_registry.py` also holds loaders for two regression datasets,
+DAVIS Camera Pose and Eye Tracking, which the pipeline does not train. A new classification dataset
+only needs a registry entry with its tonic class, sensor size and number of classes; input size,
+output layer and batch size follow automatically.
 Events must be available as `(x, y, t, p)`: pixel column, pixel row, timestamp, polarity.
 
 ## Frameworks
@@ -48,8 +48,9 @@ Each framework's neuron parameters live in `configuration/network_architecture.y
 
 ## What is measured
 
-Every run records test accuracy and loss, spike rate, single-sample latency and throughput,
-peak GPU memory, GPU energy from NVML, and the synaptic operations (SynOps) per inference.
-The synaptic-operation energy columns are an estimate for event-driven hardware, not a measurement
+Every run records test accuracy and per-class metrics, spike rates (training, test and per layer),
+single-sample latency, throughput, training forward/backward time, peak GPU memory, GPU energy from
+NVML, and the synaptic operations (SynOps) per inference.
+The synaptic-operation energy columns are an estimate for neuromorphic hardware, not a measurement
 on a chip: SynOps × 0.9 pJ, the energy of one addition at 45 nm (Horowitz, ISSCC 2014;
 `SYNOPS_ENERGY_PJ` in `learning/training.py` and `learning/inference.py`).

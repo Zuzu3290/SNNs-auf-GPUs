@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 import csv
-import importlib
+import importlib.metadata
 import json
 import platform
+import pynvml
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 import torch
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 GB_TO_MB = 1024.0
 
 
@@ -22,70 +22,64 @@ class ResultsError(Exception):
 
 # Changing a column list means bumping SCHEMA_VERSION; a metric that was not measured is an empty cell, never a missing column.
 RUN_COLUMNS: list[str] = [
-    "schema_version", "run_id", "timestamp", "framework", "seed", "config_path", "config_hash",
+    "schema_version", "run_id", "timestamp", "framework", "seed", "config_hash",
     "dataset", "time_steps", "batch_size", "num_workers", "denoise_us", "epochs", "optimizer", "lr", "surrogate",
     "trainable_params", "weight_fingerprint",
-    "test_accuracy_pct", "train_loss_final", "test_loss_final", "task_metric", "task_score", "task_score_secondary",
-    "train_time_s", "train_time_per_epoch_s", "inference_throughput_samples_per_s",
-    "inference_latency_bs1_ms", "inference_latency_bs1_mean_ms", "inference_latency_bs1_p90_ms",
-    "inference_latency_amortised_p50_ms", "inference_latency_amortised_p90_ms", "inference_latency_amortised_p99_ms",
+    "test_accuracy_pct", "train_loss_final",
+    "train_time_s", "inference_throughput_samples_per_s",
+    "inference_latency_bs1_ms", "inference_latency_bs1_p90_ms",
     "train_forward_latency_ms", "train_backward_latency_ms",
-    "neuron_model", "conv_blocks", "fc_hidden", "credit_assignment",
-    "spike_rate_pct", "test_activation_density_pct", "spikes_per_neuron_per_inference", "cv_isi_mean", "total_spikes_test", "input_to_output_ratio",
-    "energy_per_sample_pj", "infer_synops_energy_per_sample_pj", "train_synops_energy_pj_total", "train_synops_energy_pj_per_epoch",
-    "peak_memory_train_mb", "peak_memory_infer_mb", "peak_reserved_train_mb", "peak_reserved_infer_mb",
-    "nvml_update_interval_ms", "idle_power_cold_w", "idle_power_after_train_w",
-    "train_energy_duration_s", "train_energy_j", "train_energy_dynamic_j", "infer_energy_j", "infer_energy_dynamic_j", "energy_warnings",
-    "gpu_temp_c", "sm_clock_mhz", "mem_clock_mhz",
+    "conv_blocks", "fc_hidden",
+    "spike_rate_pct", "test_activation_density_pct", "test_output_spike_rate_pct",
+    "infer_synops_energy_per_sample_pj", "train_synops_energy_pj_total",
+    "peak_memory_train_mb", "peak_memory_infer_mb",
+    "idle_power_cold_w", "idle_power_after_train_w",
+    "train_energy_j", "train_energy_dynamic_j", "infer_energy_j", "infer_energy_dynamic_j",
     "gpu_name", "driver", "cuda", "torch_version", "framework_version", "python_version", "platform",
     "notes",
 ]
 
 EPOCH_COLUMNS: list[str] = [
-    "schema_version", "run_id", "epoch", "train_loss", "train_accuracy_pct", "test_loss", "test_accuracy_pct",
-    "epoch_train_time_s", "spike_rate_pct", "forward_latency_ms", "backward_latency_ms", "cv_isi_mean", "synops_energy_pj",
+    "schema_version", "run_id", "epoch", "train_loss", "train_accuracy_pct",
+    "epoch_train_time_s", "spike_rate_pct", "forward_latency_ms", "backward_latency_ms", "synops_energy_pj",
 ]
 
 LAYER_COLUMNS: list[str] = [
     "schema_version", "run_id", "layer_index", "layer_type", "neurons", "total_spikes", "opportunities", "spike_rate_pct",
-    "cv_isi", "dense_macs_downstream",
+    "dense_macs_downstream",
 ]
 
 FRAMEWORK_PACKAGES = {"torch": "snntorch", "norse": "norse", "sj": "spikingjelly", "sinabs": "sinabs"}
 
 
-def make_run_id(framework: str, seed: int, when: datetime | None = None) -> str:
+def make_run_id(framework: str, seed: int, when=None) -> str:
     """`<timestamp>_<framework>_seed<n>`: unique, sortable, self-describing."""
     stamp = (when or datetime.now()).strftime("%Y%m%d_%H%M%S")
     return f"{stamp}_{framework}_seed{seed}"
 
 
-def environment_info(framework: str) -> dict[str, Any]:
+def environment_info(framework: str) -> dict:
     """GPU, driver, CUDA and library versions the run actually ran on."""
-    info: dict[str, Any] = {"torch_version": torch.__version__, "python_version": sys.version.split()[0],
+    info: dict = {"torch_version": torch.__version__, "python_version": sys.version.split()[0],
                             "platform": platform.platform(), "gpu_name": None, "driver": None, "cuda": None,
                             "framework_version": None}
     if torch.cuda.is_available():
         info["gpu_name"] = torch.cuda.get_device_name(0)
         info["cuda"] = torch.version.cuda
-        try:
-            import pynvml
-            pynvml.nvmlInit()
-            driver = pynvml.nvmlSystemGetDriverVersion()
-            info["driver"] = driver.decode() if isinstance(driver, bytes) else driver
-        except Exception:
-            pass
+        pynvml.nvmlInit()
+        driver = pynvml.nvmlSystemGetDriverVersion()
+        info["driver"] = driver.decode() if isinstance(driver, bytes) else driver
     package = FRAMEWORK_PACKAGES.get(framework)
     if package:
-        info["framework_version"] = getattr(importlib.import_module(package), "__version__", None)
+        info["framework_version"] = importlib.metadata.version(package)
     return info
 
 
-def pct(value: Any) -> float | None:
+def pct(value):
     return None if value is None else float(value) * 100.0
 
 
-def last(seq) -> Any:
+def last(seq):
     return seq[-1] if seq else None
 
 
@@ -93,40 +87,37 @@ def numeric_over_epochs(epoch_log: list[dict], key: str) -> list[float]:
     return [float(v) for v in (row.get(key) for row in (epoch_log or [])) if isinstance(v, (int, float))]
 
 
-def peak_over_epochs(epoch_log: list[dict], key: str) -> float | None:
+def peak_over_epochs(epoch_log: list[dict], key: str):
     """Largest per-epoch value of `key` (GB), in MB."""
     values = numeric_over_epochs(epoch_log, key)
     return max(values) * GB_TO_MB if values else None
 
 
-def sum_over_epochs(epoch_log: list[dict], key: str) -> float | None:
+def sum_over_epochs(epoch_log: list[dict], key: str):
     values = numeric_over_epochs(epoch_log, key)
     return sum(values) if values else None
 
 
-def mean_over_epochs(epoch_log: list[dict], key: str) -> float | None:
+def mean_over_epochs(epoch_log: list[dict], key: str):
     values = numeric_over_epochs(epoch_log, key)
     return sum(values) / len(values) if values else None
 
 
 def build_epoch_rows(epoch_log: list[dict]) -> list[dict]:
-    """One row per epoch from SNNTrainer.epoch_log; testing runs once at the end, so the test columns stay empty."""
+    """One row per epoch from SNNTrainer.epoch_log."""
     return [{
         "epoch": entry.get("epoch"),
         "train_loss": entry.get("train_loss"),
         "train_accuracy_pct": pct(entry.get("train_accuracy")),
-        "test_loss": None,
-        "test_accuracy_pct": None,
         "epoch_train_time_s": entry.get("epoch_duration_s"),
         "spike_rate_pct": pct(entry.get("spike_rate")),
         "forward_latency_ms": entry.get("forward_latency_ms"),
         "backward_latency_ms": entry.get("backward_latency_ms"),
-        "cv_isi_mean": entry.get("cv_isi_mean"),
         "synops_energy_pj": entry.get("synops_energy_pj"),
     } for entry in epoch_log]
 
 
-def layer_row(index: int, name: str, layer, neurons, spikes: float, slots: int, cv_isi: dict | None, dense_macs: dict | None) -> dict:
+def layer_row(index: int, name: str, layer, neurons, spikes: float, slots: int, dense_macs) -> dict:
     return {
         "layer_index": index,
         "layer_type": f"{name}:{type(layer).__name__}",
@@ -134,13 +125,12 @@ def layer_row(index: int, name: str, layer, neurons, spikes: float, slots: int, 
         "total_spikes": spikes,
         "opportunities": slots,
         "spike_rate_pct": (spikes / slots) * 100.0 if slots else None,
-        "cv_isi": (cv_isi or {}).get(name),
         "dense_macs_downstream": (dense_macs or {}).get(name),
     }
 
 
-def build_layer_rows(model, activity_snapshot: dict | None = None, cv_isi: dict | None = None,
-                     dense_macs: dict | None = None) -> list[dict]:
+def build_layer_rows(model, activity_snapshot=None,
+                     dense_macs=None) -> list[dict]:
     """One row per spiking layer, from the layer's own spike counter or else the ActivityMonitor recording."""
     rows: list[dict] = []
     source = getattr(model, "net", None) or model
@@ -152,7 +142,7 @@ def build_layer_rows(model, activity_snapshot: dict | None = None, cv_isi: dict 
             total = float(total.item())
         if slots:
             neurons = layer.neurons() if hasattr(layer, "neurons") else 0
-            rows.append(layer_row(index, name, layer, neurons, total, slots, cv_isi, dense_macs))
+            rows.append(layer_row(index, name, layer, neurons, total, slots, dense_macs))
             continue
         recorded = (activity_snapshot or {}).get(name)
         if recorded is None:
@@ -161,13 +151,13 @@ def build_layer_rows(model, activity_snapshot: dict | None = None, cv_isi: dict 
         for dim in (recorded.shape[2:] if recorded.dim() > 2 else ()):
             neurons *= int(dim)
         rows.append(layer_row(index, name, layer, neurons or None, float(recorded.float().sum().item()),
-                              int(recorded.numel()), cv_isi, dense_macs))
+                              int(recorded.numel()), dense_macs))
     return rows
 
 
 def build_run_row(cfg, model, train_results: dict, test_results: dict, epoch_log: list[dict],
-                  params: dict, timesteps: int | None = None, num_workers: int | None = None, notes: str = "",
-                  run_id: str | None = None, latency: dict | None = None, density: dict | None = None) -> dict:
+                  params: dict, timesteps=None, num_workers=None, notes: str = "",
+                  run_id=None, latency=None, density=None) -> dict:
     """One row summarising the run; `latency` is the real batch-size-1 timing from utilities.measure_latency."""
     framework = cfg.FRAMEWORK
     seed = getattr(cfg, "SEED", None)
@@ -178,13 +168,11 @@ def build_run_row(cfg, model, train_results: dict, test_results: dict, epoch_log
     neuron = model.describe_neuron() if hasattr(model, "describe_neuron") else {}
     accuracy = test_results.get("overall_accuracy")
     infer_peak = test_results.get("gpu_mem_peak_gb")
-    infer_reserved = test_results.get("max_memory_reserved_gb")
     row = {
         "run_id": run_id or make_run_id(framework, seed),
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "framework": framework,
         "seed": seed,
-        "config_path": cfg.CONFIG_PATH,
         "config_hash": cfg.CONFIG_HASH,
         "dataset": getattr(cfg, "DATASET_NAME", None),
         "time_steps": timesteps if timesteps is not None else cfg.N_TIME_BINS,
@@ -198,59 +186,35 @@ def build_run_row(cfg, model, train_results: dict, test_results: dict, epoch_log
         "trainable_params": params.get("total_trainable"),
         "weight_fingerprint": params.get("shared_fingerprint"),
         "test_accuracy_pct": pct(accuracy),
-        "task_metric": test_results.get("task_metric", "accuracy_pct" if accuracy is not None else None),
-        "task_score": test_results.get("task_score", pct(accuracy)),
-        "task_score_secondary": test_results.get("task_score_secondary"),
         "train_loss_final": last(train_results.get("loss_history") or []),
-        "test_loss_final": None,
         "train_time_s": train_time,
-        "train_time_per_epoch_s": (train_time / len(epoch_log)) if train_time and epoch_log else None,
         "inference_throughput_samples_per_s": test_results.get("throughput_samples_per_s"),
         "inference_latency_bs1_ms": (latency or {}).get("latency_ms"),
-        "inference_latency_bs1_mean_ms": (latency or {}).get("latency_mean_ms"),
         "inference_latency_bs1_p90_ms": (latency or {}).get("latency_p90_ms"),
-        "inference_latency_amortised_p50_ms": test_results.get("median_latency_per_sample_ms"),
-        "inference_latency_amortised_p90_ms": test_results.get("p90_latency_per_sample_ms"),
-        "inference_latency_amortised_p99_ms": test_results.get("p99_latency_per_sample_ms"),
         "train_forward_latency_ms": mean_over_epochs(epoch_log, "forward_latency_ms"),
         "train_backward_latency_ms": mean_over_epochs(epoch_log, "backward_latency_ms"),
-        "neuron_model": neuron.get("neuron"),
         "conv_blocks": "-".join(f"{b['out']}C{b['kernel']}" for b in getattr(cfg, "CONV_BLOCKS", []) or []) or None,
         "fc_hidden": getattr(cfg, "FC_HIDDEN", None),
-        "credit_assignment": test_results.get("credit_assignment"),
         "spike_rate_pct": pct(last(train_results.get("spike_rate_history") or [])),
         "test_activation_density_pct": pct((density or {}).get("hidden_mean")),
-        "spikes_per_neuron_per_inference": test_results.get("avg_spikes_per_neuron_per_inference"),
-        "cv_isi_mean": test_results.get("cv_isi_mean"),
-        "total_spikes_test": test_results.get("total_spikes"),
-        "input_to_output_ratio": test_results.get("framework_ratio"),
-        "energy_per_sample_pj": test_results.get("energy_per_sample_pj"),
+        "test_output_spike_rate_pct": pct(test_results.get("output_spike_rate")),
         "infer_synops_energy_per_sample_pj": test_results.get("synops_energy_per_sample_pj"),
         "train_synops_energy_pj_total": sum_over_epochs(epoch_log, "synops_energy_pj"),
-        "train_synops_energy_pj_per_epoch": mean_over_epochs(epoch_log, "synops_energy_pj"),
         "peak_memory_train_mb": peak_over_epochs(epoch_log, "gpu_mem_peak_gb"),
         "peak_memory_infer_mb": infer_peak * GB_TO_MB if infer_peak else None,
-        "peak_reserved_train_mb": peak_over_epochs(epoch_log, "max_memory_reserved_gb"),
-        "peak_reserved_infer_mb": infer_reserved * GB_TO_MB if infer_reserved else None,
-        "nvml_update_interval_ms": None,
         "idle_power_cold_w": idle_values[0] if idle_values else None,
         "idle_power_after_train_w": idle_values[-1] if idle_values else None,
-        "train_energy_duration_s": train_time,
         "train_energy_j": energy_total,
         "train_energy_dynamic_j": energy_dynamic,
         "infer_energy_j": test_results.get("gpu_energy_j_total"),
         "infer_energy_dynamic_j": test_results.get("gpu_energy_j_dynamic"),
-        "energy_warnings": None,
-        "gpu_temp_c": test_results.get("gpu_temp_c"),
-        "sm_clock_mhz": test_results.get("sm_clock_mhz"),
-        "mem_clock_mhz": test_results.get("mem_clock_mhz"),
         "notes": notes,
     }
     row.update(environment_info(framework))
     return row
 
 
-def format_cell(value: Any) -> str:
+def format_cell(value) -> str:
     """None becomes an empty cell; everything else its plain text."""
     if value is None:
         return ""
@@ -261,14 +225,14 @@ def format_cell(value: Any) -> str:
     return str(value)
 
 
-def append_row(path: Path, columns: list[str], row: dict[str, Any]) -> None:
+def append_row(path: Path, columns: list[str], row: dict) -> None:
     """Append one row; an unknown key or a header that differs from the file on disk raises."""
     unknown = sorted(set(row) - set(columns))
     if unknown:
         raise ResultsError(f"unknown column(s) for {path.name}: {unknown}. Add them to the schema in "
                            "skeleton/results_collection.py and bump SCHEMA_VERSION.")
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing_header: list[str] | None = None
+    existing_header = None
     if path.is_file() and path.stat().st_size > 0:
         with path.open("r", newline="", encoding="utf-8") as handle:
             existing_header = next(csv.reader(handle), None)
@@ -286,7 +250,7 @@ def append_row(path: Path, columns: list[str], row: dict[str, Any]) -> None:
         writer.writerow([format_cell(row.get(column)) for column in columns])
 
 
-def write_run_json(results_dir: Path, run_id: str, payload: dict[str, Any]) -> Path:
+def write_run_json(results_dir: Path, run_id: str, payload: dict) -> Path:
     """The complete record of one run, including the full config."""
     path = results_dir / "runs" / f"{run_id}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,8 +258,8 @@ def write_run_json(results_dir: Path, run_id: str, payload: dict[str, Any]) -> P
     return path
 
 
-def write_results(results_dir: Path, run_row: dict[str, Any], epoch_rows: list[dict[str, Any]],
-                  layer_rows: list[dict[str, Any]], json_payload: dict[str, Any] | None = None) -> dict[str, Path]:
+def write_results(results_dir: Path, run_row: dict, epoch_rows: list[dict],
+                  layer_rows: list[dict], json_payload=None) -> dict[str, Path]:
     """Append the run's rows to runs.csv, epochs.csv and layers.csv, and write its JSON."""
     results_dir = Path(results_dir)
     run_id = run_row["run_id"]

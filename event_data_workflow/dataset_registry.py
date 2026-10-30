@@ -1,15 +1,8 @@
-"""
-Single source of truth for every dataset the pipeline can load: tonic class/
-loader, sensor shape, class count, sample counts, and storage_size_gb
-(compressed download size actually pulled by this entry's loader, not the
-extracted/on-disk footprint — None where no figure has been measured or
-documented; see docs/Event-Based_camera.md for sourcing).
-"""
+"""Every dataset the pipeline can load: its tonic class (or loader), sensor shape and class count."""
 from __future__ import annotations
 import difflib
 import logging
 from pathlib import Path
-
 import h5py
 import numpy as np
 import pandas as pd
@@ -20,33 +13,19 @@ from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
-# DVS128 Gesture's figshare.com/ndownloader URLs sit behind an AWS WAF bot
-# challenge (confirmed: 202 Accepted, 0 bytes). ndownloader.figshare.com is
-# the same files' canonical subdomain, no challenge.
+# figshare.com/ndownloader sits behind a bot challenge; the ndownloader subdomain serves the same files without one.
 tonic.datasets.DVSGesture.train_url = "https://ndownloader.figshare.com/files/38022171"
 tonic.datasets.DVSGesture.test_url = "https://ndownloader.figshare.com/files/38020584"
 
 
 class WindowedRecordingDataset(Dataset):
-    """Flattens whole recordings (too large to use as one training sample)
-    into (event_window, target) samples, one per target's (start_us, stop_us)
-    window. Generic over any recording source via the three accessor args."""
+    """Splits long recordings into (event_window, target) samples, one per target's (start_us, stop_us) window."""
 
     requires_single_process_loading = True
 
     def __init__(self, recordings: Dataset, get_events, get_targets, get_windows,
                   count_windows=None):
-        """`count_windows(rec_idx)` returns a recording's window count WITHOUT
-        materialising the recording.
-
-        It matters more than it looks. Building the index needs only how many windows
-        each recording has, but reaching that through `get_windows(recordings[i])`
-        loads the whole recording -- and for DAVIS Camera Pose one recording is a 4 GB
-        events.txt that takes about three minutes to parse. Over 24 sequences that is
-        roughly 72 minutes spent before the first sample is ever read, to obtain 24
-        integers that live in a 1.5 MB groundtruth file. Sources that can answer
-        cheaply pass this; those that cannot leave it None and the slow path stands.
-        """
+        """`count_windows(rec_idx)` counts a recording's windows without loading its events, which can take minutes."""
         self.recordings = recordings
         self.get_events = get_events
         self.get_targets = get_targets
@@ -58,7 +37,7 @@ class WindowedRecordingDataset(Dataset):
                          else len(get_windows(recordings[rec_idx])))
             self._index.extend((rec_idx, frame_idx) for frame_idx in range(n_windows))
 
-        self._cached_rec_idx: int | None = None
+        self._cached_rec_idx = None
         self._cached_events = None
         self._cached_targets = None
         self._cached_windows = None
@@ -83,36 +62,14 @@ class WindowedRecordingDataset(Dataset):
         return window, targets[frame_idx]
 
 
-
-
 DAVIS_POSE_SENSOR_SIZE = (240, 180, 2)  # DAVIS240C
 EVENT_XYTP_I64_DTYPE = np.dtype([("x", np.int64), ("y", np.int64), ("t", np.int64), ("p", np.int64)])
-# Sequences carrying NO groundtruth.txt. The Event-Camera Dataset was captured with a
-# motion-capture rig for the indoor scenes only; these five were recorded handheld or
-# outdoors where no mocap was available, so they ship events and images but no pose.
-# VERIFIED against the extracted data: each contains calib.txt, events.txt, images.txt
-# and nothing else. They cannot be used for pose regression and are excluded here rather
-# than downloaded and discovered empty -- together they are about 1.1 GB of wasted
-# download and several GB of wasted extraction.
-DAVIS_POSE_NO_GROUNDTRUTH = ("calibration", "office_spiral", "office_zigzag",
-                              "outdoors_running", "outdoors_walking", "urban")
-# Three of the nineteen mocap sequences, not all of them. The nineteen are the same few
-# scenes shot under different motions -- boxes, shapes, poster and slider, each repeated
-# for rotation, translation and full 6-DOF. Taking all of them feeds the network the same
-# scene content many times over, which trains it to those scenes rather than to pose.
-# One of each SCENE under full 6-DOF motion is what there is to learn from: cluttered
-# boxes, plain geometric shapes, and dense poster texture.
-#
-# It is also what makes this runnable: all nineteen window out to 168,516 samples, about
-# 24 times N-Caltech101's iteration count. These three give roughly 36,000.
+# One sequence per scene under full 6-DOF motion; the other sequences repeat the same scenes, and these give ~36,000 windows.
 DAVIS_POSE_SEQUENCES = ["boxes_6dof", "shapes_6dof", "poster_6dof"]
 
 
 class DAVISPoseRecordings(Dataset):
-    """One recording = one Event-Camera-Dataset sequence (Mueggler et al.,
-    rpg.ifi.uzh.ch): events.txt (t_seconds x y p) + groundtruth.txt (t_seconds,
-    position xyz, quaternion xyzw) from a DAVIS240C + mocap rig. Downloads/
-    extracts each sequence on first use."""
+    """Event-Camera Dataset sequences (Mueggler et al.): events.txt plus mocap groundtruth.txt, downloaded on first use."""
 
     base_url = "https://rpg.ifi.uzh.ch/datasets/davis"
     sensor_size = DAVIS_POSE_SENSOR_SIZE
@@ -126,14 +83,8 @@ class DAVISPoseRecordings(Dataset):
                 download_and_extract_archive(f"{self.base_url}/{name}.zip",
                                               str(self.root / name), filename=f"{name}.zip")
 
-    def find_sequence_dir(self, name: str) -> Path | None:
-        """Where this sequence's files actually landed, or None if it is not downloaded.
-
-        Each archive carries its own top-level folder, so extracting boxes_6dof.zip into
-        .../DAVISPose/boxes_6dof produces .../DAVISPose/boxes_6dof/boxes_6dof/events.txt
-        -- one level deeper than the path it was extracted to. Both layouts are accepted
-        so an already-extracted copy is never re-downloaded because of the extra level.
-        """
+    def find_sequence_dir(self, name: str):
+        """The folder holding this sequence's events.txt (archives nest one level deep), or None if not downloaded."""
         for candidate in (self.root / name / name, self.root / name):
             if (candidate / "events.txt").is_file():
                 return candidate
@@ -149,12 +100,7 @@ class DAVISPoseRecordings(Dataset):
         return found
 
     def window_count(self, idx: int) -> int:
-        """How many windows this sequence yields, read from groundtruth.txt alone.
-
-        groundtruth.txt is about 1.5 MB; events.txt for the same sequence is about 4 GB
-        and takes roughly three minutes to parse. Indexing needs only this count, so it
-        must not touch the events -- see WindowedRecordingDataset's count_windows.
-        """
+        """Window count from the small groundtruth.txt alone, without parsing the multi-GB events.txt."""
         gt = np.loadtxt(self.sequence_dir(self.sequences[idx]) / "groundtruth.txt")
         return max(0, len(gt) - 1)
 
@@ -164,10 +110,7 @@ class DAVISPoseRecordings(Dataset):
     def __getitem__(self, idx: int):
         seq_dir = self.sequence_dir(self.sequences[idx])
 
-        # pandas rather than np.loadtxt: these files reach 4 GB of plain text, where
-        # numpy's pure-Python parser takes about three minutes. read_csv's C parser does
-        # the same work several times faster, and this runs once per sequence per cache
-        # build.
+        # pandas' C parser reads the multi-GB events.txt several times faster than np.loadtxt.
         raw_events = pd.read_csv(seq_dir / "events.txt", sep=r"\s+", header=None,
                                   dtype=np.float64).to_numpy()
         events = np.empty(len(raw_events), dtype=EVENT_XYTP_I64_DTYPE)
@@ -185,7 +128,7 @@ class DAVISPoseRecordings(Dataset):
 
 
 def load_davis_pose(save_to: str, split: str) -> WindowedRecordingDataset:
-    """Camera 6-DOF pose (Mueggler et al., Event-Camera Dataset) via DAVISPoseRecordings. `split` is unused (kept for call-site symmetry)."""
+    """Camera 6-DOF pose windows; `split` is unused."""
     recordings = DAVISPoseRecordings(save_to, sequences=DAVIS_POSE_SEQUENCES)
     return WindowedRecordingDataset(
         recordings,
@@ -196,12 +139,12 @@ def load_davis_pose(save_to: str, split: str) -> WindowedRecordingDataset:
     )
 
 
-EYETRACKING_SENSOR_SIZE = (240, 180, 2)  # DAVIS240C, same sensor family as DAVIS Camera Pose
-EYETRACKING_RECORDINGS = 1  # curated subset -- tonic's full "train" split is 16 recordings, millions of events each
+EYETRACKING_SENSOR_SIZE = (240, 180, 2)  # DAVIS240C
+EYETRACKING_RECORDINGS = 1  # tonic's full train split is 16 recordings of millions of events each
 
 
 class EyeTrackingRecordings(Dataset):
-    """One recording = one 3ET-Eyetracking video: DVS events + per-frame (x, y) gaze position, windowed by that recording's own frame timestamps."""
+    """3ET-Eyetracking videos: DVS events plus per-frame (x, y) gaze, windowed by the recording's frame timestamps."""
 
     sensor_size = EYETRACKING_SENSOR_SIZE
 
@@ -227,7 +170,7 @@ class EyeTrackingRecordings(Dataset):
 
 
 def load_eyetracking(save_to: str, split: str) -> WindowedRecordingDataset:
-    """3ET-Eyetracking gaze-position regression via EyeTrackingRecordings. `split` is unused (kept for call-site symmetry)."""
+    """Gaze-position windows; `split` is unused."""
     recordings = EyeTrackingRecordings(save_to, split="train")
     return WindowedRecordingDataset(
         recordings,
@@ -237,64 +180,37 @@ def load_eyetracking(save_to: str, split: str) -> WindowedRecordingDataset:
     )
 
 
-# Built-in dataset choices. Sample counts sourced from each dataset's own
-# paper or tonic's _check_exists(). See dataset_registry_changes.md for the
-# history behind entries that were added/removed/replaced.
+# 1-3 train end to end; 4-5 are loaders only, kept for anyone who wants to add a regression path (they have no num_classes).
 DATASET_REGISTRY = {
     "1": {
         "name": "N-MNIST",
         "cls": tonic.datasets.NMNIST,
-        "has_train_split": True,
         "sensor_size": tonic.datasets.NMNIST.sensor_size,
         "num_classes": 10,
-        "num_train_samples": 60_000,
-        "num_test_samples": 10_000,
-        "storage_size_gb": 1.18,  # train.zip 965MB + test.zip 162MB
     },
     "2": {
         "name": "N-Caltech101",
         "cls": tonic.datasets.NCALTECH101,
-        "has_train_split": False,
         "sensor_size": (240, 180, 2),
         "num_classes": 101,
-        "num_train_samples": 6_967,
-        "num_test_samples": 1_742,
-        "storage_size_gb": 3.72,  # single zip, Mendeley-hosted
     },
     "3": {
-        "name": "DAVIS Camera Pose",
-        "kind": "regression",
-        "loader": load_davis_pose,
-        "sensor_size": DAVIS_POSE_SENSOR_SIZE,
-        "num_classes": 1,
-        "num_targets": 7,  # (x, y, z, qx, qy, qz, qw) -- real regression output width, for frameworks/regression/
-        "num_train_samples": None,  # full DAVIS_POSE_SEQUENCES collection -- not measured until actually run
-        "num_test_samples": None,
-        # MEASURED by HTTP HEAD on all 24 sequence zips, 2026-09-16. This is the
-        # COMPRESSED download; the archives hold events.txt, which expands several
-        # times over on extraction, so plan for considerably more free disk.
-        "storage_size_gb": 8.0,
-    },
-    "4": {
         "name": "DVS128 Gesture",
         "cls": tonic.datasets.DVSGesture,
-        "has_train_split": True,
         "sensor_size": tonic.datasets.DVSGesture.sensor_size,
         "num_classes": 11,
-        "num_train_samples": 1_077,
-        "num_test_samples": 264,
-        "storage_size_gb": 3.0,  # compressed tar, train+test combined; ~5GB extracted
     },
-    "6": {
+    "4": {
+        "name": "DAVIS Camera Pose",
+        "loader": load_davis_pose,
+        "sensor_size": DAVIS_POSE_SENSOR_SIZE,
+        "num_targets": 7,  # x, y, z, qx, qy, qz, qw
+    },
+    "5": {
         "name": "Eye Tracking",
-        "kind": "regression",
         "loader": load_eyetracking,
         "sensor_size": EYETRACKING_SENSOR_SIZE,
-        "num_classes": 1,
-        "num_targets": 2,  # (x, y) gaze position -- real regression output width, for frameworks/regression/
-        "num_train_samples": 1_599,
-        "num_test_samples": 400,
-        "storage_size_gb": 3.87,  # whole-dataset zip (all subjects/videos); only EYETRACKING_RECORDINGS of them get used
+        "num_targets": 2,  # x, y gaze position
     },
 }
 
@@ -304,31 +220,23 @@ class UnknownDataset(Exception):
 
 
 def normalise_dataset_name(name: str) -> str:
-    """Fold case, spaces, hyphens and underscores so 'DVS128 Gesture',
-    'dvs128-gesture' and 'dvs128_gesture' all name the same dataset."""
+    """Fold case, spaces, hyphens and underscores so 'DVS128 Gesture' and 'dvs128-gesture' match."""
     return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
 
 def dataset_menu() -> str:
     lines = []
     for key, entry in DATASET_REGISTRY.items():
-        kind = entry.get("kind", "classification")
-        output = (f"{entry['num_classes']} classes" if kind in ("classification", "detection")
-                  else "regression target TBD")
+        output = (f"{entry['num_classes']} classes" if "num_classes" in entry
+                  else f"{entry['num_targets']} targets, loader only")
         lines.append(f"  {key}) {entry['name']}  [{output}]")
     return "\n".join(lines)
 
 
 def lookup_dataset(wanted: str) -> dict:
-    """Find one dataset by name or by registry key ('1'..'8').
-
-    Raises UnknownDataset on anything unrecognised, naming the closest matches. A typo
-    must fail HERE, at startup, rather than being silently ignored -- a run that
-    quietly used the wrong dataset, or fell back to N-MNIST while the config asked for
-    DVS128 Gesture, is worse than one that refuses to start.
-    """
+    """One dataset by name or menu number; anything unrecognised raises with the closest matches."""
     text = str(wanted).strip()
-    if text in DATASET_REGISTRY:            # a registry key, as the menu prints them
+    if text in DATASET_REGISTRY:
         return DATASET_REGISTRY[text]
 
     target = normalise_dataset_name(text)
@@ -338,7 +246,7 @@ def lookup_dataset(wanted: str) -> dict:
 
     names = [entry["name"] for entry in DATASET_REGISTRY.values()]
     close = difflib.get_close_matches(text, names, n=3, cutoff=0.5)
-    if not close:  # try again on the normalised forms, so 'nmnist' still suggests N-MNIST
+    if not close:  # retry on the folded forms, so 'nmnist' still suggests N-MNIST
         folded = {normalise_dataset_name(n): n for n in names}
         close = [folded[m] for m in difflib.get_close_matches(target, list(folded), n=3, cutoff=0.5)]
     hint = f" Did you mean: {', '.join(close)}?" if close else ""
@@ -349,20 +257,7 @@ def lookup_dataset(wanted: str) -> dict:
 
 
 def resolve_dataset_entry(cfg) -> dict:
-    """Which dataset this run uses.
-
-    Two paths, both supported:
-
-      dataset.name set in config  -> used directly, no prompt. Required for anything
-                                     non-interactive: a Colab cell, a scripted
-                                     multi-seed sweep, or several runs launched at
-                                     once cannot answer a prompt, and a run that
-                                     needed one is not reproducible from its config.
-      dataset.name absent/null    -> prompt, exactly as this pipeline always has.
-
-    A name that is set but unrecognised RAISES rather than falling back -- see
-    lookup_dataset.
-    """
+    """The dataset named by dataset.name, or asked for at a prompt when it is null."""
     wanted = getattr(cfg, "DATASET_NAME", None)
     if wanted is not None and str(wanted).strip():
         entry = lookup_dataset(wanted)
@@ -372,15 +267,4 @@ def resolve_dataset_entry(cfg) -> dict:
     print("\n[PIPELINE] Select a dataset:")
     print(dataset_menu())
     print("  (set dataset.name in the config to skip this prompt)")
-    try:
-        choice = input("Enter number: ").strip()
-    except EOFError:
-        logger.warning("[PIPELINE] No interactive input source attached — defaulting to N-MNIST. "
-                       "Set dataset.name in the config to choose deliberately.")
-        return DATASET_REGISTRY["1"]
-
-    try:
-        return lookup_dataset(choice)
-    except UnknownDataset:
-        logger.warning(f"[PIPELINE] Invalid selection '{choice}' — defaulting to N-MNIST")
-        return DATASET_REGISTRY["1"]
+    return lookup_dataset(input("Enter number: ").strip())

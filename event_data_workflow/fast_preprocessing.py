@@ -176,7 +176,7 @@ class FastPreprocessing:
     sensor_size/n_time_bins are optional so denoise() can be used standalone (paired
     with tonic's own ToFrame) when the caller needs time_window mode instead."""
 
-    def __init__(self, filter_time: float, sensor_size=None, n_time_bins: int | None = None):
+    def __init__(self, filter_time: float, sensor_size=None, n_time_bins=None):
         self.filter_time = filter_time
         self.sensor_size = sensor_size
         self.n_time_bins = n_time_bins

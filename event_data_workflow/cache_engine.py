@@ -17,11 +17,10 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
-from typing import Optional
 import torch
 from torch.utils.data import Dataset
 from tonic import DiskCachedDataset, MemoryCachedDataset
-from .system_monitor import monitor, is_gpu_under_pressure, GPU_PRESSURE_THRESHOLD
+from .system_monitor import monitor, is_gpu_under_pressure
 
 logger = logging.getLogger(__name__)
 
@@ -167,9 +166,8 @@ class AdaptiveCacheController:
     the GPU is only ever the training device, never a dataset storage
     location."""
 
-    def __init__(self, cache_path: str = "./cache", memory_safety_margin_gb: float = 2.0, memory_cache_threshold_gb: float = 6.0,
-                 gpu_pressure_threshold: float = GPU_PRESSURE_THRESHOLD, memory_tier_headroom_fraction: float = 0.7,
-                 disk_tier_headroom_multiple: float = 1.2):
+    def __init__(self, cache_path: str, memory_safety_margin_gb: float, memory_cache_threshold_gb: float,
+                 gpu_pressure_threshold: float, memory_tier_headroom_fraction: float, disk_tier_headroom_multiple: float):
         self.cache_path = Path(cache_path)
         self.memory_safety_margin = memory_safety_margin_gb
         self.memory_threshold = memory_cache_threshold_gb
@@ -188,26 +186,16 @@ class AdaptiveCacheController:
         once the dense per-bin frames are what's held."""
         sample_indices = torch.randperm(len(dataset))[:min(num_samples_to_probe, len(dataset))]
         total_bytes = 0
-        successful_probes = 0
 
         for idx in sample_indices:
-            try:
-                events, _ = dataset[int(idx)]
-                if transform is not None:
-                    events = transform(events)
-                total_bytes += measure_event_bytes(events)
-                successful_probes += 1
-            except Exception as e:
-                logger.warning(f"[CACHE CONTROLLER] Could not probe sample {idx}: {e}")
-                continue
+            events, _ = dataset[int(idx)]
+            if transform is not None:
+                events = transform(events)
+            total_bytes += measure_event_bytes(events)
 
-        if successful_probes == 0:
-            logger.warning("[CACHE CONTROLLER] All probes failed — assuming dataset size is 0")
-            return 0.0
+        return (total_bytes / len(sample_indices) * len(dataset)) / (1024 ** 3)
 
-        return (total_bytes / successful_probes * len(dataset)) / (1024 ** 3)
-
-    def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train", num_workers: int = 1, manifest: dict | None = None) -> Dataset:
+    def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train", num_workers: int = 1, manifest=None) -> Dataset:
         """Picks a cache tier from live resources and wraps dataset in it; num_workers prices in that MemoryCachedDataset's per-instance dict gets duplicated once per DataLoader worker process."""
         if hasattr(dataset, "slice_map"):
             raise ValueError(
@@ -271,7 +259,7 @@ class AdaptiveCacheController:
             write_manifest(cache_dir, manifest)
         return DiskCachedDataset(pre_transformed, transform=compose_transforms(numpy_bridge, live_transform), cache_path=str(cache_dir / "disk"), compress=False)
 
-    def clear_cache(self, split: Optional[str] = None):
+    def clear_cache(self, split=None):
         """Delete the disk cache for one split, or all splits if none is given."""
         if split:
             cache_dir = self.cache_path / split

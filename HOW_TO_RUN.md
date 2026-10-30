@@ -1,191 +1,164 @@
 # How to run
 
-Every setting is in the three files in `configuration/`. The command line only chooses the
-framework, the seed, the cache folder and an optional overlay file; output always goes to the
-`output:` paths in `SNN_module.yaml` (`./outputs/data`, `./outputs/plots`).
+Every setting lives in the three YAML files in `configuration/`. The only command-line option is
+`--framework`, which picks the SNN library for one run.
 
 ---
 
-# Step 0 — install
-
-## Installing from scratch
+## 1. Install
 
 ```bash
-pip install torch==2.13.0 torchvision==0.28.0        # CPU
-# ...or, for CUDA 12.8:
-pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu128
+# torch first, matching your machine
+pip install torch==2.13.0 torchvision==0.28.0                                                  # CPU
+pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu128  # CUDA 12.8
 
+# tonic without its dependency check, then everything else
 pip install --no-deps tonic==1.6.0
-pip install --no-deps --ignore-requires-python bindsnet==0.3.4
 pip install -r requirements.txt
 ```
 
-torch is installed first and separately because its build differs per machine.
-`requirements.txt` pins the **version** (`2.13.0`), not the wheel tag (`+cpu`, `+cu128`),
-so one file serves both.
-
-tonic is also installed first and separately, with `--no-deps`: tonic 1.6.0 (its own
-latest release) declares `numpy<2.0.0`, which has no wheel on Python 3.13+, so asking
-pip to resolve it together with `requirements.txt`'s `numpy==2.3.5` in one command
-fails outright (`ResolutionImpossible`). `--no-deps` skips that check; tonic's actual
-runtime dependencies are pinned in `requirements.txt` instead. See that file's "Event
-data" section for the full story.
-
-bindsnet (the unsupervised STDP track) is installed the same way, for a similar reason: 0.3.4
-declares Python `<3.14` and `torch>=2.14`, while this project runs Python 3.14 and pins torch
-2.13 for the framework comparison. Both were checked rather than assumed: on torch 2.13 / Python
-3.14 it imports and its STDP rule updates weights on the GPU. `--ignore-requires-python` is
-needed because pip otherwise hides every release whose declared Python range excludes 3.14.
-Its import-time dependencies (gymnasium, ale-py, scikit-image, tensorboardX) are plain pins in
-`requirements.txt`.
+- **torch** is installed on its own because the right build differs per machine (CPU or CUDA).
+  `requirements.txt` pins only the version, so one file serves both.
+- **tonic** is installed with `--no-deps` because tonic 1.6.0 declares `numpy<2.0`, which has no
+  build for current Python versions. Installing it together with the rest makes pip give up
+  (`ResolutionImpossible`). The packages tonic actually needs are pinned in `requirements.txt`.
 
 ---
 
-# 1. Train and evaluate
+## 2. Configure
 
-```bash
-python learning/main.py
-```
+| File | What it controls |
+|---|---|
+| `configuration/SNN_module.yaml` | Dataset, framework, device, seed, epochs, optimiser, loss, output folders, checkpoint saving |
+| `configuration/network_architecture.yaml` | Convolution blocks, pooling, hidden layers, and each framework's neuron parameters |
+| `configuration/data_workflow.yaml` | Time bins per sample, denoising, cache location, DataLoader workers, GPU memory target for the batch size |
 
-Reads the three files in `configuration/`, asks which dataset at the prompt, prints the
-configuration and the network layer by layer, calibrates the batch size to the GPU, trains,
-evaluates, and writes the results to `./outputs`.
-
-### Before you run: do you want the trained model saved?
-
-**Decide this before you run, not after** — the model is trained fresh every time
-`learning/main.py` runs, and by default nothing is kept once the process exits, so
-if you skip this and want the weights afterward, the only fix is to train again.
-
-Set `output.save_checkpoint` in `SNN_module.yaml` (or an overlay):
-
-```yaml
-output:
-  save_checkpoint: true   # false by default -- opt in
-```
-
-**true** if you want to reuse these exact trained weights afterward — resume
-training later, run inference in a separate script, inspect the weights, and so
-on. **false** (the default) if this run is only about the numbers it prints and
-writes to `runs.csv`/`test.csv` — the common case for a framework-comparison run,
-where keeping every run's weights on disk is real, usually-unneeded disk usage.
-
-When on, it writes `model_checkpoint.pt` (model + optimizer state, framework name,
-neuron config) into the run's results folder, right after training finishes and
-before inference starts — inference itself is unaffected either way, and still
-runs immediately after in the same invocation.
-
-**Using the saved weights elsewhere** — a separate script, a notebook, anywhere
-outside this run. You need three things: the same model class the checkpoint was
-trained with (`training.framework` in the config that produced it — `SNN_SJ` for
-`sj`, etc., see `learning/main.py`'s `FRAMEWORK_MODULES`), a `Settings` built from
-that SAME config (architecture must match, or the weights won't fit the layers),
-and the checkpoint file's path:
-
-```python
-from skeleton import Settings
-from frameworks.snn_spikingjelly import SNN_SJ   # match the framework the checkpoint was trained with
-import torch
-
-cfg = Settings()   # the SAME config the checkpoint was trained under
-cfg.apply_dataset_shape(...)   # same dataset shape as the training run
-
-model = SNN_SJ(cfg)
-model.load_state(torch.load("path/to/model_checkpoint.pt"))
-model.eval_mode()
-# model(data) now runs inference with the trained weights
-```
-
-If the architecture (dataset shape, layer sizes, framework) doesn't match what the
-checkpoint was trained with, `load_state` raises rather than silently loading
-mismatched weights.
-
-### Flags
-
-```bash
-python learning/main.py --config my_overlay.yaml --framework sinabs --seed 3 --cache-root /content/cache
-```
-
-| arg | possible values | default | what it does |
-|---|---|---|---|
-| `--config` | path to a `.yaml` | *none* | overlay merged over the three base files; states only what differs |
-| `--framework` | `torch` · `norse` · `sj` · `sinabs` | `training.framework` | which SNN library runs |
-| `--seed` | any integer | `training.seed` (`0`) | fixes weight init and batch order |
-| `--cache-root` | any path | `cache.path` | where cached frames go |
-| `-h`, `--help` | — | — | print this list |
-
-**Precedence:** command-line flag > `--config` overlay > the three base files.
-
-An overlay is a YAML file with only the keys that change, for example:
+The settings most people change, all in `SNN_module.yaml`:
 
 ```yaml
 dataset:
-  name: N-MNIST          # names the dataset, so nothing waits at a prompt
+  name: N-MNIST        # null = ask at startup
 training:
-  epochs: 1
+  framework: sj        # torch | norse | sj | sinabs
+  device: cuda         # cuda | cpu
+  seed: 0
+  epochs: 2
+output:
+  save_checkpoint: true
 ```
 
-The configuration block printed at the start of every run shows the overlay path and a hash of
-the merged config; the same hash is written to `runs.csv`, so two rows can be proven to come
-from the same settings.
+### Datasets
 
-### Choosing the dataset
+Set `dataset.name` to a name or its number. Case, spaces, hyphens and underscores are ignored, so
+`DVS128 Gesture` and `dvs128-gesture` are the same. If you leave it at `null`, the run asks at
+startup.
 
-`dataset.name` is `null` by default, which means **ask** at the prompt. Set it to skip the prompt.
+| Value | Dataset | Classes | Download |
+|---|---|---|---|
+| `N-MNIST` or `1` | N-MNIST | 10 | 1.2 GB |
+| `N-Caltech101` or `2` | N-Caltech101 | 101 | 3.7 GB |
+| `DVS128 Gesture` or `3` | DVS128 Gesture | 11 | 3.0 GB |
 
-| value | dataset | classes |
-|---|---|---|
-| `N-MNIST` or `1` | N-MNIST | 10 |
-| `N-Caltech101` or `2` | N-Caltech101 | 101 |
-| `DAVIS Camera Pose` or `3` | DAVIS Camera Pose | *regression* |
-| `DVS128 Gesture` or `4` | DVS128 Gesture | 11 |
-| `DSEC` or `5` | DSEC | *regression* |
-| `Eye Tracking` or `6` | 3ET Eye Tracking | *regression* |
-
-Case, spaces, hyphens and underscores are ignored — `DVS128 Gesture`,
-`dvs128-gesture` and `dvs128_gesture` are the same. An unrecognised name **raises at
-startup** and suggests the closest match:
+Datasets download into `./tmp/data` on first use. A misspelled name stops the run immediately and
+suggests the closest match:
 
 ```
 dataset.name = 'N-MNSIT' is not a known dataset. Did you mean: N-MNIST?
 ```
 
-It never falls back to a default. The three regression datasets are recognised but
-`learning/main.py` is classification-only and will say so.
+The registry also lists **DAVIS Camera Pose** (`4`) and **Eye Tracking** (`5`). These are
+regression datasets: their loaders work, but the pipeline only trains classifiers, so selecting
+them fails. They are kept as a starting point for anyone adding a regression output.
+
+**Adding your own dataset:** add an entry to `DATASET_REGISTRY` in
+`event_data_workflow/dataset_registry.py` with its tonic class, sensor size and number of classes.
+The input size, output layer and batch size adapt automatically. Events must come as
+`(x, y, t, p)`: pixel column, pixel row, timestamp, polarity.
 
 ---
 
-# 2. Check the four neurons agree
+## 3. Run
 
 ```bash
-python equivalence_check.py
+python learning/main.py                       # framework from SNN_module.yaml
+python learning/main.py --framework sinabs    # override the framework for this run
 ```
 
-Drives ONE neuron per framework with byte-identical input and compares the spike train and
-membrane trajectory step by step against snnTorch. It measures and does not judge: no pass/fail,
-always exits 0. It also draws three stacked panels per input pattern (input current, membrane
-trajectory, spike raster).
+Each run prints the configuration and the network layer by layer, sizes the batch to fit the GPU,
+trains, tests, and writes the results.
 
-| arg | possible values | default | what it does |
-|---|---|---|---|
-| `--config` | path to a `.yaml` | *none* | overlay, as above |
-| `--out` | any path | `outputs/equivalence` | folder for the figures |
-| `--formats` | `png`, `pdf`, `svg`, comma-separated | `png` | `png,pdf` gives a vector copy for a report |
+### Comparing frameworks
 
-It always runs on the CPU: one neuron for 90 steps gains nothing from a GPU.
+Run the same configuration once per framework. Every run adds one row to the same `runs.csv`:
+
+```bash
+for fw in torch norse sj sinabs; do python learning/main.py --framework $fw; done
+```
+
+All four start from identical weights for a given seed, so the neuron implementation is the only
+thing that differs. For more seeds, change `training.seed` and repeat.
 
 ---
 
-# 3. On Colab
+## 4. Results
 
-A Colab runtime is a new machine every session, so it starts with Step 0. Then:
+Everything goes to the `output:` folders in `SNN_module.yaml`:
 
-- set `dataset.name` in an overlay, since a notebook cell cannot answer a prompt;
-- point `output:` (in the same overlay) at mounted Drive, since `/content` disappears with the
-  runtime;
-- add `--cache-root` if the default cache location is short of space.
+| File | Contents |
+|---|---|
+| `outputs/data/runs.csv` | One row per run: accuracy, throughput, single-sample latency, training speed, peak memory, GPU energy, SynOps energy, spike rates, environment |
+| `outputs/data/epochs.csv` | One row per epoch per run: loss, accuracy, time, spike rate, latency, SynOps |
+| `outputs/data/layers.csv` | One row per spiking layer per run: neurons, spikes, spike rate |
+| `outputs/data/runs/<run_id>.json` | The full record of one run, including the neuron parameters actually built |
+| `outputs/data/test.csv` | Per-class precision, recall, F1 and specificity for the latest run |
+| `outputs/data/batch_metrics.csv` | One row per training iteration for the latest run |
+| `outputs/data/model_checkpoint.pt` | Trained weights, when `save_checkpoint: true` |
+| `outputs/plots/` | Training curves, per-iteration metrics, spike raster |
+
+`runs.csv`, `epochs.csv` and `layers.csv` are appended to, never overwritten. If a code update
+changes their columns, move the old files away before the next run.
+
+The `config_hash` column identifies the exact settings behind each row: two rows with the same
+hash used the same configuration.
+
+---
+
+## 5. Using a trained model
+
+Set `output.save_checkpoint: true` **before** training. Each run trains from scratch, so weights
+that were not saved are gone when the run ends.
+
+To load the weights elsewhere, build the model from the **same configuration** it was trained
+with (same framework, same architecture, same dataset shape):
+
+```python
+import torch
+from skeleton.config import Settings, load_config
+from frameworks.snn_model import SNNModel
+
+cfg = Settings(load_config())                       # the configuration used for training
+cfg.apply_dataset_shape(sensor_h=34, sensor_w=34, in_channels=2, num_classes=10)  # e.g. N-MNIST
+
+model = SNNModel(cfg)                               # framework comes from training.framework
+model.load_state(torch.load("outputs/data/model_checkpoint.pt"))
+model.eval_mode()
+# model(data) with data shaped [time, batch, channels, height, width]
+```
+
+If the architecture does not match, loading fails instead of silently loading wrong weights.
+
+---
+
+## 6. On Google Colab
+
+A Colab runtime starts empty every session, so start with step 1. Then:
+
+- set `dataset.name` in `SNN_module.yaml`, since a notebook cell cannot answer the startup prompt;
+- point the `output:` folders at your mounted Google Drive, because `/content` is deleted when the
+  runtime stops;
+- if space is short, point `cache.path` in `data_workflow.yaml` at Drive as well.
 
 ```bash
-python learning/main.py --config colab.yaml --framework norse --seed 0
-python learning/main.py --config colab.yaml --framework sj     --seed 0
+python learning/main.py --framework norse
+python learning/main.py --framework sj
 ```

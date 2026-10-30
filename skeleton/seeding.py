@@ -1,30 +1,7 @@
-"""
-Reproducibility: seeding and weight fingerprinting.
-
-Ported from the SNNs_2 controlled-comparison pipeline. The design is deliberately
-NARROW rather than a blanket "make everything deterministic" hammer, because the
-property being protected is specific:
-
-    with the same seed, every framework must start from byte-identical weights.
-
-That holds only because the sole consumers of the RNG during model construction are
-the two Conv2d layers and the Linear, in that order. Every spiking-neuron layer wired
-into this project (snnTorch Leaky, Norse LIFCell, SpikingJelly LIFNode, Sinabs LIF)
-draws no random numbers at construction, so seeding immediately before building the
-model is enough to make the four backends comparable. `verify_cross_framework_init()`
-is the check that this assumption still holds; run it rather than trusting it.
-
-`torch.use_deterministic_algorithms()` is intentionally NOT set here. It would force
-slower kernels and change the very latency numbers this project exists to measure.
-Seeding fixes the starting point and the data order; it does not claim bitwise-identical
-GPU arithmetic across runs.
-"""
 from __future__ import annotations
-
 import hashlib
 import random
 from typing import Iterable
-
 import numpy as np
 import torch
 import torch.nn as nn

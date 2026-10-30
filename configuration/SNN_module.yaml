@@ -2,54 +2,41 @@ dataset:
   name: null
 
 training:
-  framework: sj                 # norse | torch | sj | sinabs
-  device: cuda                  # cuda | cpu
+  framework: sj
+  device: cuda
 
   seed: 0
 
-  epochs: 2                     # full passes over the training set
-  batch_size: 128               # used as-is when calibrate_batch_size is false
+  epochs: 2
+  batch_size: 128
 
-  # null = auto: one epoch is a full pass, derived from dataset size / batch size.
-  # A number caps the epoch at that many batches (never more than a full pass).
   iterations_per_epoch: null
   calibrate_batch_size: true
 
   warmup_iterations: 5
 
-  # Samples used for the batch-size-1 latency measurement (MLPerf Single-Stream).
-  # 100 is enough for a stable median and p90. This is a SEPARATE, small pass run
-  # outside any timed region -- it does not disturb the batched test numbers, and it
-  # answers a different question: "one event arrives, how long until the answer is
-  # ready" rather than "how much wall-clock does each sample cost at this batch size".
-  # 0 skips it, and the three inference_latency_bs1_* columns are then left empty.
   latency_samples: 100
 
   optimizer:
-    type: nadam                 # nadam | adam | adamw | sgd  (unknown name raises)
+    type: nadam
     lr: 0.002
     weight_decay: 0.0
-    momentum: 0.0               # sgd only, ignored by the others
+    momentum: 0.0
 
   loss: cross_entropy
 
-  # none   = learning rate stays constant
-  # cosine = annealed toward ~0 by the last epoch (T_max = epochs, so short runs end near 0)
   lr_scheduler: cosine
 
-  use_amp: false                # true | false. Changes speed AND numerics; state it explicitly.
-  grad_accum_steps: 1           # batches accumulated before an optimizer step
+  use_amp: false
+  grad_accum_steps: 1
 
-  # Two-sided per-neuron activity regularization on hidden LIF layers. Adds a loss term,
-  # so it must be identical across frameworks -- keep off for comparison runs.
-  activity_reg_enabled: false   # true | false
-  activity_reg_min_rate: 0.01   # penalise neurons firing below this fraction of timesteps
-  activity_reg_max_rate: 0.50   # penalise neurons firing above it
-  activity_reg_lambda_low: 0.1  # penalty weight, dead neurons
-  activity_reg_lambda_high: 0.1 # penalty weight, saturated neurons
+  activity_reg_enabled: false
+  activity_reg_min_rate: 0.01
+  activity_reg_max_rate: 0.50
+  activity_reg_lambda_low: 0.1
+  activity_reg_lambda_high: 0.1
 
 output:
-  output_dir: ./outputs
   plot_dir: ./outputs/plots
   data_dir: ./outputs/data
   save_checkpoint: true

@@ -10,10 +10,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
 import matplotlib.pyplot as plt
 from event_data_workflow.system_monitor import PipelineMonitor, monitor
-from learning.utilities import (
-    compute_cv_isi, measure_dense_macs,
-    spikes_per_neuron_per_inference, warm_up,
-)
+from learning.utilities import measure_dense_macs, warm_up
 logger = logging.getLogger(__name__)
 
 # A synaptic operation is one addition, 0.9 pJ at 45 nm (Horowitz, ISSCC 2014)
@@ -37,21 +34,6 @@ def aggregate_spike_output(spk_rec: torch.Tensor) -> torch.Tensor:
     )
 
 
-def buffer_report(activity_snapshot: dict) -> str:
-    """Sparse-vs-dense spike buffer memory diagnostic (AER memory savings),
-    computed from a stored ActivityMonitor.recordings() snapshot — this is
-    only ever invoked from the deferred end-of-training report, using
-    tensors already moved to CPU at their epoch's own boundary (see
-    SNNTrainer.train()), so no CUDA sync happens here."""
-    tensors = {k: v for k, v in activity_snapshot.items() if v is not None}
-    if not tensors:
-        return "no hooks"
-    sparse_kb = sum(t.element_size() * t.numel() for t in tensors.values()) / 1024
-    avg_rate  = sum(t.float().mean().item() for t in tensors.values()) / len(tensors)
-    dense_kb  = sparse_kb / avg_rate if avg_rate > 0 else 0.0
-    return f"sparse={sparse_kb:.1f}KB  dense_equiv={dense_kb:.1f}KB  rate={avg_rate * 100:.1f}%"
-
-
 class SNNTrainer:
 
     def __init__(self, model, train_loader, cfg: Settings, device: torch.device):
@@ -70,7 +52,6 @@ class SNNTrainer:
         self.last_spk_rec    = None
         self.last_activity_snapshot: dict = {}
         self.epoch_log       = []
-        self.timesteps: int | None = None  # set once in train(), reused to derive per-iteration spikes/neuron at plot time
         self.best_acc_so_far = 0.0  # tracked across epochs here now that each epoch's report finalizes immediately, not in one bulk pass at the end
 
         # GPU-resident accumulation through the run — see train()'s docstring
@@ -83,7 +64,7 @@ class SNNTrainer:
         self.bwd_events          = []
         self.dense_macs_per_layer = {}
 
-        self.pipeline_monitor = PipelineMonitor(enabled=getattr(cfg, "ENABLE_PIPELINE_MONITOR", True))
+        self.pipeline_monitor = PipelineMonitor()
 
         use_amp = getattr(cfg, "USE_AMP", True) and device.type == "cuda"
         self.scaler           = torch.amp.GradScaler("cuda", enabled=use_amp)  # type: ignore[attr-defined]
@@ -95,18 +76,11 @@ class SNNTrainer:
         self.scheduler = (CosineAnnealingLR(opt, T_max=cfg.EPOCHS) if opt is not None and lr_sched == "cosine" else None)
 
     def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
-        """Single forward pass, adapting tensor layout to what the model expects.
-
-        Shared by every call site in train()
-        so the tensor_format() transpose isn't repeated at each one.
-        """
-        if self.model.tensor_format() == "BT":
-            data = data.permute(1, 0, 2, 3, 4).contiguous()
         return self.model(data)
 
     def measure_activity(self, probe_data: torch.Tensor, timesteps: int) -> dict:
         """One UNTIMED forward pass with spike recording ON, for the epoch's
-        activity metrics: SynOps, CV_ISI and the sparse-vs-dense buffer report.
+        activity metric: SynOps.
 
         Separated from the timed loop deliberately. ActivityMonitor's hooks fire on
         every LIF call, and while they force no CUDA sync they do detach, take a
@@ -120,30 +94,28 @@ class SNNTrainer:
         per epoch; what is bought is a timed number that measures the network and
         nothing else.
 
-        WHAT THIS CHANGES IN THE OUTPUT: SynOps and CV_ISI are now sampled once per
+        WHAT THIS CHANGES IN THE OUTPUT: SynOps is now sampled once per
         epoch on one batch, rather than accumulated per iteration. The per-iteration
         SynOps series is therefore a broadcast of the epoch's value, exactly as GPU
         energy already was -- see iteration_series().
         """
         self.model.activity.resume()
         self.model.activity.clear()
-        try:
-            with torch.no_grad():
-                self.forward_pass(probe_data)
-            recordings = self.model.activity.recordings()
+        with torch.no_grad():
+            self.forward_pass(probe_data)
+        recordings = self.model.activity.recordings()
 
-            synops = torch.zeros((), device=self.device)
-            for name, macs in self.dense_macs_per_layer.items():
-                buf = self.model.activity.buffers.get(name)
-                rate_t = buf.firing_rate_tensor() if buf is not None else None
-                if rate_t is not None:
-                    synops = synops + rate_t * macs * timesteps
-            snapshot = {k: (v.cpu() if v is not None else None) for k, v in recordings.items()}
-        finally:
-            # Straight back off before the next epoch's timed loop starts -- unless the activity penalty needs the recordings.
-            if not self.cfg.ACTIVITY_REG_ENABLED:
-                self.model.activity.pause()
-            self.model.activity.clear()
+        synops = torch.zeros((), device=self.device)
+        for name, macs in self.dense_macs_per_layer.items():
+            buf = self.model.activity.buffers.get(name)
+            rate_t = buf.firing_rate_tensor() if buf is not None else None
+            if rate_t is not None:
+                synops = synops + rate_t * macs * timesteps
+        snapshot = {k: (v.cpu() if v is not None else None) for k, v in recordings.items()}
+        # Straight back off before the next epoch's timed loop starts -- unless the activity penalty needs the recordings.
+        if not self.cfg.ACTIVITY_REG_ENABLED:
+            self.model.activity.pause()
+        self.model.activity.clear()
         return {"synops": float(synops.item()), "snapshot": snapshot}
 
     @contextmanager
@@ -173,17 +145,6 @@ class SNNTrainer:
             return a.elapsed_time(b)
         return (b - a) * 1000.0
 
-    def write_csv(self, path: str):
-        if not self.epoch_log:
-            return
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        fieldnames = list(self.epoch_log[0].keys())
-        with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(self.epoch_log)
-        print(f"[INFO] Training log saved -> {path}")
-
     def iteration_series(self) -> dict:
         """Learning rate and GPU energy, broadcast to one value per iteration from each
         epoch's own already-recorded value (record["n"] iterations of that epoch share
@@ -191,7 +152,7 @@ class SNNTrainer:
         iteration LR to measure, and NVML power sampling isn't synced to iteration
         boundaries, so per-iteration energy is that epoch's total split evenly across
         its iterations, not a real per-iteration reading. Firing rate is a direct per-
-        iteration derivation from self.spike_rate_hist, no broadcasting involved."""
+        iteration reading."""
         learning_rate, gpu_energy_j, synops_pj = [], [], []
         for r in self.epoch_log:
             n = r["n"]
@@ -203,15 +164,8 @@ class SNNTrainer:
             # epoch's single measurement repeated, not a per-iteration reading.
             synops_pj.extend([r["synops_energy_pj"]] * n)
 
-        # Spikes per neuron per inference (rate x T). Time-unit free, so always
-        # available and always right -- this is the headline spike figure.
-        spikes_per_inference = []
-        if self.timesteps is not None:
-            spikes_per_inference = [spikes_per_neuron_per_inference(s, self.timesteps)
-                                    for s in self.spike_rate_hist]
 
-        return {"spikes_per_neuron_per_inference": spikes_per_inference,
-                "learning_rate": learning_rate, "gpu_energy_j": gpu_energy_j,
+        return {"learning_rate": learning_rate, "gpu_energy_j": gpu_energy_j,
                 "synops_energy_pj": synops_pj}
 
     def write_batch_csv(self, path: str = "./outputs/data/batch_metrics.csv"):
@@ -223,17 +177,15 @@ class SNNTrainer:
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["iteration", "loss", "accuracy", "spike_rate",
-                              "spikes_per_neuron_per_inference",
                               "learning_rate", "vram_current_gb", "gpu_energy_j", "synops_energy_pj"])
             writer.writerows(zip(
                 range(len(self.loss_hist)), self.loss_hist, self.acc_hist, self.spike_rate_hist,
-                derived["spikes_per_neuron_per_inference"],
                 derived["learning_rate"], self.vram_current_hist,
                 derived["gpu_energy_j"], derived["synops_energy_pj"],
             ))
         print(f"[INFO] Iteration metrics log saved -> {path}")
 
-    def train(self, csv_path: str = "./outputs/data/training_results.csv") -> dict:
+    def train(self, results_dir: str = "./outputs/data") -> dict:
         """Deferred-sync training loop: every per-batch metric (loss,
         accuracy, spike rate, forward/backward latency, SynOps energy) is
         accumulated as a GPU-resident tensor or an un-synced CUDA event —
@@ -264,9 +216,6 @@ class SNNTrainer:
         # self.train_loader is a DeviceLoader — probe_data is already device-resident.
         probe_data, _ = next(iter(self.train_loader))
         timesteps = probe_data.shape[0]  # loader yields [T, B, C, H, W] — the real BPTT unroll length, not a config value
-        self.timesteps = timesteps
-        if self.model.tensor_format() == "BT":
-            probe_data = probe_data.permute(1, 0, 2, 3, 4).contiguous()
         self.dense_macs_per_layer = measure_dense_macs(self.model, probe_data)
 
         # ---- warm-up: untimed, weights untouched -----------------------------------
@@ -305,7 +254,6 @@ class SNNTrainer:
             self.pipeline_monitor.reset_epoch_memory()
 
             self.model.zero_grad()
-            mem_breakdown: dict = {}
 
             # self.train_loader is a DeviceLoader (event_data_workflow.data_pipeline) —
             # batches arrive already device-resident, no .to(device) needed below.
@@ -322,9 +270,6 @@ class SNNTrainer:
                     print(f"  [epoch {epoch + 1}/{epochs}] iter {i}/{num_iters}  "
                           f"({time.perf_counter() - t0:.1f}s elapsed)", flush=True)
                 targets = targets.long()
-                measure_mem = i == 0 and self.device.type == "cuda"  # reset/read are host-side counters, not a stream sync -- cheap, but sampled once/epoch anyway
-                if measure_mem:
-                    torch.cuda.reset_peak_memory_stats(self.device)
 
                 with autocast_ctx:
                     with self.timed(self.fwd_events):
@@ -339,17 +284,10 @@ class SNNTrainer:
                         )
                     loss_val = task_loss / accum
 
-                if measure_mem:
-                    mem_breakdown["forward_peak_gb"] = torch.cuda.max_memory_allocated(self.device) / (1024 ** 3)
-                    torch.cuda.reset_peak_memory_stats(self.device)
 
                 do_step = ((step_count + 1) % accum == 0)
                 with self.timed(self.bwd_events):
                     self.model.backward_pass(loss_val, scaler=self.scaler, do_step=do_step)
-                if measure_mem:
-                    mem_breakdown["backward_peak_gb"] = torch.cuda.max_memory_allocated(self.device) / (1024 ** 3)
-                    mem_breakdown["weights_gb"] = sum(p.numel() * p.element_size() for p in self.model.parameters()) / (1024 ** 3)
-                    mem_breakdown["gradients_gb"] = sum(p.grad.numel() * p.grad.element_size() for p in self.model.parameters() if p.grad is not None) / (1024 ** 3)
                 if do_step:
                     self.model.zero_grad()
                 step_count += 1
@@ -373,7 +311,7 @@ class SNNTrainer:
                 # Host-side allocator counter, not a tensor -- no .item()/sync needed, and it's the
                 # quantity that actually varies iteration to iteration (activation size tracks each
                 # batch's real, unpadded sample lengths); weights/gradients/optimizer state don't
-                # change shape once training starts, so they're measured once, not every iteration.
+                # change shape once training starts.
                 self.vram_current_hist.append(torch.cuda.memory_allocated(self.device) / (1024 ** 3) if self.device.type == "cuda" else 0.0)
 
                 epoch_loss_sum   = epoch_loss_sum   + per_batch_loss
@@ -418,12 +356,6 @@ class SNNTrainer:
             bwd_latencies_ms = [self.elapsed_ms(p) for p in self.bwd_events]
             self.fwd_events, self.bwd_events = [], []
 
-            if self.device.type == "cuda":
-                opt_state = getattr(self.model.optimizer, "state", {})
-                mem_breakdown["optimizer_state_gb"] = sum(
-                    t.numel() * t.element_size() for s in opt_state.values() for t in s.values() if torch.is_tensor(t)
-                ) / (1024 ** 3)
-
             # Same reasoning, same fix, for the per-batch loss/accuracy/spike-rate
             # scalars: read back and clear each epoch's GPU-resident list here
             # instead of holding all 5 epochs' worth (1175 tensors each) until
@@ -445,7 +377,6 @@ class SNNTrainer:
             epoch_phase    = f"epoch_{epoch}"
             energy_report  = self.pipeline_monitor.phase_energy_report(epoch_phase, epoch_duration)  # None fields on CPU-only or without NVML
             gpu             = energy_report["gpu"]
-            gpu_diag        = energy_report["gpu_diag"]
             # TOTAL energy: idle draw INCLUDED. Scales with duration, so a slower
             # framework reports more of it even at identical power draw.
             energy_j         = energy_report["gpu_energy_j"] or 0.0
@@ -482,7 +413,6 @@ class SNNTrainer:
                 "activity_snapshot":  activity["snapshot"],
                 "epoch_duration":     epoch_duration,
                 "gpu":                gpu,
-                "gpu_diag":           gpu_diag,
                 "energy_j":           energy_j,
                 "dynamic_energy_j":   dynamic_energy_j,
                 "avg_power_w":        avg_power_w,
@@ -490,7 +420,6 @@ class SNNTrainer:
                 "idle_power_w":       idle_power_w,
                 "gpu_active_s":       gpu_active_s,
                 "current_lr":         self.model.get_lr(),
-                "mem_breakdown":      mem_breakdown,
             }
             self.finalize_one_epoch_report(record, epochs, timesteps)
 
@@ -508,9 +437,7 @@ class SNNTrainer:
         if "ram_trend" in trend:
             print(f"  • RAM trend        : {trend['ram_trend']}  ({trend['ram_start_gb']}GB -> {trend['ram_end_gb']}GB)")
 
-        self.write_csv(csv_path)
-        # Beside training_results.csv, wherever that went.
-        self.write_batch_csv(str(Path(csv_path).parent / "batch_metrics.csv"))
+        self.write_batch_csv(str(Path(results_dir) / "batch_metrics.csv"))
 
         return {
             "loss_history":       self.loss_hist,
@@ -526,8 +453,6 @@ class SNNTrainer:
         resident for the whole run. self.loss_hist/acc_hist/spike_rate_hist and record's own
         fwd/bwd_latencies_ms are already plain Python values by this point, read back at
         this epoch's own boundary rather than held GPU-resident."""
-        credit_assignment = self.model.credit_assignment()
-
         n = record["n"]
         epoch_fwd = record["fwd_latencies_ms"]
         epoch_bwd = record["bwd_latencies_ms"]
@@ -541,25 +466,16 @@ class SNNTrainer:
         # of different length.
         synops_pj   = record["epoch_synops"] * SYNOPS_ENERGY_PJ
 
-        # Time-unit free, so always valid. This is the headline spike figure and
-        # the one directly comparable with published SNN numbers.
-        spikes_per_inference = spikes_per_neuron_per_inference(train_spike, timesteps)
 
         # Kept on the trainer so a caller can build per-layer rows (layers.csv)
         # from the measurement this epoch already took, instead of paying for an
         # extra pass. Hooked layers only -- lif_out is not hooked.
         self.last_activity_snapshot = record["activity_snapshot"]
 
-        cv_isi      = compute_cv_isi(record["activity_snapshot"])
-        cv_isi_mean = cv_isi.get("network_wide", 0.0)
-        buf_report  = buffer_report(record["activity_snapshot"])
-
         avg_fwd_ms = sum(epoch_fwd) / len(epoch_fwd) if epoch_fwd else 0.0
         avg_bwd_ms = sum(epoch_bwd) / len(epoch_bwd) if epoch_bwd else 0.0
 
         gpu      = record["gpu"]
-        gpu_diag = record["gpu_diag"]
-        mem      = record["mem_breakdown"]
 
         is_best_epoch = train_acc > self.best_acc_so_far
         if is_best_epoch:
@@ -573,7 +489,6 @@ class SNNTrainer:
             "best_accuracy_so_far": round(self.best_acc_so_far, 4),
             "is_best_epoch":       is_best_epoch,
             "spike_rate":          round(train_spike, 4),
-            "spikes_per_neuron_per_inference": round(spikes_per_inference, 4),
             # Recorded because calibrate_batch_size sizes this from live VRAM, so
             # it legitimately differs between machines and between runs. Batch size
             # is the largest single lever on wall-clock time, so two rows can only
@@ -594,23 +509,15 @@ class SNNTrainer:
                                     if record["idle_power_w"] is not None else None),
             "forward_latency_ms":  round(avg_fwd_ms, 3),
             "backward_latency_ms": round(avg_bwd_ms, 3),
-            "cv_isi_mean":         round(cv_isi_mean, 4),
-            "credit_assignment":   credit_assignment,
             "synops_energy_pj":    round(synops_pj, 2),
-            **{k: v for k, v in gpu_diag.items()},
             **{k: v for k, v in gpu.items()},
-            **{f"model_{k}": round(v, 4) for k, v in mem.items()},
         })
 
         print(f"\nEpoch {record['epoch']}/{epochs}")
         print(f"  • Train Loss     : {train_loss:.4f}")
         print(f"  • Train Accuracy : {train_acc * 100:.2f}%" + ("  (best so far)" if is_best_epoch else ""))
         print(f"  • Spike Rate     : {train_spike:.4f}")
-        print(f"  • Spikes/neuron  : {spikes_per_inference:.4f} per inference  (rate x T)")
-        print(f"  • Spike Buffer   : {buf_report}")
-        print(f"  • Fwd/Bwd Latency: {avg_fwd_ms:.3f} ms / {avg_bwd_ms:.3f} ms  ({credit_assignment})")
-        print(f"  • CV_ISI (net)   : {cv_isi_mean:.3f}  "
-              f"({cv_isi.get('coverage_network_wide', 0.0):.1f}% of trains qualified)")
+        print(f"  • Fwd/Bwd Latency: {avg_fwd_ms:.3f} ms / {avg_bwd_ms:.3f} ms")
         print(f"  • SynOps Energy  : {synops_pj:.2f} pJ (estimated, per epoch)")
         print(f"  • LR             : {record['current_lr']:.6f}")
         print(f"  • Wall time      : {record['epoch_duration']:.2f}s")
@@ -629,16 +536,6 @@ class SNNTrainer:
             if gpu.get("gpu_idle_episodes", 0) > 0:
                 print(f"  • GPU Idle       : {gpu['gpu_idle_episodes']} episode(s), {gpu['gpu_idle_total_s']:.1f}s total "
                       f"— CPU-side data prep couldn't keep up with the GPU this often")
-        print(f"  • Max Mem Reserved: {gpu_diag.get('max_memory_reserved_gb', 0.0):.2f} GB")
-        if mem:
-            weights_mb, grad_mb, optim_mb = (mem.get(k, 0.0) * 1024 for k in ("weights_gb", "gradients_gb", "optimizer_state_gb"))
-            print(f"  • Model VRAM     : weights {weights_mb:.2f}MB + grad {grad_mb:.2f}MB + "
-                  f"optim {optim_mb:.2f}MB = {weights_mb + grad_mb + optim_mb:.2f}MB static, held between iterations "
-                  f"(excludes the input batch/prefetch queue)")
-            print(f"  • Fwd/Bwd Peak   : {mem.get('forward_peak_gb', 0.0):.3f}GB / {mem.get('backward_peak_gb', 0.0):.3f}GB  "
-                  f"(cumulative allocator high-water mark during each phase -- already includes the static figure above, not additive with it)")
-        if "gpu_temp_c" in gpu_diag:
-            print(f"  • GPU Temp/Clock : {gpu_diag['gpu_temp_c']}°C   SM {gpu_diag.get('sm_clock_mhz')} MHz   Mem {gpu_diag.get('mem_clock_mhz')} MHz")
 
     def plot_training(self, save_dir: str = "./outputs/plots") -> None:
         os.makedirs(save_dir, exist_ok=True)
@@ -667,13 +564,12 @@ class SNNTrainer:
         print(f"[PLOT] Saved -> {path}")
 
     def plot_iteration_metrics(self, save_dir: str = "./outputs/plots") -> None:
-        """VRAM, firing rate, learning rate, and both energy readings, one point per
+        """VRAM, learning rate, and both energy readings, one point per
         iteration -- a single index counting up across every epoch back to back (epoch 2's
         iteration 0 continues from epoch 1's last iteration, not a reset).
 
         VRAM comes from self.vram_current_hist, appended every iteration inside train() at
-        effectively no cost (a host-side counter read, no CUDA sync). Firing rate,
-        learning rate, GPU energy and SynOps come from self.iteration_series() -- see
+        effectively no cost (a host-side counter read, no CUDA sync). Learning rate, GPU energy and SynOps come from self.iteration_series() -- see
         that method for which are exact per-iteration readings and which are one
         per-epoch measurement broadcast across that epoch. Each metric gets its own
         figure and its own file."""
@@ -691,34 +587,14 @@ class SNNTrainer:
             plt.close(fig)
             print(f"[PLOT] Saved -> {path}")
 
-        # Current allocated VRAM genuinely fluctuates iteration to iteration (each batch's
-        # real, unpadded event count differs) -- plotted as a real series, not a flat
-        # per-epoch peak. Weights/gradients/optimizer state don't change shape once
-        # training starts, so they're reference lines from one measurement, not redrawn
-        # as if remeasured every iteration.
+        # Current allocated VRAM per iteration; it varies with each batch's real, unpadded event count.
         fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(iters, self.vram_current_hist, linewidth=0.6, color="tab:blue", label="current allocated")
-        ref = self.epoch_log[0]
-        ax.axhline(ref.get("model_weights_gb", 0.0), color="tab:green", linestyle="--",
-                   label=f"weights ({ref.get('model_weights_gb', 0.0):.3f} GB, static)")
-        ax.axhline(ref.get("model_gradients_gb", 0.0), color="tab:red", linestyle="--",
-                   label=f"gradients ({ref.get('model_gradients_gb', 0.0):.3f} GB, static)")
-        ax.axhline(ref.get("model_optimizer_state_gb", 0.0), color="tab:purple", linestyle="--",
-                   label=f"optimizer state ({ref.get('model_optimizer_state_gb', 0.0):.3f} GB, static)")
+        ax.plot(iters, self.vram_current_hist, linewidth=0.6, color="tab:blue")
         ax.set_title("VRAM per Iteration")
         ax.set_xlabel("Iteration (cumulative across epochs)")
         ax.set_ylabel("VRAM (GB)")
-        ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
-        save(fig, "vram_breakdown.png")
-
-        fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(iters, derived["spikes_per_neuron_per_inference"], linewidth=0.6, color="tab:orange")
-        ax.set_title("Spikes per Neuron per Inference, per Iteration")
-        ax.set_xlabel("Iteration (cumulative across epochs)")
-        ax.set_ylabel("Spikes / neuron / inference")
-        ax.grid(True, alpha=0.3)
-        save(fig, "spikes_per_neuron.png")
+        save(fig, "vram_per_iteration.png")
 
         fig, ax = plt.subplots(figsize=(12, 4))
         ax.plot(iters, derived["learning_rate"], linewidth=0.8, color="tab:red")

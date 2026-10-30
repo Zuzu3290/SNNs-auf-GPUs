@@ -4,12 +4,9 @@ recordings, cache them via AdaptiveCacheController, optionally slice into
 temporal windows, then wrap in DataLoaders.
 """
 from __future__ import annotations
+import inspect
 import os
-import sys
-import time
-import socket
 import logging
-import urllib.error
 from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
@@ -21,13 +18,13 @@ import tonic
 import tonic.transforms as transforms
 import tonic.slicers as slicers
 import tqdm as t
-from typing import Optional, Protocol
+from typing import Protocol
 
 from skeleton.seeding import split_generator
 from .system_monitor import monitor
 from .cache_engine import (
     AdaptiveCacheController, ComposedTransform, FixedToFrame,
-    PreTransformedDataset, cache_identity, measure_event_bytes,
+    cache_identity, measure_event_bytes,
 )
 from .dataset_registry import resolve_dataset_entry
 
@@ -37,14 +34,8 @@ class DatasetAwareConfig(Protocol):
     DEVICE: str
     DATASET_NAME: str
     BATCH_SIZE: int
-    TASK_TYPE: str
 
     def apply_dataset_shape(self, sensor_h: int, sensor_w: int, in_channels: int, num_classes: int) -> None: ...
-
-
-def to_float32(frame):
-    """ToFrame emits float64; cast here so PadTensors (which only casts a raw ndarray, not an already-built tensor) doesn't collate a float64 batch into Conv2d."""
-    return torch.from_numpy(frame).float()
 
 
 class RawDatasets:
@@ -55,20 +46,6 @@ class RawDatasets:
 
     def __call__(self, label):
         return self.mapping[label]
-
-    @staticmethod
-    def load(build_fn, attempts: int = 5, base_delay_s: float = 5.0):
-        """Build a dataset, retrying transient network failures and tonic's own corruption check."""
-        for attempt in range(1, attempts + 1):
-            try:
-                return build_fn()
-            except Exception as exc:
-                retryable = isinstance(exc, (urllib.error.URLError, ConnectionError, socket.gaierror, TimeoutError)) or                     (isinstance(exc, RuntimeError) and "File not found or corrupted" in str(exc))
-                if not retryable or attempt == attempts:
-                    raise
-                delay = base_delay_s * attempt
-                logger.warning(f"[PIPELINE] Dataset download failed ({exc}) — retrying ({attempt}/{attempts - 1}) in {delay:.0f}s")
-                time.sleep(delay)
 
     @classmethod
     def index_targets(cls, *datasets: Dataset) -> None:
@@ -81,44 +58,12 @@ class RawDatasets:
             dataset.target_transform = mapper
 
 
-def pad_events_passthrough_target(batch):
-    """Same event-frame padding/stacking as tonic.collation.PadTensors(batch_first=False).
-    The target side stacks into a real tensor when every sample's target has the same
-    shape (true for DSEC's per-window flow frames — (H, W, 3), fixed for a given
-    dataset) — the trainer needs a real tensor, not a list, to move to device. Falls
-    back to a plain list when shapes differ, since torch.tensor(target) would crash
-    on a genuinely irregular/heterogeneous target (unused today, kept for safety —
-    e.g. a future regression dataset that mixes recording-level target types)."""
-    samples = [sample for sample, _ in batch]
-    targets = [target for _, target in batch]
-
-    max_length = max(s.shape[0] for s in samples)
-    padded = []
-    for sample in samples:
-        sample = (sample if isinstance(sample, torch.Tensor) else torch.tensor(sample)).float()
-        sample = torch.cat((
-            sample,
-            torch.zeros(max_length - sample.shape[0], *sample.shape[1:], device=sample.device),
-        ))
-        padded.append(sample)
-
-    samples_output = torch.stack(padded, 1)
-
-    target_shapes = {getattr(t, "shape", None) for t in targets}
-    if len(target_shapes) == 1 and None not in target_shapes:
-        targets_output = torch.stack([torch.as_tensor(t) for t in targets])
-    else:
-        targets_output = targets
-
-    return samples_output, targets_output
-
-
 def create_sliced_dataset(
     dataset: Dataset,
     slice_duration_ms: float = 15.0,
     overlap_ms: float = 0.0,
     transform=None,
-    metadata_path: Optional[str] = None,
+    metadata_path=None,
 ) -> tonic.SlicedDataset:
     """Wrap dataset with tonic's SlicedDataset. metadata_path, if given,
     stores the slice index as HDF5 so it isn't rebuilt on later runs."""
@@ -158,7 +103,7 @@ class DeviceLoader:
 class NeuromorphicEncoder:
     """Loads a dataset, caches it, and builds the train/test DataLoaders used by training."""
 
-    def __init__(self, cfg: DatasetAwareConfig, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None):
+    def __init__(self, cfg: DatasetAwareConfig, use_temporal_slicing=None, slice_duration_ms=None):
 
         self.cfg = cfg
 
@@ -193,22 +138,13 @@ class NeuromorphicEncoder:
         """Load the raw dataset (no transform, no cache yet) and build the frame transform for it."""
         entry = self.select_dataset()
         sensor_size = entry["sensor_size"]
-        if entry.get("loader_splits"):
-            raw_train = RawDatasets.load(lambda: entry["loader"](str(DATA_DIR), split="train"))
-            raw_test = RawDatasets.load(lambda: entry["loader"](str(DATA_DIR), split="test"))
-        elif entry.get("kind") == "regression":
-            full_raw = RawDatasets.load(lambda: entry["loader"](str(DATA_DIR), split="train"))
-            n_train = int(0.8 * len(full_raw))
-            raw_train, raw_test = torch.utils.data.random_split(
-                full_raw, [n_train, len(full_raw) - n_train],
-                generator=split_generator(getattr(self.cfg, "SEED", 0)),
-            )
-        elif entry["has_train_split"]:
-            raw_train = RawDatasets.load(lambda: entry["cls"](save_to=str(DATA_DIR), train=True))
-            raw_test  = RawDatasets.load(lambda: entry["cls"](save_to=str(DATA_DIR), train=False))
+        # tonic datasets that ship a train/test split take a `train` argument; the rest are split 80/20 here.
+        if "train" in inspect.signature(entry["cls"]).parameters:
+            raw_train = entry["cls"](save_to=str(DATA_DIR), train=True)
+            raw_test  = entry["cls"](save_to=str(DATA_DIR), train=False)
             RawDatasets.index_targets(raw_train, raw_test)
         else:
-            full_raw = RawDatasets.load(lambda: entry["cls"](save_to=str(DATA_DIR)))
+            full_raw = entry["cls"](save_to=str(DATA_DIR))
             RawDatasets.index_targets(full_raw)
             n_train = int(0.8 * len(full_raw))
             raw_train, raw_test = torch.utils.data.random_split(
@@ -216,8 +152,6 @@ class NeuromorphicEncoder:
                 generator=split_generator(getattr(self.cfg, "SEED", 0)),
             )
         self.dataset_label = entry["name"]
-        self.task_type = entry.get("kind", "classification")
-        self.cfg.TASK_TYPE = self.task_type
         self.cfg.apply_dataset_shape(
             sensor_h=sensor_size[1], sensor_w=sensor_size[0],
             in_channels=sensor_size[2], num_classes=entry["num_classes"],
@@ -304,7 +238,10 @@ class NeuromorphicEncoder:
                 raw_train, transform=frame_tf,
                 split=f"{dataset_prefix}/train", num_workers=worker_estimate,
                 manifest=self.cache_manifest)
-            test_data = PreTransformedDataset(raw_test, test_tf)
+            test_data = controller.determine_dataset_strategy(
+                raw_test, transform=frame_tf,
+                split=f"{dataset_prefix}/test", num_workers=worker_estimate,
+                manifest=self.cache_manifest)
 
         source = getattr(raw_train, "dataset", raw_train)
         if getattr(source, "requires_single_process_loading", False):
@@ -337,18 +274,14 @@ class NeuromorphicEncoder:
             metrics=monitor.snapshot(),
         )
         base_cfg = monitor.dataloader_config(device, **loader_cfg_kwargs)
-        test_cfg = {"num_workers": 0, "prefetch_factor": None, "pin_memory": True, "persistent_workers": False, "timeout": 0}
 
-        if getattr(self, "task_type", "classification") in ("regression", "detection"):
-            pad = pad_events_passthrough_target
-        else:
-            pad = tonic.collation.PadTensors(batch_first=False)
+        pad = tonic.collation.PadTensors(batch_first=False)
 
         train_loader = DataLoader(train_data, batch_size=batch_size, collate_fn=pad, shuffle=True, drop_last=True,
             **self.loader_kwargs(train_data, base_cfg),
         )
         test_loader = DataLoader(test_data, batch_size=batch_size, collate_fn=pad,
-            **self.loader_kwargs(test_data, test_cfg),
+            **self.loader_kwargs(test_data, base_cfg),
         )
 
         logger.info(f"[PIPELINE] Train batches : {len(train_loader)}")
@@ -370,24 +303,20 @@ class NeuromorphicEncoder:
     def get_dataloaders(self) -> tuple[DeviceLoader, DeviceLoader]:
         return self.train_loader, self.test_loader
 
-    def clear_cache(self, split: str | None = None):
+    def clear_cache(self, split=None):
         self.controller.clear_cache(split)
 
     def validate_first_sample(self, dataset, split: str) -> int:
-        try:
-            events, _ = dataset[0]
-            if events is None or (hasattr(events, "numel") and events.numel() == 0):
-                raise ValueError("first sample is empty")
-            sample_bytes = measure_event_bytes(events)
-            logger.info(f"[VALIDATION] {split.capitalize()} dataset: first sample OK ({sample_bytes / 1024:.1f} KB)")
-            return sample_bytes
-        except Exception as exc:
-            logger.error(f"[ERROR] {split} validation failed — {exc}")
-            sys.exit(1)
+        events, _ = dataset[0]
+        if events is None or (hasattr(events, "numel") and events.numel() == 0):
+            raise ValueError(f"{split} dataset: first sample is empty")
+        sample_bytes = measure_event_bytes(events)
+        logger.info(f"[VALIDATION] {split.capitalize()} dataset: first sample OK ({sample_bytes / 1024:.1f} KB)")
+        return sample_bytes
 
 
 def main() -> tuple[DeviceLoader, DeviceLoader]:
-    from skeleton import Settings
-    cfg = Settings()
+    from skeleton.config import Settings, load_config
+    cfg = Settings(load_config())
     encoder = NeuromorphicEncoder(cfg)
     return encoder.get_dataloaders()

@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import math
 from abc import abstractmethod
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -33,14 +32,14 @@ import torch.nn as nn
 MISMATCH = "<-- MISMATCH: config asked"
 
 
-def scalar(value: Any) -> Any:
+def scalar(value):
     """A plain Python value for a tensor or Parameter; anything else unchanged."""
     if isinstance(value, torch.Tensor):
         return value.item() if value.numel() == 1 else value.tolist()
     return value
 
 
-def _agree(live: Any, wanted: Any) -> bool:
+def _agree(live, wanted) -> bool:
     """Whether two settings mean the same thing. Floats compare with a tolerance --
     a config float becomes a float32 tensor inside the framework and comes back
     slightly changed, which is not a mismatch."""
@@ -55,7 +54,7 @@ def _agree(live: Any, wanted: Any) -> bool:
     return live == wanted
 
 
-def reconcile(live: Any, wanted: Any, *, agrees: bool | None = None) -> Any:
+def reconcile(live, wanted, *, agrees=None):
     """The value the BUILT module holds, flagged when the config asked for another.
 
     describe() reports the module rather than the config because a config value is only
@@ -91,7 +90,7 @@ class BaseLIF(nn.Module):
         # Shape of one sample's output, e.g. (12, 30, 30). Learned from the first counted
         # step, so a results file can report neurons per layer without the network
         # having to describe itself.
-        self.spike_shape: tuple[int, ...] | None = None
+        self.spike_shape = None
 
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -113,32 +112,12 @@ class BaseLIF(nn.Module):
         and would silently mis-measure a sequence-consuming layer: SpikingNet.forward
         drives the stack, _record below reads the shape, and ActivityMonitor's hook
         fires once per call. Sinabs already produced exactly that failure once -- no
-        SynOps, no CV(ISI) and no activity penalty at all -- so the mode is declared by
+        SynOps and no activity penalty at all -- so the mode is declared by
         the layer and honoured everywhere, not inferred at each site.
         """
         return False
 
-    def has_state(self) -> bool:
-        """Is any neuron state currently held?
-
-        Not part of the computational contract -- this exists so a reset can be
-        VERIFIED rather than assumed. Each framework stores state somewhere different,
-        so each adapter answers for itself.
-        """
-        return False
-
-    def membrane(self) -> torch.Tensor | None:
-        """Current membrane potential, or None if no state is held yet.
-
-        Exists so equivalence_check.py can compare membrane trajectories WITHOUT
-        knowing which framework it is looking at -- each framework parks the membrane
-        somewhere different (an attribute we hold, a module attribute, a state
-        namedtuple, a registered buffer). Post-reset value, i.e. after any spike has
-        already knocked it down.
-        """
-        return None
-
-    def describe(self) -> dict[str, Any]:
+    def describe(self) -> dict:
         """Framework-specific settings actually in force, for the run record."""
         return {}
 

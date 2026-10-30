@@ -9,12 +9,10 @@ import gc
 import logging
 import threading
 import time
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.flop_counter import FlopCounterMode
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -53,16 +51,6 @@ def build_optimizer(params, cfg) -> torch.optim.Optimizer:
             params, lr=lr, momentum=getattr(cfg, "SGD_MOMENTUM", 0.0), weight_decay=wd
         )
     return torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999), weight_decay=wd)
-
-
-def spikes_per_neuron_per_inference(spike_rate: float, timesteps: int) -> float:
-    """The time-unit-free spike figure: spikes per neuron over one whole inference.
-
-    `spike_rate` is spikes per neuron per TIMESTEP, so multiplying by T gives the count
-    per sample. This is the headline spike-activity figure: event-driven data has no
-    real clock to convert it into Hz against, so this stays the one number reported.
-    """
-    return spike_rate * timesteps
 
 
 def collect_single_samples(loader, device, count: int) -> list:
@@ -104,11 +92,8 @@ def measure_latency(model, samples: list, device: torch.device, warmup: int = 5)
         raise ValueError("measure_latency needs at least one sample")
 
     model.eval_mode()
-    tensor_format = model.tensor_format() if hasattr(model, "tensor_format") else "TB"
-
     def forward(sample):
-        data = sample.permute(1, 0, 2, 3, 4).contiguous() if tensor_format == "BT" else sample
-        return model(data)
+        return model(sample)
 
     def sync():
         if device.type == "cuda":
@@ -131,7 +116,6 @@ def measure_latency(model, samples: list, device: torch.device, warmup: int = 5)
     p90_index = min(len(ordered) - 1, int(round(0.90 * (len(ordered) - 1))))
     return {
         "latency_ms": statistics.median(durations_ms),      # headline
-        "latency_mean_ms": statistics.fmean(durations_ms),
         "latency_p90_ms": ordered[p90_index],               # MLPerf convention
         "latency_min_ms": ordered[0],
         "latency_max_ms": ordered[-1],
@@ -170,17 +154,12 @@ def warm_up(model, sample_batch: torch.Tensor, iterations: int) -> dict:
     # the real first batch overwrites them anyway -- pausing makes that independent of
     # call order rather than a coincidence.
     model.activity.pause()
-    try:
-        for _ in range(iterations):
-            # A plain sum stands in for the loss. Warm-up only needs the same KERNELS
-            # to be compiled and the same allocations made; the loss value is discarded
-            # and no step is taken, so the real loss function would add nothing. Same
-            # surrogate measure_batch_vram() already uses for its probe.
-            model(sample_batch).float().sum().backward()
-    finally:
-        model.activity.resume()
-        model.activity.clear()
-        model.zero_grad()
+    for _ in range(iterations):
+        # A plain sum stands in for the loss: warm-up only needs the same kernels compiled and allocations made.
+        model(sample_batch).float().sum().backward()
+    model.activity.resume()
+    model.activity.clear()
+    model.zero_grad()
 
     after = shared_weight_fingerprint(model)
     report.update(iterations=iterations, weights_unchanged=(before == after), fingerprint=after)
@@ -196,11 +175,6 @@ def sum_over_time_cross_entropy(spk_rec: torch.Tensor, targets: torch.Tensor) ->
 LOSSES = ("cross_entropy", "mse_count")
 
 
-def mean_over_time_mse(out_rec: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    """Regression counterpart of sum_over_time_cross_entropy: average the continuous readout over T, then plain torch MSE. Belongs to none of the four libraries, which is what makes it neutral."""
-    return F.mse_loss(out_rec.mean(dim=0), targets.float())
-
-
 def build_loss(cfg):
     """The ONE loss, shared by every framework.
 
@@ -212,8 +186,6 @@ def build_loss(cfg):
 
       cross_entropy — torch's own loss on spike counts summed over T. Belongs to none
                       of the four libraries, which is what makes it neutral.
-      mse_regression— torch's own MSE on the time-averaged continuous readout, for the
-                      regression datasets. Neutral for the same reason cross_entropy is.
       mse_count     — snnTorch's functional.mse_count_loss. Available, but it belongs
                       to ONE of the four frameworks: do not use it for a
                       cross-framework comparison run.
@@ -222,9 +194,6 @@ def build_loss(cfg):
 
     if loss_name == "cross_entropy":
         return sum_over_time_cross_entropy
-
-    if loss_name == "mse_regression":
-        return mean_over_time_mse
 
     if loss_name == "mse_count":
         from snntorch import functional as SF
@@ -258,12 +227,12 @@ class DenseTimestepBuffer:
         with self.lock:
             self.events.append(tensor)
 
-    def join(self) -> Optional[torch.Tensor]:
+    def join(self):
         if not self.events:
             return None
         return torch.cat(self.events, dim=0) if self.sequence else torch.stack(self.events)
 
-    def stack(self) -> Optional[torch.Tensor]:
+    def stack(self):
         with self.lock:
             return self.join()
 
@@ -271,7 +240,7 @@ class DenseTimestepBuffer:
         with self.lock:
             self.events.clear()
 
-    def firing_rate_tensor(self) -> Optional[torch.Tensor]:
+    def firing_rate_tensor(self):
         """GPU-resident fraction-of-neuron-timesteps-active ratio, returned
         as a 0-dim tensor on the buffer's own device instead of a Python
         float. No `.item()`/`.cpu()` call happens here, so this is safe to
@@ -304,7 +273,7 @@ class ActivityMonitor:
         penalty = model.activity.regularization_loss(min_rate=..., max_rate=..., ...)
     """
 
-    def __init__(self, layer_map: Optional[Dict[str, nn.Module]] = None):
+    def __init__(self, layer_map=None):
         layer_map = layer_map or {}
         # The buffer is told the layer's calling convention rather than guessing from
         # the tensor it receives: a [T, batch, C, H, W] push and a [batch, C, H, W] push
@@ -337,7 +306,7 @@ class ActivityMonitor:
     def resume(self) -> None:
         self.paused = False
 
-    def recordings(self) -> Dict[str, Optional[torch.Tensor]]:
+    def recordings(self):
         return {name: buf.stack() for name, buf in self.buffers.items()}
 
     def regularization_loss(
@@ -375,108 +344,6 @@ class ActivityMonitor:
         if total is None or n_layers == 0:
             return torch.tensor(0.0)
         return total / n_layers
-
-
-def cv_isi_single_neuron(spike_times: np.ndarray) -> Optional[float]:
-    """CV_ISI for one neuron's spike-time index array — SNN_GPU_Evaluation_Metrics.md
-    §4.6 reference implementation. None (not 0.0) when fewer than 2 spikes
-    exist, since an ISI is undefined for a single spike — this is filtered
-    out by the caller rather than silently averaged in as a 0."""
-    if len(spike_times) < 2:
-        return None
-    isi = np.diff(spike_times)
-    mean = isi.mean()
-    return float(isi.std() / mean) if mean > 0 else None
-
-
-def cv_isi_population(trains: np.ndarray) -> tuple[Optional[float], float]:
-    """Mean CV_ISI over every spike train in [T, M] that produced at least one interval, and the percentage that did.
-
-    Vectorised over all M trains at once: a per-neuron Python loop over the 184,512
-    neurons of a conv layer, times the batch, is minutes of work for a diagnostic.
-    """
-    steps, count = trains.shape
-    if count == 0:
-        return None, 0.0
-    # nonzero on the transpose sorts by train, then by timestep, so consecutive entries
-    # sharing a train index are consecutive spikes and their difference is an interval.
-    train_index, timestep = np.nonzero(trains.T)
-    if len(timestep) < 2:
-        return None, 0.0
-    consecutive = train_index[1:] == train_index[:-1]
-    interval = (timestep[1:] - timestep[:-1])[consecutive].astype(np.float64)
-    group = train_index[1:][consecutive]
-
-    intervals_per_train = np.bincount(group, minlength=count).astype(np.float64)
-    total = np.bincount(group, weights=interval, minlength=count)
-    squares = np.bincount(group, weights=interval * interval, minlength=count)
-
-    qualified = intervals_per_train > 0
-    coverage = float(qualified.sum()) / count * 100.0
-    if not qualified.any():
-        return None, coverage
-    mean = total[qualified] / intervals_per_train[qualified]
-    # Population variance (ddof=0), matching numpy's default and cv_isi_single_neuron.
-    variance = np.maximum(squares[qualified] / intervals_per_train[qualified] - mean * mean, 0.0)
-    usable = mean > 0
-    if not usable.any():
-        return None, coverage
-    return float((np.sqrt(variance[usable]) / mean[usable]).mean()), coverage
-
-
-def compute_cv_isi(activity_snapshot: Dict[str, Optional[torch.Tensor]]) -> Dict[str, float]:
-    """Per-layer + network-wide Coefficient of Variation of Inter-Spike-Interval
-    (SNN_GPU_Evaluation_Metrics.md §2.2/§4.6): a per-neuron firing-regularity
-    diagnostic, independent of firing rate. Low CV_ISI = clock-like, regular
-    firing; near/above 1 = bursty/irregular.
-
-    activity_snapshot: output of ActivityMonitor.recordings(), i.e.
-    {layer_name: [T, B, ...] spike tensor}. EVERY (neuron, sample) pair in the
-    snapshot is treated as its own short spike train and all of them are pooled.
-    Does the CPU/numpy conversion internally; call this only from an already-
-    deferred (end-of-epoch/end-of-run) reporting pass, never from inside the
-    hot batch loop.
-
-    WHY POOLED, AND WHY COVERAGE IS REPORTED BESIDE THE VALUE. The standard
-    estimator is only asymptotically unbiased, and intervals seen inside a fixed
-    window are right-censored (Rajdl & Kostal 2023) — both biases bite hardest
-    exactly here, because T is 8 to 16 timesteps and a neuron firing at 4% is
-    expected to spike less than once. MEASURED on DVS128 Gesture: 14.8% of lif1
-    neurons fire twice in 16 steps and only 0.2% of lif2 do, and a neuron that
-    fires exactly twice yields CV 0 by construction, since one interval has no
-    spread. Pooling every neuron of every sample is the parallel-spike-trains
-    approach that regime calls for, and it removes the previous version's
-    variance — it read one sample of one batch — but it cannot remove the bias.
-    So the qualifying fraction travels with the number.
-
-    THIS VALUE IS THEREFORE COMPARATIVE, NOT ABSOLUTE. Five models over the same
-    window at similar rates carry the same bias, so ranking them is sound.
-    Reading it against published CV_ISI values, where a spike train runs for
-    seconds and carries tens of intervals, is not.
-
-    Returns {layer_name: mean_cv_isi} plus a "network_wide" key averaging across
-    all layers that had at least one qualifying train, a "coverage" mapping of
-    layer_name -> percentage of trains that contributed an interval, and
-    "coverage_network_wide". Layers with no qualifying train (all silent, or all
-    firing exactly once) are omitted rather than reported as a misleading 0.0.
-    """
-    per_layer: Dict[str, float] = {}
-    coverage: Dict[str, float] = {}
-    for name, spk in activity_snapshot.items():
-        if spk is None:
-            continue
-        # [T, B, ...] -> [T, B * neurons]: one column per (neuron, sample) pair.
-        trains = spk.detach().reshape(spk.shape[0], -1).to(torch.bool).cpu().numpy()
-        value, covered = cv_isi_population(trains)
-        if value is not None:
-            per_layer[name] = value
-            coverage[name] = covered
-
-    if per_layer:
-        per_layer["network_wide"] = float(np.mean(list(per_layer.values())))
-        per_layer["coverage"] = coverage
-        per_layer["coverage_network_wide"] = float(np.mean(list(coverage.values())))
-    return per_layer
 
 
 def measure_dense_macs(model, sample_batch: torch.Tensor) -> Dict[str, float]:
@@ -518,12 +385,10 @@ def measure_dense_macs(model, sample_batch: torch.Tensor) -> Dict[str, float]:
     # caller (SNNTrainer.train() / SNNTester.run()) always sets its own
     # correct mode immediately after this one-time measurement anyway.
     model.eval_mode()
-    try:
-        with torch.no_grad():
-            model(sample_batch)
-    finally:
-        for h in handles:
-            h.remove()
+    with torch.no_grad():
+        model(sample_batch)
+    for h in handles:
+        h.remove()
 
     # PER TIMESTEP, always -- the caller multiplies by T (inference.py: rate * macs * T),
     # so a figure that already covered T would be counted twice.
@@ -555,16 +420,12 @@ def measure_dense_macs(model, sample_batch: torch.Tensor) -> Dict[str, float]:
 
 
 def safe_empty_cache() -> None:
-    """gc.collect() then torch.cuda.empty_cache(), with the cache-clear
-    itself guarded against raising."""
+    """gc.collect() then torch.cuda.empty_cache()."""
     gc.collect()
-    try:
-        torch.cuda.empty_cache()
-    except (torch.cuda.OutOfMemoryError, torch.AcceleratorError):
-        pass
+    torch.cuda.empty_cache()
 
 
-def measure_batch_vram(model_cls, cfg, device, batch_size: int, timesteps: int) -> Optional[float]:
+def measure_batch_vram(model_cls, cfg, device, batch_size: int, timesteps: int):
     """One real forward+backward pass at batch_size, on synthetic data at
     the exact target shape, with AMP autocast+GradScaler (cfg.USE_AMP) and
     gradient accumulation (cfg.GRAD_ACCUM_STEPS micro-batches, peak read
@@ -609,32 +470,7 @@ def calibrate_batch_size(model_cls, cfg, device, timesteps: int, *, data_vram_fr
                           band_min: float,
                           max_batch_size: int = 256, min_batch_size: int = 1,
                           baseline_sensor_px: int = 34 * 34, baseline_batch_size: int = 128) -> int:
-    """Picks a batch size that fits within data_vram_fraction of total VRAM
-    (the policy band's lower edge is resource_policy.batch_vram_band_min in
-    data_workflow.yaml; the upper edge is data_vram_fraction itself, since the
-    search never deliberately lands above its own target), instead of the
-    largest one that avoids OOM.
 
-    timesteps must be the real per-sample frame count (cfg.N_TIME_BINS,
-    from data_workflow.yaml), passed through to measure_batch_vram so the probe
-    matches the actual BPTT unroll length.
-
-    Starting guess: baseline_batch_size scaled by sensor pixel-count ratio
-    against baseline_sensor_px. One probe at the guess, then one probe at a
-    linearly-scaled target (memory ~ batch size for fixed architecture/T) --
-    at most 2 real forward/backward passes total. Falls back to halving on
-    OOM, or to the already-confirmed guess if the scaled probe fails.
-
-    RAISES if min_batch_size itself OOMs -- e.g. DSEC's 640x480 sensor is a
-    real, documented case where even batch_size=1 can exceed available VRAM
-    (SDformerFlow, OF_EV_SNN and E-GMFlow all report needing batch_size 1-2
-    at full resolution on 11-32 GB cards). No fallback (cropping, gradient
-    checkpointing, sharding) is applied automatically here -- surveyed
-    against PyTorch Lightning, HuggingFace Accelerate, DeepSpeed and COPUS,
-    none of them do this either; the closest precedent is Accelerate's
-    find_executable_batch_size, which raises once every candidate size is
-    exhausted rather than silently returning an unverified one.
-    """
     total_vram_gb = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
     vram_budget_gb = total_vram_gb * data_vram_fraction
 
@@ -686,24 +522,6 @@ def _log_stable_batch_size(cfg, batch_size: int, peak_gb: float, total_vram_gb: 
     print(f"[CALIBRATE] {dataset}: stable batch_size={batch_size} at {pct:.1f}% VRAM ({band_note})", flush=True)
 
 
-def select_inference_mode() -> bool:
-    """Ask whether inference should show a live visualization alongside the usual
-    statistical output, or statistics only. No stdin attached (Colab, CI, batch)
-    defaults to statistics-only rather than crashing on EOFError.
-    Returns True if visualization was requested."""
-    print("\n[MAIN] Inference output:")
-    print("  1) Statistics only")
-    print("  2) Statistics + live visualization (opens a window showing input frames vs. predictions)")
-    try:
-        choice = input("Enter number [1]: ").strip() or "1"
-    except EOFError:
-        choice = "1"
-    if choice not in ("1", "2"):
-        print(f"[MAIN] Invalid selection '{choice}' — defaulting to statistics only")
-        choice = "1"
-    return choice == "2"
-
-
 def measure_activation_density(model, loader, device, max_batches: int = 8) -> dict:
     """Per-layer spike rate on the test set, in its own untimed pass; also fills the layer counters layers.csv reads."""
     net = getattr(model, "net", None) or model
@@ -713,19 +531,15 @@ def measure_activation_density(model, loader, device, max_batches: int = 8) -> d
     was_training = getattr(model, "training", False)
     model.eval_mode()
     net.set_spike_counting(True)
-    try:
-        with torch.no_grad():
-            for index, (data, _) in enumerate(loader):
-                if index >= max_batches:
-                    break
-                if model.tensor_format() == "BT":
-                    data = data.permute(1, 0, 2, 3, 4).contiguous()
-                model(data)
-        per_layer = net.spike_rates()
-    finally:
-        net.set_spike_counting(False)
-        if was_training:
-            model.train_mode()
+    with torch.no_grad():
+        for index, (data, _) in enumerate(loader):
+            if index >= max_batches:
+                break
+            model(data)
+    per_layer = net.spike_rates()
+    net.set_spike_counting(False)
+    if was_training:
+        model.train_mode()
 
     hidden = {name: rate for name, rate in per_layer.items() if name != "lif_out"}
     # Hidden layers only: the readout's rate is set by the class count, not the representation.
