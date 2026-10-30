@@ -3,13 +3,12 @@ import importlib
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))  # project root → skeleton, event_data_workflow, learning, frameworks
 import torch
-from skeleton import Settings, WorkflowSettings
+from skeleton.config import add_args, from_args
 from skeleton.snn_logging import configure_logging
 from skeleton.seeding import (
     param_report, seed_everything, seed_model_init, shared_weight_fingerprint,
 )
-from skeleton.results import make_run_id, write_results
-from skeleton.results_collect import build_epoch_rows, build_layer_rows, build_run_row
+from skeleton.results_collection import build_epoch_rows, build_layer_rows, build_run_row, make_run_id, write_results
 from learning.training import SNNTrainer
 from learning.inference import SNNTester
 from event_data_workflow import NeuromorphicEncoder, resolve_dataset_entry
@@ -23,36 +22,25 @@ FRAMEWORK_MODULES = {
     "torch":    ("frameworks.snn_torch", "SNN_TORCH"),
     "sj":       ("frameworks.snn_spikingjelly", "SNN_SJ"),
     "sinabs":   ("frameworks.snn_sinabs", "SNN_SINABS"),
-    "cnn":      ("frameworks.cnn_model", "CNNModel"),
 }
 
 def parse_args():
-    """Every flag is optional and every default reproduces this pipeline's original
-    behaviour, so `python learning/main.py` on its own runs exactly as it always has:
-    the three base config files, a dataset prompt, and output to the `output:` paths.
-    """
+    """Every flag is optional; with none, the three files in configuration/ are the whole config."""
     import argparse
-
-    from skeleton.cli import add_common_args
 
     parser = argparse.ArgumentParser(
         description="Train and evaluate one SNN framework on one event dataset.",
         epilog="examples:\n"
                "  python learning/main.py\n"
-               "  python learning/main.py --config experiments/experiment2/n_caltech101.yaml --experiment experiment2 "
-               "--framework sinabs --seed 1\n",
+               "  python learning/main.py --framework sinabs --seed 1\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    return add_common_args(parser).parse_args()
+    return add_args(parser).parse_args()
 
 
 if __name__ == "__main__":
-    from skeleton.cli import build, run_banner
-
     configure_logging()
-    args = parse_args()
-    cfg, wf_settings, run_info = build(args)
-    print(run_banner("learning/main.py", cfg, run_info))
+    cfg = from_args(parse_args())
     seed_everything(cfg.SEED)  # data order, augmentation, random_split -- see skeleton/seeding.py
     device = torch.device(cfg.DEVICE)
 
@@ -79,11 +67,10 @@ if __name__ == "__main__":
     sensor_w, sensor_h, in_channels = dataset_entry["sensor_size"]
     cfg.apply_dataset_shape(sensor_h=sensor_h, sensor_w=sensor_w, in_channels=in_channels,
                              num_classes=dataset_entry["num_classes"])
-    wf = wf_settings  # same merged config; overlay and --cache-root already applied
     if cfg.CALIBRATE_BATCH_SIZE:
-        cfg.BATCH_SIZE = calibrate_batch_size(ModelClass, cfg, device, timesteps=wf.N_TIME_BINS,
-                                               data_vram_fraction=wf.BATCH_VRAM_FRACTION, max_batch_size=wf.MAX_BATCH_SIZE,
-                                               band_min=wf.BATCH_VRAM_BAND_MIN)
+        cfg.BATCH_SIZE = calibrate_batch_size(ModelClass, cfg, device, timesteps=cfg.N_TIME_BINS,
+                                               data_vram_fraction=cfg.BATCH_VRAM_FRACTION, max_batch_size=cfg.MAX_BATCH_SIZE,
+                                               band_min=cfg.BATCH_VRAM_BAND_MIN)
 
     # Hardcoded on purpose, NOT a config key: background CPU/GPU utilization and power
     # sampling is a diagnostic, always wanted on a real run. Set False here to disable.
@@ -118,38 +105,16 @@ if __name__ == "__main__":
     print(f"  weight fingerprint : {params['shared_fingerprint']}   "
           f"({params['total_trainable']} trainable params)")
     print(f"\n  Model backend  : {cfg.FRAMEWORK.upper()}")
-    results_dir, _, plots_dir = run_info["results_dir"], run_info["equivalence_dir"], run_info["plots_dir"]
-
-    # ---- one folder per run, for everything with a fixed filename -----------------
-    # training_results.csv, batch_metrics.csv, test.csv and the seven diagnostic PNGs
-    # are all named without the framework or seed in them, so four frameworks writing
-    # into one experiment folder would leave only the last one's files. Giving each run
-    # its own subfolder keyed by run_id fixes that, and because the SAME run_id goes
-    # into the runs.csv row, any figure can be traced back to the row that describes it.
-    #
-    # runs.csv / epochs.csv / layers.csv stay at the TOP of results_dir: they are
-    # append-only across runs, which is the whole point of them.
-    #
-    # Only when --experiment routed the output. Without it nothing is nested and the
-    # original ./outputs layout is untouched.
+    results_dir, plots_dir = Path(cfg.DATA_DIR), Path(cfg.PLOT_DIR)
     run_id = make_run_id(cfg.FRAMEWORK, cfg.SEED)
-    run_results_dir = (results_dir / run_id) if run_info["routed"] else results_dir
-    run_plots_dir = (plots_dir / run_id) if run_info["routed"] else plots_dir
-    for directory in (results_dir, run_results_dir, run_plots_dir):
+    for directory in (results_dir, plots_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    if run_info["routed"]:
-        print(f"  run_id         : {run_id}   -> {run_results_dir}")
 
-    # After the run directories exist, so the OUTPUT section can name the paths this
-    # run will actually write to rather than the config's unrouted defaults.
-    cfg.display(output_dirs={
-        "Results dir": run_results_dir,
-        "Plots dir":   run_plots_dir,
-        "Shared CSVs": f"{results_dir}   (runs.csv, epochs.csv, layers.csv)",
-    } if run_info["routed"] else None)
+    cfg.display(net=model.net)
+    model.activity.clear()
 
     trainer = SNNTrainer(model, train_loader, cfg, device)
-    results = trainer.train(csv_path=str(run_results_dir / "training_results.csv"))
+    results = trainer.train(csv_path=str(results_dir / "training_results.csv"))
     # The last EPOCH, not the last batch. loss_history/accuracy_history are per-BATCH
     # series, so [-1] was one batch of 256 samples -- noisy, and it disagreed with the
     # "Epoch 5/5" block printed directly above it (0.9414 against 93.23%) for no reason
@@ -169,9 +134,9 @@ if __name__ == "__main__":
         print(f"  Final accuracy  : {results['accuracy_history'][-1]:.4f}   (last batch)")
         print(f"  Final spike rate: {results['spike_rate_history'][-1]:.4f}   (last batch)")
 
-    trainer.plot_training(save_dir=str(run_plots_dir))
-    trainer.plot_iteration_metrics(save_dir=str(run_plots_dir))
-    trainer.plot_raster(save_dir=str(run_plots_dir))
+    trainer.plot_training(save_dir=str(plots_dir))
+    trainer.plot_iteration_metrics(save_dir=str(plots_dir))
+    trainer.plot_raster(save_dir=str(plots_dir))
 
     # Copied out BEFORE the trainer is dropped below: epoch_log is the source for
     # epochs.csv, and the last activity snapshot is the free per-layer spike record
@@ -191,12 +156,12 @@ if __name__ == "__main__":
     # SNN_module.yaml, opt-in and false by default (real disk usage every run
     # doesn't need). Load back with model.load_state(torch.load(path)).
     if cfg.SAVE_CHECKPOINT:
-        checkpoint_path = run_results_dir / "model_checkpoint.pt"
+        checkpoint_path = results_dir / "model_checkpoint.pt"
         torch.save(model.get_state(), checkpoint_path)
         print(f"  Checkpoint     : {checkpoint_path}")
 
     tester       = SNNTester(model, test_loader, cfg, device)
-    test_results = tester.run(csv_path=str(run_results_dir / "test.csv"))
+    test_results = tester.run(csv_path=str(results_dir / "test.csv"))
     print("\n Testing complete!")
     print(f"  Test accuracy  : {test_results['overall_accuracy'] * 100:.2f}%")
     print(f"  Energy/sample  : {test_results['energy_per_sample_pj']:.2f} pJ")
@@ -226,10 +191,6 @@ if __name__ == "__main__":
             print(f"\n  !! latency (bs=1) not measured: {type(exc).__name__}: {exc}")
 
     # ---- activation density, its own untimed pass ---------------------------------
-    # The one activity figure that means the same thing for a spiking model and for the
-    # non-spiking control, so the two can be compared at all. See
-    # learning/utilities.measure_activation_density for why the existing spike-rate
-    # figures cannot do this job.
     density = {}
     try:
         density = measure_activation_density(model, test_loader, device)
@@ -241,7 +202,7 @@ if __name__ == "__main__":
 
     try:
         run_row = build_run_row(
-            cfg, wf, model, run_info,
+            cfg, model,
             train_results=results, test_results=test_results,
             epoch_log=epoch_log,
             params=params,
@@ -250,7 +211,7 @@ if __name__ == "__main__":
             density=density,
             # The SAME id the run folder is named after, so a figure maps to its row.
             run_id=run_id,
-            notes=" ".join(f"{k}={v}" for k, v in (run_info.get("overrides") or {}).items()),
+            notes=" ".join(f"{k}={v}" for k, v in cfg.OVERRIDES.items()),
         )
         paths = write_results(
             results_dir,
@@ -261,7 +222,7 @@ if __name__ == "__main__":
                 cv_isi=test_results.get("cv_isi_per_layer"),
                 dense_macs=test_results.get("dense_macs_per_layer"),
             ),
-            json_payload={"run": run_row, "config_path": run_info.get("config_path"),
+            json_payload={"run": run_row, "config_path": cfg.CONFIG_PATH,
                           "neuron": model.describe_neuron(),
                           "test": {k: v for k, v in test_results.items()
                                    if k not in ("confusion_matrix", "class_metrics")}},

@@ -22,7 +22,7 @@ import tonic.transforms as transforms
 import tonic.slicers as slicers
 import tqdm as t
 from typing import Optional, Protocol
-from skeleton import WorkflowSettings
+
 from skeleton.seeding import split_generator
 from .system_monitor import monitor
 from .cache_engine import (
@@ -161,10 +161,9 @@ class NeuromorphicEncoder:
     def __init__(self, cfg: DatasetAwareConfig, use_temporal_slicing: bool | None = None, slice_duration_ms: float | None = None):
 
         self.cfg = cfg
-        self.wf  = WorkflowSettings(config=cfg.config)
 
         cuda_enabled = torch.device(cfg.DEVICE).type == "cuda"
-        monitor.configure(cache_path=self.wf.CACHE_PATH, cuda_enabled=cuda_enabled)
+        monitor.configure(cache_path=self.cfg.CACHE_PATH, cuda_enabled=cuda_enabled)
 
         metrics = monitor.snapshot()
         physical_cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
@@ -174,8 +173,8 @@ class NeuromorphicEncoder:
             f"{metrics.gpu_available_gb:.2f}GB VRAM free — before any dataset operation"
         )
 
-        self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else self.wf.TEMPORAL_SLICING_ENABLED
-        self.slice_duration_ms = slice_duration_ms or (self.wf.SLICE_DURATION_US / 1000.0)
+        self.use_temporal_slicing = use_temporal_slicing if use_temporal_slicing is not None else self.cfg.TEMPORAL_SLICING_ENABLED
+        self.slice_duration_ms = slice_duration_ms or (self.cfg.SLICE_DURATION_US / 1000.0)
         self.train_loader: DeviceLoader
         self.test_loader: DeviceLoader
         self.build()
@@ -235,18 +234,18 @@ class NeuromorphicEncoder:
         logger.info(f"[PIPELINE] First train sample size: {train_sample_bytes / 1024:.1f} KB — dataset non-empty, proceeding to cache strategy")
 
         if entry.get("input") == "frames":
-            self.denoise_filter_time_us = self.wf.DENOISE_FILTER_TIME_US
+            self.denoise_filter_time_us = self.cfg.DENOISE_FILTER_TIME_US
             frame_tf = ComposedTransform([])
             self.batch_sample_bytes = measure_event_bytes(frame_tf(raw_train[0][0]))
             logger.info("[PIPELINE] Frame input -- denoise and binning skipped")
             return raw_train, raw_test, frame_tf
 
-        self.denoise_filter_time_us = self.wf.DENOISE_FILTER_TIME_US
+        self.denoise_filter_time_us = self.cfg.DENOISE_FILTER_TIME_US
         denoise = transforms.Denoise(filter_time=self.denoise_filter_time_us)
-        if self.wf.FRAME_MODE == "n_time_bins":
-            to_frame = transforms.ToFrame(sensor_size=sensor_size, n_time_bins=self.wf.N_TIME_BINS)
+        if self.cfg.FRAME_MODE == "n_time_bins":
+            to_frame = transforms.ToFrame(sensor_size=sensor_size, n_time_bins=self.cfg.N_TIME_BINS)
         else:
-            to_frame = transforms.ToFrame(sensor_size=sensor_size, time_window=self.wf.TIME_WINDOW_US)
+            to_frame = transforms.ToFrame(sensor_size=sensor_size, time_window=self.cfg.TIME_WINDOW_US)
         frame_tf = ComposedTransform([denoise, FixedToFrame(to_frame)])
 
         first_frame = frame_tf(raw_train[0][0])
@@ -257,25 +256,25 @@ class NeuromorphicEncoder:
     def apply_pipeline(self, raw_train, raw_test, frame_tf):
         """Cache the raw recordings, then optionally slice them into temporal windows."""
         self.controller = AdaptiveCacheController(
-            cache_path=self.wf.CACHE_PATH,
-            memory_safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
-            memory_cache_threshold_gb=self.wf.MEMORY_CACHE_THRESHOLD_GB,
-            gpu_pressure_threshold=self.wf.GPU_PRESSURE_THRESHOLD,
-            memory_tier_headroom_fraction=self.wf.MEMORY_TIER_HEADROOM_FRACTION,
-            disk_tier_headroom_multiple=self.wf.DISK_TIER_HEADROOM_MULTIPLE,
+            cache_path=self.cfg.CACHE_PATH,
+            memory_safety_margin_gb=self.cfg.MEMORY_SAFETY_MARGIN_GB,
+            memory_cache_threshold_gb=self.cfg.MEMORY_CACHE_THRESHOLD_GB,
+            gpu_pressure_threshold=self.cfg.GPU_PRESSURE_THRESHOLD,
+            memory_tier_headroom_fraction=self.cfg.MEMORY_TIER_HEADROOM_FRACTION,
+            disk_tier_headroom_multiple=self.cfg.DISK_TIER_HEADROOM_MULTIPLE,
         )
         controller = self.controller
 
         worker_estimate, _, _ = monitor.worker_count(
-            torch.device(self.cfg.DEVICE), safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
-            worker_count_override=self.wf.worker_count_override,
+            torch.device(self.cfg.DEVICE), safety_margin_gb=self.cfg.MEMORY_SAFETY_MARGIN_GB,
+            worker_count_override=self.cfg.worker_count_override,
         )
         worker_estimate = max(1, worker_estimate)
 
         train_tf = transforms.Compose([frame_tf, torch.from_numpy])
         test_tf = frame_tf
 
-        identity_dir, self.cache_manifest = cache_identity(self.wf, self.denoise_filter_time_us)
+        identity_dir, self.cache_manifest = cache_identity(self.cfg, self.denoise_filter_time_us)
         dataset_prefix = f'{self.dataset_label.replace(" ", "_")}/{identity_dir}'
         logger.info(f"[PIPELINE] Cache identity: {dataset_prefix}")
 
@@ -330,11 +329,11 @@ class NeuromorphicEncoder:
             batch_size = max(1, len(train_data))
         device = torch.device(self.cfg.DEVICE)
         loader_cfg_kwargs = dict(
-            safety_margin_gb=self.wf.MEMORY_SAFETY_MARGIN_GB,
+            safety_margin_gb=self.cfg.MEMORY_SAFETY_MARGIN_GB,
             bytes_per_batch=self.batch_sample_bytes * batch_size,
-            worker_ram_fraction=self.wf.WORKER_RAM_FRACTION,
-            worker_timeout_s=self.wf.DATALOADER_WORKER_TIMEOUT_S,
-            worker_count_override=self.wf.worker_count_override,
+            worker_ram_fraction=self.cfg.WORKER_RAM_FRACTION,
+            worker_timeout_s=self.cfg.DATALOADER_WORKER_TIMEOUT_S,
+            worker_count_override=self.cfg.worker_count_override,
             metrics=monitor.snapshot(),
         )
         base_cfg = monitor.dataloader_config(device, **loader_cfg_kwargs)

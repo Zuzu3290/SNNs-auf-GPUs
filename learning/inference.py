@@ -16,9 +16,9 @@ from event_data_workflow.system_monitor import PipelineMonitor, monitor
 import matplotlib.pyplot as plt
 
 
-# Neuromorphic energy-estimate constants — see SNN_GPU_Evaluation_Metrics.md
+# Energy estimates for event-driven hardware: a synaptic operation is one addition, 0.9 pJ at 45 nm (Horowitz, ISSCC 2014)
 ENERGY_PER_SPIKE_PJ = 3.5
-SYNOPS_ENERGY_PJ_PER_MAC = 4.6
+SYNOPS_ENERGY_PJ = 0.9
 
 
 class SNNTester:
@@ -223,7 +223,7 @@ class SNNTester:
             batch_spikes       = int(rec["batch_spikes"].item())
             batch_input_spikes = float(rec["batch_input_spikes"].item())
             acc                = rec["acc"].item()
-            batch_synops_pj    = rec["synops"].item() * SYNOPS_ENERGY_PJ_PER_MAC
+            batch_synops_pj    = rec["synops"].item() * SYNOPS_ENERGY_PJ
 
             possible_spikes = T * B * self.num_classes
             spike_rate      = batch_spikes / possible_spikes if possible_spikes > 0 else 0.0

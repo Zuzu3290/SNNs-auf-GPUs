@@ -27,7 +27,7 @@ from sinabs.activation import (
 )
 
 from frameworks.adapters.base import BaseLIF, reconcile, scalar
-from skeleton.neuron_spec import (
+from skeleton.config import (
     NeuronSpecError, neuron_cfg, optional_float, require_bool, require_choice,
     require_float,
 )
@@ -41,7 +41,7 @@ RESETS = {"zero": MembraneReset, "subtract": MembraneSubtract}
 # `surrogate.alpha` key does not apply here -- each type declares its own real
 # parameter names instead. Pretending they were all `alpha` would misreport what was
 # actually configured, which is why this adapter reads the surrogate itself rather than
-# going through neuron_spec.require_surrogate() like the other three.
+# going through require_surrogate() like the other three.
 SURROGATE_PARAMS = {
     "single_exponential": ("grad_width", "grad_scale"),
     "periodic_exponential": ("grad_width", "grad_scale"),
@@ -61,7 +61,7 @@ def build_surrogate(n: dict) -> Any:
     `periodic_exponential`, and a default-only adapter would accept that config and
     silently run single_exponential instead.
     """
-    # neuron_spec's helpers key off the LAST path segment, so the surrogate sub-block
+    # The strict neuron helpers key off the LAST path segment, so the surrogate sub-block
     # has to be fetched first and read from directly; the dotted path is only there to
     # make the error message name the full location.
     if "surrogate" not in n:

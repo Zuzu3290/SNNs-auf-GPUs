@@ -8,7 +8,7 @@ import torch
 from spikingjelly.activation_based import neuron, surrogate
 
 from frameworks.adapters.base import BaseLIF, reconcile
-from skeleton.neuron_spec import (
+from skeleton.config import (
     neuron_cfg, require_bool, require_choice, require_float, require_surrogate,
 )
 

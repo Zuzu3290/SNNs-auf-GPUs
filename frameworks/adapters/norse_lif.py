@@ -68,7 +68,7 @@ import torch
 from norse.torch.functional.reset import reset_subtract, reset_value
 
 from frameworks.adapters.base import BaseLIF, reconcile, scalar
-from skeleton.neuron_spec import (
+from skeleton.config import (
     neuron_cfg, require_choice, require_float, require_surrogate,
 )
 

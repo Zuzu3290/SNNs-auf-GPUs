@@ -8,15 +8,12 @@ trustworthy -- the spec CLAIMS all four blocks describe one neuron, and nothing 
 that but this script. Run it after any change to a neuron parameter.
 
     python equivalence_check.py
-    python equivalence_check.py --config experiments/experiment2/n_caltech101.yaml --experiment experiment2
-    python equivalence_check.py --config experiments/experiment1/snntorch.yaml --experiment experiment1 \
-        --results-root /content/drive/MyDrive/snn_runs --formats png,pdf
+    python equivalence_check.py --out outputs/equivalence --formats png,pdf
 
 It MEASURES and does not judge: no pass/fail verdict, always exits 0. One threshold
 cannot serve both uses -- ex1 forces the neurons to agree (so ~1e-07 means the
 translation worked), while the neuron-variation fixture deliberately varies them (so a large deviation
-IS the result). The hard gate on agreement lives in tests/unit_adapters.py and
-tests/unit_shared_net.py instead.
+IS the result).
 
 There is no per-framework code below. Every adapter satisfies the same BaseLIF contract
 (forward one timestep, reset, membrane), so the driver is written once and each framework
@@ -51,33 +48,24 @@ import matplotlib.pyplot as plt  # noqa: E402
 import torch
 
 from frameworks.adapters import ADAPTERS, lif_factory
-from skeleton.cli import add_common_args, build, run_banner
-from skeleton import Settings
-from skeleton.neuron_spec import describe
+from skeleton.config import Settings, describe
 
 TOLERANCE = 1e-6
 REFERENCE = "torch"  # cfg.FRAMEWORK key for snnTorch
 
 
 def parse_args():
-    """--config, --experiment, --results-root, --formats.
-
-    No --framework: this builds ALL four and compares them, so choosing one would
-    defeat the point. No --seed: the only randomness is the poisson pattern, which
-    carries its own fixed seed so every framework receives byte-identical input.
-    No --device: CPU is hardcoded below -- see make_cfg.
-    """
+    """--config, --out, --formats; no --framework or --seed, since all four are built and the input is fixed."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    # --results-root IS offered: this writes FIGURES, and on Colab they have to be able
-    # to land on mounted Drive rather than a /content that disappears with the runtime.
-    # --cache-root is not, because no dataset or cache is touched here.
-    add_common_args(parser, framework=False, seed=False, cache_root=False)
+    parser.add_argument("--config", default=None, metavar="PATH",
+                        help="YAML overlay merged over the three files in configuration/")
+    parser.add_argument("--out", default="outputs/equivalence", metavar="PATH",
+                        help="folder for the figures (default outputs/equivalence)")
     parser.add_argument(
         "--formats", default="png", metavar="LIST",
-        help="figure formats, comma-separated: png (default), pdf, svg. "
-             "e.g. --formats png,pdf -- PDF is vector, for a written report.",
+        help="figure formats, comma-separated: png (default), pdf, svg.",
     )
     return parser.parse_args()
 
@@ -209,14 +197,8 @@ def draw(pattern_name: str, xs: list[float], traces: dict, threshold: float,
 
 def main() -> int:
     args = parse_args()
-    cfg, _wf, info = build(args)
+    cfg = Settings(config_path=args.config)
     make_cfg(cfg)
-    # framework/seed/dataset are omitted ON PURPOSE: this script builds all four
-    # frameworks (reference below), the poisson pattern carries its own fixed seed, and
-    # no dataset is touched. Printing cfg's values for them would state three things
-    # about the run that are not true. `device` stays -- make_cfg really did pin it.
-    print(run_banner("equivalence_check.py", cfg, info, writes_results=False,
-                     omit=("framework", "seed", "dataset")))
 
     print("=" * 78)
     print("NEURON EQUIVALENCE CHECK".center(78))
@@ -229,10 +211,7 @@ def main() -> int:
     for key in sorted(flat):
         print(f"    {key:<{width}} = {flat[key]}")
 
-    # Where the figures go, and in which formats. plots_dir comes from the shared CLI,
-    # so --experiment / --results-root route it the same way they route every other
-    # output -- which is what lets a Colab run put figures on mounted Drive.
-    plots_dir = Path(info["plots_dir"])
+    plots_dir = Path(args.out)
     formats = tuple(f.strip().lstrip(".") for f in args.formats.split(",") if f.strip())
     stamp = datetime.now().isoformat(timespec="seconds")
     written: list[Path] = []
@@ -297,8 +276,6 @@ def main() -> int:
     #        failure -- a gate here would report the finding as an error
     #
     # So this measures and reports; deciding what a deviation means is the reader's.
-    # The agreement property still has a hard gate, in tests/unit_adapters.py and
-    # tests/unit_shared_net.py, which is where CI should look.
     print("\n" + "=" * 78)
     print("MEASURED, NOT JUDGED".center(78))
     print("=" * 78)

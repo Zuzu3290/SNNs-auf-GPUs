@@ -16,8 +16,8 @@ from learning.utilities import (
 )
 logger = logging.getLogger(__name__)
 
-# Neuromorphic SynOps energy constant — see SNN_GPU_Evaluation_Metrics.md §2.4/§4.4
-SYNOPS_ENERGY_PJ_PER_MAC = 4.6
+# A synaptic operation is one addition, 0.9 pJ at 45 nm (Horowitz, ISSCC 2014)
+SYNOPS_ENERGY_PJ = 0.9
 
 
 def aggregate_spike_output(spk_rec: torch.Tensor) -> torch.Tensor:
@@ -140,8 +140,9 @@ class SNNTrainer:
                     synops = synops + rate_t * macs * timesteps
             snapshot = {k: (v.cpu() if v is not None else None) for k, v in recordings.items()}
         finally:
-            # Straight back off before the next epoch's timed loop starts.
-            self.model.activity.pause()
+            # Straight back off before the next epoch's timed loop starts -- unless the activity penalty needs the recordings.
+            if not self.cfg.ACTIVITY_REG_ENABLED:
+                self.model.activity.pause()
             self.model.activity.clear()
         return {"synops": float(synops.item()), "snapshot": snapshot}
 
@@ -277,7 +278,12 @@ class SNNTrainer:
         # Spike recording OFF for every timed region from here on. The hooks retain a
         # tensor per layer per timestep, which is allocator pressure inside the window
         # being timed. measure_activity() turns them back on once per epoch, untimed.
-        self.model.activity.pause()
+        # Exception: activity regularization reads these recordings as its loss term, so they stay on, with their graph.
+        if self.cfg.ACTIVITY_REG_ENABLED:
+            self.model.activity.resume()
+            self.model.activity.keep_graph = True
+        else:
+            self.model.activity.pause()
         if self.warmup["iterations"]:
             print(f"  [WARM-UP] {self.warmup['iterations']} untimed forward+backward passes  "
                   f"(weights unchanged: {self.warmup['weights_unchanged']})")
@@ -488,6 +494,8 @@ class SNNTrainer:
             }
             self.finalize_one_epoch_report(record, epochs, timesteps)
 
+        self.model.activity.keep_graph = False
+        self.model.activity.clear()
         self.pipeline_monitor.stop()
         overall = self.pipeline_monitor.summary()
         if overall.get("avg_gpu_util_pct") is not None:
@@ -501,10 +509,7 @@ class SNNTrainer:
             print(f"  • RAM trend        : {trend['ram_trend']}  ({trend['ram_start_gb']}GB -> {trend['ram_end_gb']}GB)")
 
         self.write_csv(csv_path)
-        # Beside training_results.csv, wherever that went -- NOT the module default.
-        # Called bare, it wrote to ./outputs/data/batch_metrics.csv even on a run whose
-        # --results-root pointed at mounted Drive, so on Colab that one file stayed on
-        # the runtime and vanished with it while every other artefact was saved.
+        # Beside training_results.csv, wherever that went.
         self.write_batch_csv(str(Path(csv_path).parent / "batch_metrics.csv"))
 
         return {
@@ -534,7 +539,7 @@ class SNNTrainer:
         # not an epoch total. It used to be summed over every iteration, which
         # made it scale with iteration count and so not comparable between runs
         # of different length.
-        synops_pj   = record["epoch_synops"] * SYNOPS_ENERGY_PJ_PER_MAC
+        synops_pj   = record["epoch_synops"] * SYNOPS_ENERGY_PJ
 
         # Time-unit free, so always valid. This is the headline spike figure and
         # the one directly comparable with published SNN numbers.

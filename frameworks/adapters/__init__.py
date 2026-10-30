@@ -31,23 +31,14 @@ import importlib
 from typing import Callable
 
 from frameworks.adapters.base import BaseLIF
+from skeleton.config import FW_TO_CFG_KEY as FRAMEWORK_KEYS
 
-# cfg.FRAMEWORK selector -> (module, class). Same keys as FW_TO_CFG_KEY in snn_config.
+# cfg.FRAMEWORK selector -> (module, class). Same keys as FW_TO_CFG_KEY in skeleton/config.py.
 ADAPTERS = {
     "torch":  ("frameworks.adapters.snntorch_lif",     "SnnTorchLIF"),
     "norse":  ("frameworks.adapters.norse_lif",        "NorseLIF"),
     "sj":     ("frameworks.adapters.spikingjelly_lif", "SpikingJellyLIF"),
     "sinabs": ("frameworks.adapters.sinabs_lif",       "SinabsLIF"),
-}
-
-# cfg.FRAMEWORK selector -> the neuron: / neuron_types: key for that framework.
-# Duplicated from skeleton.snn_config.FW_TO_CFG_KEY rather than imported, so that
-# importing an adapter never pulls in Settings and its YAML reads.
-FRAMEWORK_KEYS = {
-    "torch": "snntorch",
-    "norse": "norse",
-    "sj": "spikingjelly",
-    "sinabs": "sinabs",
 }
 
 # The one neuron every framework here can build, and the one the comparison is about.

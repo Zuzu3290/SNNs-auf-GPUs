@@ -33,7 +33,7 @@ from frameworks.adapters import lif_factory
 from frameworks.model_interface import ModelInterface
 from frameworks.spiking_net import build_network
 from learning.utilities import ActivityMonitor, build_loss, build_optimizer
-from skeleton.snn_config import Settings
+from skeleton.config import Settings
 
 
 class SNNModel(ModelInterface, nn.Module):

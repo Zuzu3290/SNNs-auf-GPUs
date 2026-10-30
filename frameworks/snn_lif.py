@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from skeleton.snn_config import Settings
+from skeleton.config import Settings
 from frameworks.model_interface import ModelInterface
 from learning.utilities import ActivityMonitor, sum_over_time_cross_entropy
 

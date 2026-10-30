@@ -253,8 +253,8 @@ class DenseTimestepBuffer:
         # and it stays correct if a pass ever pushes more than once.
         self.sequence = sequence
 
-    def push(self, spk: torch.Tensor) -> None:
-        tensor = spk.detach()
+    def push(self, spk: torch.Tensor, keep_graph: bool = False) -> None:
+        tensor = spk if keep_graph else spk.detach()  # the activity penalty needs the graph; every metric reads a detached copy
         with self.lock:
             self.events.append(tensor)
 
@@ -315,6 +315,7 @@ class ActivityMonitor:
             for name, layer in layer_map.items()
         }
         self.paused = False
+        self.keep_graph = False  # True only while activity regularization trains through the recordings
         for name, layer in layer_map.items():
             layer.register_forward_hook(self.make_hook(name))
 
@@ -323,7 +324,7 @@ class ActivityMonitor:
             if self.paused:
                 return
             spk = output[0] if isinstance(output, tuple) else output
-            self.buffers[name].push(spk)
+            self.buffers[name].push(spk, keep_graph=self.keep_graph)
         return hook
 
     def clear(self) -> None:
@@ -570,7 +571,7 @@ def measure_batch_vram(model_cls, cfg, device, batch_size: int, timesteps: int) 
     after the last one) -- mirrors SNNTrainer's own use_amp/grad_accum_steps
     setup. Returns peak VRAM in GB, or None on OOM.
 
-    timesteps must be the real per-sample frame count (WorkflowSettings.N_TIME_BINS,
+    timesteps must be the real per-sample frame count (cfg.N_TIME_BINS,
     from data_workflow.yaml) -- the actual BPTT unroll length, not a separately
     configured constant.
 
@@ -611,11 +612,10 @@ def calibrate_batch_size(model_cls, cfg, device, timesteps: int, *, data_vram_fr
     """Picks a batch size that fits within data_vram_fraction of total VRAM
     (the policy band's lower edge is resource_policy.batch_vram_band_min in
     data_workflow.yaml; the upper edge is data_vram_fraction itself, since the
-    search never deliberately lands above its own target -- WorkflowSettings
-    is the one place that lower edge is defined; this function only consumes
-    it), instead of the largest one that avoids OOM.
+    search never deliberately lands above its own target), instead of the
+    largest one that avoids OOM.
 
-    timesteps must be the real per-sample frame count (WorkflowSettings.N_TIME_BINS,
+    timesteps must be the real per-sample frame count (cfg.N_TIME_BINS,
     from data_workflow.yaml), passed through to measure_batch_vram so the probe
     matches the actual BPTT unroll length.
 
@@ -705,29 +705,7 @@ def select_inference_mode() -> bool:
 
 
 def measure_activation_density(model, loader, device, max_batches: int = 8) -> dict:
-    """Per-layer activation density, measured the SAME way for a spiking and a non-spiking model.
-
-    THE PROBLEM THIS SOLVES. The existing activity figures come from two places, and
-    neither is fair across the two model types. SNNTester derives its spike rate from
-    `spk_rec.sum()` -- the OUTPUT layer's values, which is a spike count for a LIF
-    readout and a sum of magnitudes for a ReLU one. ActivityMonitor's hooks record each
-    layer's raw output, which is binary for a LIF and continuous for a ReLU. Comparing
-    either across the SNN and the control would be comparing a count against a
-    magnitude, and the control would look absurdly "active" for arithmetic reasons.
-
-    BaseLIF's own counters do not have that problem: a LIF layer records its binary
-    spikes and ReLUActivation records `(output > 0)`, so both accumulate the same
-    quantity -- the fraction of units that emitted anything. That is the honest common
-    ground, and 1 - density is the activation sparsity the efficiency claim rests on.
-
-    Run as its OWN untimed pass, after the timed test, for two reasons: counting costs
-    an extra reduction per layer per timestep and would bias the throughput and latency
-    figures, and the counters must be read on a clean window rather than whatever the
-    test pass happened to leave behind.
-    """
-    # The classification models wrap a SpikingNet in .net; the dense ones (flow,
-    # detection) hold their neuron layers directly and implement the counting contract
-    # themselves. Both are measured here, or neither would be comparable with the other.
+    """Per-layer spike rate on the test set, in its own untimed pass; also fills the layer counters layers.csv reads."""
     net = getattr(model, "net", None) or model
     if not hasattr(net, "set_spike_counting"):
         return {}
@@ -750,11 +728,9 @@ def measure_activation_density(model, loader, device, max_batches: int = 8) -> d
             model.train_mode()
 
     hidden = {name: rate for name, rate in per_layer.items() if name != "lif_out"}
+    # Hidden layers only: the readout's rate is set by the class count, not the representation.
     return {
         "per_layer": per_layer,
-        # Mean over HIDDEN layers only: the readout's density is set by the class count
-        # rather than by the representation, so averaging it in would make a 101-class
-        # row incomparable with an 11-class one.
         "hidden_mean": (sum(hidden.values()) / len(hidden)) if hidden else None,
         "layers_measured": len(per_layer),
     }

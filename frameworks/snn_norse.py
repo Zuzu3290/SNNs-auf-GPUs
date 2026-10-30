@@ -11,7 +11,7 @@ parameters, and `neuron_types.<framework>` for which neuron fills each layer slo
 from __future__ import annotations
 
 from frameworks.snn_model import SNNModel
-from skeleton.snn_config import Settings
+from skeleton.config import Settings
 
 FRAMEWORK = "norse"
 

@@ -1,7 +1,7 @@
 """snnTorch LIF, behind BaseLIF.
 
 Neuron values come from the unified `neuron:` spec in network_architecture.yaml, read
-via skeleton/neuron_spec.py, which raises on a missing key rather than falling back to
+via skeleton/config.py, which raises on a missing key rather than falling back to
 an snnTorch default -- those defaults differ from the other three frameworks, which is
 how the original per-framework config ended up with a 40x spread in firing threshold.
 """
@@ -14,7 +14,7 @@ import torch
 from snntorch import surrogate
 
 from frameworks.adapters.base import BaseLIF, reconcile
-from skeleton.neuron_spec import (
+from skeleton.config import (
     neuron_cfg, require_bool, require_choice, require_float, require_surrogate,
 )
 
