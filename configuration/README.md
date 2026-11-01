@@ -1,25 +1,27 @@
-# Configuration
+# configuration
 
-All tunable parameters for the SNN project live here. No Python file contains hardcoded training values — everything is declared in these three files and read once at startup by `skeleton/snn_config.py` and `event_data_workflow/workflow_config.py`.
-
----
-
-## Files
+Every setting a run uses is in these three files. A missing key raises an error rather than
+falling back to a default.
 
 | File | Controls | Read by |
 |---|---|---|
-| `SNN_module.yaml` | Framework selector, training loop, regularization, per-framework neuron params, dataset and output paths | `skeleton/snn_config.py` → `Settings` |
-| `network_architecture.yaml` | Conv-SNN layer dimensions, neuron type per layer per framework | `skeleton/snn_config.py` → `Settings` |
-| `data_workflow.yaml` | Event framing mode, temporal slicing, cache strategy | `event_data_workflow/workflow_config.py` → `WorkflowSettings` |
+| `SNN_module.yaml` | Framework, training device, inference device, epochs, batch-size calibration, optimiser, learning rate, output paths, checkpoint | `skeleton/config.py` |
+| `network_architecture.yaml` | Convolution blocks, BatchNorm, hidden layers, and each framework's LIF neuron parameters | `skeleton/config.py` |
+| `data_workflow.yaml` | Time bins, denoising, cache strategy, augmentation, DataLoader workers, VRAM target for the batch size | `skeleton/config.py` |
 
----
+## Changing the network or adding a framework
 
-## Typical Workflow
+`network_architecture.yaml` is the file to edit when designing your own network. Under
+`convolution:`, each entry in `blocks` is one convolution → neuron → pooling stage (`out` channels,
+`kernel` size). Add or remove entries to make the network deeper or shallower, list widths in
+`fc_hidden` (e.g. `[256]`) for hidden layers before the output, and set `pool_kernel` (how much each
+stage shrinks the picture), `padding` (zeros added around the edges so the convolution keeps the
+size) and `batch_norm`. The input size and number of outputs come from the dataset, and an
+impossible combination stops the run at startup. Under `neuron:`, each framework has its own block,
+read only by that framework's adapter in `frameworks/`. Change the values to tune a neuron,
+or add a block for a new framework with whatever parameters its library needs. Other frameworks are
+unaffected, and a key the adapter expects but the block lacks stops the run with an error naming
+it. Write a surrogate gradient as a block (`type:` plus its parameters), as the existing frameworks
+do. Adding the framework itself (its file in `frameworks/`, plus one line each in `skeleton/config.py`
+and `skeleton/results_collection.py`) is described step by step in `frameworks/README.md`.
 
-1. Set `training.framework` in `SNN_module.yaml` to `norse`, `torch`, or `sj`.
-2. Adjust the matching `frameworks.<name>` block (threshold, tau, beta).
-3. If needed, change neuron types per layer in `network_architecture.yaml`.
-4. Set framing mode in `data_workflow.yaml` (`n_time_bins` for training, `time_window` for analysis).
-5. Run via `launch.sh` (Linux/Colab) or `launch.bat` (Windows) — no CLI flags needed.
-
-See individual README files in this folder for full parameter documentation.

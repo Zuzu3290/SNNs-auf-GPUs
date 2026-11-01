@@ -1,80 +1,38 @@
-architecture:
-  input_size: 50
-  hidden_size: 50
-  hidden_layers: 5
-  leak: 1.0
-  override: false
-  network_struct: S
-  simulator: ON
-
 training:
-  framework: sj           # YAML selector: norse | torch | sj | sinabs
+  framework: sj
   device: cuda
-  epochs: 2              # one epoch = one full pass over the training set; more epochs = more chances to learn.
-                          # not calibrated -- your call how many repeated passes the model needs.
-  iterations_per_epoch: 400
+
+  seed: 0
+  epochs: 2
   batch_size: 128
-  calibrate_batch_size: true    # true: live GPU probe overrides batch_size above, and iterations_per_epoch
-                                # below is recomputed so one epoch covers (nearly) the whole training set
-                                # (see docs/functions.md).
-                                # false: batch_size and iterations_per_epoch below are used exactly as
-                                # written, no probe run.
-  nap_times: 1
-  learning_rate: 0.001
-  weight_decay: 0.0001
+  iterations_per_epoch: null
+  calibrate_batch_size: true
+  warmup_iterations: 5
 
-  # TRADES robustness training — penalises the network for changing its prediction under input corruption.
-  # Loss = CrossEntropy(clean) + lambda * KL(clean || adversarial).
-  trades_enabled: false          # Enable TRADES during training. Adds ~(trades_steps * 2) forward passes per batch.
+  latency_samples: 100
 
-  trades_epsilon: 0.05          # Perturbation budget: max allowed input corruption per element.
-                                # Range: 0.001 (near-imperceptible) → 0.3 (heavy corruption).
+  optimizer:           # any torch.optim class by name; the other keys are passed to it as they are
+    type: NAdam
+    lr: 0.002
+    weight_decay: 0.0
 
-  trades_lambda: 4.0            # Balances clean accuracy vs robustness. Higher = more robust, lower clean accuracy.
-                                # Range: 1.0 (favour clean accuracy) → 10.0 (favour robustness).
+  loss: cross_entropy  # cross_entropy | mse_count (snnTorch's own loss, not neutral across frameworks)
 
-  trades_steps: 3              # PGD iterations used to find worst-case input per batch. Recommended: 10 for training.
-                                # Range: 1 (fast, weaker adversarial) → 40 (slow, strongest adversarial).
+  lr_scheduler: cosine
 
-  activity_reg_enabled: true   # Two-sided per-neuron activity regularization on hidden LIF layers.
-  activity_reg_min_rate: 0.01   # Penalize neurons firing less than 1% of timesteps  (dead neuron prevention).
-  activity_reg_max_rate: 0.50   # Penalize neurons firing more than 50% of timesteps (saturation prevention).
-  activity_reg_lambda_low: 0.1  # Penalty weight for dead neurons.
-  activity_reg_lambda_high: 0.1 # Penalty weight for saturated neurons.
+  use_amp: false
+  grad_accum_steps: 1
 
-  enable_pipeline_monitor: true  # Background CPU/GPU utilization sampler (utilization, power, clock,
-                                # sustained-idle warnings). Diagnostic only — set false to disable.
+  activity_reg_enabled: false
+  activity_reg_min_rate: 0.01
+  activity_reg_max_rate: 0.50
+  activity_reg_lambda_low: 0.1
+  activity_reg_lambda_high: 0.1
+
+inference:
+  device: null
 
 output:
-  output_dir: ./outputs
   plot_dir: ./outputs/plots
   data_dir: ./outputs/data
-
-# Per-framework neuron / optimiser / loss params.
-# threshold=0.5: SNNTorch amplifies input 20x (V_eq=20I), Norse/SpikingJelly do not (V_eq=I).
-# threshold=1.0 kills Norse (dead neurons, confirmed EXP-004). 0.5 is a safe neutral starting point.
-frameworks:
-  snntorch:
-    beta:       0.95
-    threshold:  0.5
-    optimizer:  adam
-    loss_fn:    cross_entropy
-
-  norse:
-    tau_mem_inv: 100.0
-    threshold:   1.0
-    optimizer:   adam
-    loss_fn:     cross_entropy
-
-  spikingjelly:
-    tau:         2.0
-    threshold:   0.5
-    optimizer:   adam
-    loss_fn:     cross_entropy
-
-  sinabs:
-    tau_mem:     20.0
-    threshold:   0.5
-    optimizer:   adam
-    loss_fn:     cross_entropy
-
+  save_checkpoint: true

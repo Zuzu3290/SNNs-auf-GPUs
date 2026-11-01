@@ -1,34 +1,59 @@
 convolution:
-  sensor_h:     34
-  sensor_w:     34
-  in_channels:  2
-  conv1_out:    12
-  conv1_kernel: 5
-  conv2_out:    32
-  conv2_kernel: 5
+  blocks:
+    - out:    12
+      kernel: 5
+    - out:    32
+      kernel: 5
   pool_kernel:  2
+  padding:      0
+  fc_hidden:    null
+  batch_norm:   false
 
-neuron_types:
+neuron:
   snntorch:
-    lif1:    leaky        # alpha | leaky
-    lif2:    leaky        # alpha | leaky
-    lif_out: leaky        # alpha | leaky
-  norse:
-    lif1:    lif_cell     # lif_cell | lif_rec_cell
-    lif2:    lif_cell     # lif_cell | lif_rec_cell
-    lif_out: lif_cell     # lif_cell | lif_rec_cell
-  spikingjelly:
-    lif1:    lif   # izhikevich | lif
-    lif2:    lif   # izhikevich | lif
-    lif_out: lif   # izhikevich | lif
-  sinabs:
-    lif1:    lif          # lif | iaf
-    lif2:    lif          # lif | iaf
-    lif_out: lif          # lif | iaf
-  spyx:
-    lif1:    lif          # lif | alif
-    lif2:    lif          # lif | alif
-    lif_out: lif          # lif | alif
+    beta: 0.9
+    threshold: 1.0
+    reset_mechanism: zero
+    reset_delay: false
+    surrogate:
+      type: atan
+      alpha: 2.0
 
-# Future: pure_snn:
-#   hidden_layers: [256, 128]
+  spikingjelly:
+    tau: 10.0
+    decay_input: false
+    v_threshold: 1.0
+    v_reset: 0.0
+    detach_reset: false
+    step_mode: s
+    backend: torch
+    surrogate:
+      type: atan
+      alpha: 2.0
+
+  norse:
+    dt: 0.001
+    tau_mem_inv: 100.0
+    v_th: 1.0
+    v_reset: 0.0
+    v_leak: 0.0
+    reset_method: value
+    input_scale: 10.0
+    surrogate:
+      type: circ
+      alpha: 0.5
+
+  sinabs:
+    tau_mem: 9.491221581029905
+    tau_syn: null
+    norm_input: false
+    spike_threshold: 1.0
+    spike_fn: single
+    reset_mechanism: zero
+    v_reset: 0.0
+    min_v_mem: null
+    train_alphas: false
+    surrogate:
+      type: single_exponential
+      grad_width: 0.5
+      grad_scale: 1.0

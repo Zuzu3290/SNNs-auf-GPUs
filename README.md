@@ -1,147 +1,64 @@
 # SNNs-auf-GPUs
 
-A research platform for running Spiking Neural Networks on GPU hardware.
-Trains and compares SNN framework backends on real event-camera datasets,
-measuring runtime, scalability, and accuracy.
+A pipeline for training and evaluating spiking neural networks (SNNs) on event-camera data on a GPU.
+Four PyTorch-based SNN frameworks — snnTorch, SpikingJelly, Norse and Sinabs — share one network,
+one data path and one measurement layer, so that the neuron implementation is the only thing that
+changes between runs.
 
-The output layer for any application that includes supervised classification come swith a preset number regaridng the number of classes that model will classify which is the ideal number of output neurons the output layers requires.
-
-number of classes in a dataset = number of output neurons 
-
----
-
-## What This Is
-
-Neuromorphic computing on commodity GPUs. The project bridges event-based
-sensor data (DVS / DAVIS cameras) with SNN training frameworks.
-
-| Location | Role |
-|----------|------|
-| `learning/`, `event_data_workflow/`, `skeleton/` | Training loop, framework wrappers, data pipeline, configuration |
-
-`SNNTrainer`/`SNNTester` run the plain per-framework PyTorch path.
-
----
-
-## Project Layout
+## Project layout
 
 ```
-learning/           SNN framework wrappers — SNNTorch, Norse, SpikingJelly, Sinabs
-skeleton/           Configuration and settings (SNN_module.yaml)
-event_data_workflow/ Neuromorphic data pipeline — caching, slicing, DataLoader
-docs/               Architecture references and hardware notes
+configuration/        The three YAML files every run reads (see configuration/README.md)
+event_data_workflow/  Event data: dataset registry, denoising, framing, caching, DataLoaders, resource monitor
+frameworks/           The shared spiking network and one LIF adapter per framework
+learning/             Entry point, training loop, testing, metrics
+skeleton/             Settings, config loading and validation, seeding, results files
+docs/                 Background notes, design records and earlier reports
 ```
 
----
-
-## Entry Point
+## Running
 
 ```
 python learning/main.py
 ```
 
-Reads `SNN_module.yaml`, loads the neuromorphic dataset via
-`event_data_workflow`, builds the SNN model, runs training, then evaluation.
+`learning/main.py` asks for the dataset and the inference device, prints the configuration and the network layer by layer, calibrates the batch size to the GPU, trains, tests and
+writes the results. Installation, options and the Colab setup are in [HOW_TO_RUN.md](HOW_TO_RUN.md).
 
----
+## Datasets
 
-## Configuration
+Three classification datasets train end to end: N-MNIST, N-Caltech101 and DVS128 Gesture. The
+registry in `event_data_workflow/dataset_registry.py` also holds loaders for two regression datasets,
+DAVIS Camera Pose and Eye Tracking, which the pipeline does not train. A new classification dataset
+only needs a registry entry with its tonic class, sensor size and number of classes; input size,
+output layer and batch size follow automatically.
+Events must be available as `(x, y, t, p)`: pixel column, pixel row, timestamp, polarity.
 
-All runtime parameters live in `SNN_module.yaml` at the project root:
-architecture, training schedule, dataset path, device, and data pipeline
-settings. No hardcoded values in source files.
+## Frameworks
 
----
+| Framework | Selected with | Neuron adapter |
+|---|---|---|
+| snnTorch | `torch` | `frameworks/snntorch_lif.py` |
+| SpikingJelly | `sj` | `frameworks/spikingjelly_lif.py` |
+| Norse | `norse` | `frameworks/norse_lif.py` |
+| Sinabs | `sinabs` | `frameworks/sinabs_lif.py` |
 
-## Framework Backends
+The framework is set by `training.framework` in `configuration/SNN_module.yaml` or `--framework`.
+Each framework's neuron parameters live in `configuration/network_architecture.yaml`.
 
-The trainer and inference pipeline are framework-agnostic at the model boundary.
-Any model that satisfies the `ModelInterface` contract can be plugged in — the
-pipeline does not care what runs inside.
+## Adding a framework
 
-| Backend | Status | Notes |
-|---------|--------|-------|
-| SNNTorch | Working | |
-| Norse | Working | Current default in `main.py` |
-| SpikingJelly | Working | |
-| Sinabs | Working | DVS-first, batch-first tensors |
+Only the spiking neuron changes between frameworks; the network, training, data path and measurements are
+shared. To add an SNN library, a different neuron from a library already here, or a neuron you write
+yourself, add one file with a class `Neuron` to `frameworks/`, give it a name in the config, and run it
+with `--framework <name>`. The step-by-step guide, with a template, is in
+[frameworks/README.md](frameworks/README.md).
 
-`ModelInterface` is PyTorch-only — every backend trains via standard PyTorch
-autograd (`loss.backward()` + `optimizer.step()`). Other backends were
-explored and later dropped rather than kept as extension points; see
-[`docs/frameworks/additional_frameworks.md`](docs/frameworks/additional_frameworks.md).
+## What is measured
 
-For details on how each backend cooperates with the training loop, backward pass,
-and adversarial evaluation, see [`docs/frameworks/`](docs/frameworks/).
-
----
-
-## Current Capabilities
-
-- Four SNN backends: SNNTorch, Norse, SpikingJelly, Sinabs — switchable via config
-- Five event-camera datasets, selectable from the terminal at runtime — see
-  `event_data_workflow/dataset_registry.py`'s `DATASET_REGISTRY`
-- Adaptive data pipeline: selects memory, disk, hybrid, or GPU-VRAM cache
-  strategy automatically based on available system resources
-- Activity regularization as a differentiable loss term alongside BPTT
-- Adversarial robustness evaluation via TRADES
-
----
-
-## Adding a New Dataset
-
-If your dataset is already available as events encoded in the standard
-`(x, y, t, p)` format, wiring it in only takes one edit — no other file
-needs to change.
-
-**What `(x, y, t, p)` means** — one row per event, four fields:
-
-| Field | Meaning |
-|-------|---------|
-| `x` | Horizontal pixel position (column) that triggered the event, `0` to `sensor_width - 1` |
-| `y` | Vertical pixel position (row) that triggered the event, `0` to `sensor_height - 1` |
-| `t` | Timestamp of the event (when it happened), typically in microseconds since the recording started |
-| `p` | Polarity — the direction of the brightness change that triggered the event: `1` (ON) if the pixel got brighter, `0` (OFF) if it got darker |
-
-**The template**: open `event_data_workflow/data_pipeline.py` and add an
-entry to `DATASET_REGISTRY` (a plain Python dict, currently entries `"1"`
-through `"5"`):
-
-```python
-"6": {
-    "name": "YourDatasetName",
-    "category": "classification",             # or "regression"
-    "cls": your_tonic_or_custom_dataset_class, # must yield (events, target) per sample
-    "has_train_split": True,                   # False if the dataset needs an 80/20 split done for you
-    "sensor_size": (width, height, 2),         # 2 = polarity channels (ON/OFF)
-    "num_classes": <int>,                      # how many classes this dataset labels
-},
-```
-
-That's the whole integration point: `num_classes` here is automatically wired to the model's output layer for every framework. the number of output neurons always matches the
-number of classes, with nothing else to configure by hand. If your dataset
-doesn't fit the plain `cls(save_to=..., train=...)` constructor pattern
-(e.g. it needs a custom loader function), see the `"5"` (DSEC) entry for
-the `"loader"` alternative.
-
-if you dont have a neuromorphic dataset than review the working mechnaism of the tonic library and its wrapper. A discussion with Claude will be more convienent. 
----
-
-## Growing Analytics
-
-Diagnostic benchmark runs across framework backends are ongoing, with results
-and plots accumulating per-dataset in [`docs/results/`](docs/results/)
-(`docs/results/plots/<dataset>/`). Latest snapshot (N-MNIST):
-
-| Training Accuracy | Actual GPU Energy (Training) |
-|---|---|
-| ![accuracy curves](docs/results/plots/n_mnist/accuracy_curves.png) | ![training energy](docs/results/plots/n_mnist/train_energy.png) |
-
-| Spike Rate | Inference Latency per Sample |
-|---|---|
-| ![spike rate curves](docs/results/plots/n_mnist/spike_rate_curves.png) | ![test latency](docs/results/plots/n_mnist/test_latency.png) |
-
-See [`docs/results/README.md`](docs/results/README.md) for the full results
-table, all plots, caveats on what this run does and doesn't measure, and the
-real bugs this benchmarking work has already found and fixed.
-
+Every run records test accuracy, spike rates (training, test and per layer),
+single-sample latency, throughput, training forward/backward time, peak GPU memory, GPU energy from
+NVML, and the synaptic operations (SynOps) per inference.
+The synaptic-operation energy columns are an estimate for neuromorphic hardware, not a measurement
+on a chip: SynOps × 0.9 pJ, the energy of one addition at 45 nm (Horowitz, ISSCC 2014;
+`SYNOPS_ENERGY_PJ` in `learning/utilities.py`).

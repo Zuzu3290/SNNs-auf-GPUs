@@ -1,51 +1,15 @@
-"""
-Picks a caching strategy (RAM or disk) for neuromorphic recordings based on
-live system resources, and provides the cache classes that back each
-strategy.
-
-Hardware topology is fixed and singular: data loading/caching always runs
-on CPU, training always runs on GPU. This controller does not choose
-between hardware configurations — it only chooses where one dataset's
-cache lives (RAM or disk). VRAM is intentionally never a cache
-storage target: it is reserved for the model's own parameters,
-activations, and gradients during training.
-"""
+"""Caches the framed samples in RAM or on disk, whichever the free resources allow, so framing runs once; VRAM is never used for the cache."""
 from __future__ import annotations
-import sys
 import logging
 import shutil
 from pathlib import Path
-from typing import Optional
 import torch
 from torch.utils.data import Dataset
+import tonic.transforms as transforms
 from tonic import DiskCachedDataset, MemoryCachedDataset
-from .system_monitor import monitor, is_gpu_under_pressure, GPU_PRESSURE_THRESHOLD
+from .system_monitor import monitor
 
 logger = logging.getLogger(__name__)
-
-
-def measure_event_bytes(events) -> int:
-    """Byte size of one sample, for cache byte-budget accounting."""
-    if hasattr(events, "nbytes"):
-        return events.nbytes
-    if hasattr(events, "element_size"):
-        return events.element_size() * events.numel()
-    return sys.getsizeof(events)
-
-
-class ComposedTransform:
-    """Picklable stand-in for a closure — Windows' spawn-based multiprocessing
-    can't pickle nested functions (only importable module-level classes/functions),
-    which broke DataLoader workers (num_workers > 0) the moment a DiskCachedDataset
-    holding a closure-based transform got sent to a worker process."""
-    def __init__(self, fns):
-        self.fns = fns
-
-    def __call__(self, x):
-        for f in self.fns:
-            x = f(x)
-        return x
-
 
 class FixedToFrame:
     """Wraps tonic's ToFrame: its empty-input zero-fill branch returns (T,C,W,H), swapped vs its real (T,C,H,W) output -- breaks batching on non-square sensors."""
@@ -59,13 +23,7 @@ class FixedToFrame:
 
 
 class PreTransformedDataset(Dataset):
-    """Applies a deterministic transform once, inside __getitem__, so that a
-    wrapping MemoryCachedDataset/DiskCachedDataset caches the POST-transform
-    result rather than the raw sample. Without this, tonic's cache classes
-    only skip re-fetching the raw item on a cache hit — they unconditionally
-    re-run their own `transform` argument on every single access (cache hit
-    or miss), which defeats caching entirely for an expensive deterministic
-    transform like Denoise+ToFrame."""
+    """Frames each recording once in __getitem__, so the cache wrapped around it stores frames, not raw events."""
 
     def __init__(self, dataset: Dataset, transform):
         self.dataset = dataset
@@ -79,73 +37,44 @@ class PreTransformedDataset(Dataset):
         return len(self.dataset)
 
 
-def compose_transforms(*fns):
-    """Chain callables left to right, skipping any that are None."""
-    fns = [f for f in fns if f is not None]
-    if not fns:
-        return None
-    if len(fns) == 1:
-        return fns[0]
-    return ComposedTransform(fns)
+def cache_folder_name(wf, denoise_filter_time_us) -> str:
+    """Cache folder name spelling out every setting that changes the cached frames, e.g. bins16_dn10000, so other settings never reuse them."""
+    name = f"bins{wf.N_TIME_BINS}" if wf.FRAME_MODE == "n_time_bins" else f"win{wf.TIME_WINDOW_US}"
+    name += f"_dn{denoise_filter_time_us}"
+    if wf.TEMPORAL_SLICING_ENABLED:
+        name += f"_slice{wf.SLICE_DURATION_US}_ov{wf.SLICE_OVERLAP_US}"
+    return name
 
 
 class AdaptiveCacheController:
-    """Probes live RAM/disk and picks memory or disk caching for a
-    dataset — whichever tier actually fits. VRAM is never a cache target:
-    the GPU is only ever the training device, never a dataset storage
-    location."""
+    """Probes live RAM/disk and picks memory or disk caching for a dataset — whichever tier actually fits. VRAM is never a cache target:
+    the GPU is only ever the training device, never a dataset storage location."""
 
-    def __init__(self, cache_path: str = "./cache", memory_safety_margin_gb: float = 2.0, memory_cache_threshold_gb: float = 6.0,
-                 gpu_pressure_threshold: float = GPU_PRESSURE_THRESHOLD, memory_tier_headroom_fraction: float = 0.7,
-                 disk_tier_headroom_multiple: float = 1.2):
+    def __init__(self, cache_path: str, memory_safety_margin_gb: float, memory_cache_threshold_gb: float,
+                 memory_tier_headroom_fraction: float, disk_tier_headroom_multiple: float):
         self.cache_path = Path(cache_path)
         self.memory_safety_margin = memory_safety_margin_gb
         self.memory_threshold = memory_cache_threshold_gb
-        self.gpu_pressure_threshold = gpu_pressure_threshold
         self.memory_tier_headroom_fraction = memory_tier_headroom_fraction
         self.disk_tier_headroom_multiple = disk_tier_headroom_multiple
         self.cache_path.mkdir(parents=True, exist_ok=True)
 
     def estimate_dataset_memory_footprint(self, dataset: Dataset, transform=None, num_samples_to_probe: int = 10) -> float:
-        """Estimate total dataset size in GB by sampling a few items, measuring
-        the POST-transform size when a deterministic transform is given.
-        Memory mode caches PreTransformedDataset's output (the
-        already-ToFrame'd dense array), not the raw sparse event stream —
-        measuring the raw sample here would price a few dozen bytes per
-        event and silently undercount what actually ends up resident in RAM
-        once the dense per-bin frames are what's held."""
+        """Dataset size in GB from a few sampled items, measured after framing, since the cache holds frames, not the much smaller raw events."""
         sample_indices = torch.randperm(len(dataset))[:min(num_samples_to_probe, len(dataset))]
         total_bytes = 0
-        successful_probes = 0
 
         for idx in sample_indices:
-            try:
-                events, _ = dataset[int(idx)]
-                if transform is not None:
-                    events = transform(events)
-                total_bytes += measure_event_bytes(events)
-                successful_probes += 1
-            except Exception as e:
-                logger.warning(f"[CACHE CONTROLLER] Could not probe sample {idx}: {e}")
-                continue
+            events, _ = dataset[int(idx)]
+            if transform is not None:
+                events = transform(events)
+            total_bytes += events.nbytes
 
-        if successful_probes == 0:
-            logger.warning("[CACHE CONTROLLER] All probes failed — assuming dataset size is 0")
-            return 0.0
-
-        return (total_bytes / successful_probes * len(dataset)) / (1024 ** 3)
+        return (total_bytes / len(sample_indices) * len(dataset)) / (1024 ** 3)
 
     def determine_dataset_strategy(self, dataset: Dataset, transform=None, live_transform=None, split: str = "train", num_workers: int = 1) -> Dataset:
         """Picks a cache tier from live resources and wraps dataset in it; num_workers prices in that MemoryCachedDataset's per-instance dict gets duplicated once per DataLoader worker process."""
-        if hasattr(dataset, "slice_map"):
-            raise ValueError(
-                "determine_dataset_strategy() received an already-sliced dataset. "
-                "Cache must be applied to raw recordings BEFORE slicing — "
-                "use: cached_raw = determine_dataset_strategy(raw_dataset); "
-                "sliced = create_sliced_dataset(cached_raw, ...)  (event_data_workflow/data_pipeline.py)"
-            )
-
-        metrics             = monitor.snapshot()
+        metrics            = monitor.snapshot()
         dataset_size_gb     = self.estimate_dataset_memory_footprint(dataset, transform=transform)
         available_for_cache = metrics.available_ram_gb - self.memory_safety_margin
         effective_size_gb   = dataset_size_gb * max(1, num_workers)  # MemoryCachedDataset's per-instance dict gets duplicated once per DataLoader worker process
@@ -153,17 +82,10 @@ class AdaptiveCacheController:
         cache_dir = self.cache_path / split
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        if is_gpu_under_pressure(metrics, threshold=self.gpu_pressure_threshold) and metrics.disk_exists:
-            # A busy GPU means CUDA's pinned-memory allocator is competing
-            # for the same physical RAM a memory cache would use —
-            # disk sidesteps that contention entirely.
-            mode = "disk"
-        elif available_for_cache >= self.memory_threshold and effective_size_gb < available_for_cache * self.memory_tier_headroom_fraction:
+        if available_for_cache >= self.memory_threshold and effective_size_gb < available_for_cache * self.memory_tier_headroom_fraction:
             mode = "memory"
-        elif metrics.disk_exists and metrics.disk_available_gb > dataset_size_gb * self.disk_tier_headroom_multiple:
-            # Only two tiers exist (memory, disk): a bounded RAM hot layer on
-            # top of disk has no measurable benefit here, since training
-            # reshuffles every epoch — see System_Boundaries_and_Tuning.md.
+        elif metrics.disk_available_gb > dataset_size_gb * self.disk_tier_headroom_multiple:
+            # No RAM hot layer over disk: training reshuffles every epoch, so it would not help.
             mode = "disk"
         else:
             raise RuntimeError(
@@ -173,22 +95,18 @@ class AdaptiveCacheController:
 
         logger.info(f"[CACHE CONTROLLER] {split.upper()} -> {mode.upper()} ({available_for_cache:.1f}GB RAM free, dataset ~{dataset_size_gb:.1f}GB x {num_workers} workers = {effective_size_gb:.1f}GB effective)")
 
-        # Only insert the numpy→tensor bridge ahead of live_transform when
-        # there actually is one, to match the exact pipeline used when
-        # augmentation is present.
-        numpy_bridge = torch.from_numpy if live_transform is not None else None
+        # live_transform (augmentation) runs after the cache on every access, on a tensor rather than the cached numpy frame.
+        after_cache = transforms.Compose([torch.from_numpy, live_transform]) if live_transform is not None else None
 
         pre_transformed = PreTransformedDataset(dataset, transform) if transform is not None else dataset
 
         if mode == "memory":
-            return MemoryCachedDataset(pre_transformed, transform=compose_transforms(numpy_bridge, live_transform))
+            return MemoryCachedDataset(pre_transformed, transform=after_cache)
 
-        # "disk": the already-transformed dense frame, cached permanently —
-        # the expensive part (measured ~136ms/sample: fetch + Denoise +
-        # ToFrame) paid once per sample, ever, not once per epoch.
-        return DiskCachedDataset(pre_transformed, transform=compose_transforms(numpy_bridge, live_transform), cache_path=str(cache_dir / "disk"), compress=False)
+        # Disk: the framed sample (fetch + Denoise + ToFrame, ~136 ms) is paid once ever, not once per epoch.
+        return DiskCachedDataset(pre_transformed, transform=after_cache, cache_path=str(cache_dir / "disk"), compress=False)
 
-    def clear_cache(self, split: Optional[str] = None):
+    def clear_cache(self, split=None):
         """Delete the disk cache for one split, or all splits if none is given."""
         if split:
             cache_dir = self.cache_path / split

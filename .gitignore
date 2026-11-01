@@ -1,63 +1,33 @@
-# Dependencies
-node_modules/
-npm-debug.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Production
-dist/
-build/
-
-# Environment
-.env
-.env.local
-.env.*.local
-.venv/
-venv/
-
-# Python bytecode
+# Python
 __pycache__/
 *.pyc
 *.pyo
 
-# IDE
+# Environments
+.env
+.env.*
+.venv/
+venv/
+
+# Editors and OS
 .vscode/
 .idea/
 *.swp
-*.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
 
-# data
-data/
-notes.txt
-
-# Python
-venv/
-.venv/
-__pycache__/
-*.pyc
-
-# ML Results & Models
-checkpoints/
-outputs/
-*.pth
-*.pt
-*.csv
-
-# Data
+# Downloaded datasets and framed-sample cache
 tmp/
 cache/
+data/
+
+# Run results, plots and checkpoints
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.csv
+
+# Local notes
 notes.txt
-
-# Personal/local-only work — not shared with collaborators
-# src/learning/frameworks/personal/
-/diagnostics
-/comparison
-scalability.md
-frameworks/regression/
-

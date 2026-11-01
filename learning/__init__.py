@@ -1,4 +1,1 @@
-from .inference import SNNTester
-from .training import SNNTrainer
-
-__all__ = ['SNNTester', 'SNNTrainer']
+"""Training, testing and measurement; the entry point is learning/main.py."""
