@@ -1,7 +1,6 @@
 """
-Builds train/test DataLoaders for neuromorphic event datasets: load raw
-recordings, cache them via AdaptiveCacheController, optionally slice into
-temporal windows, then wrap in DataLoaders.
+Builds train/test DataLoaders for neuromorphic event datasets: load raw recordings, cache them via AdaptiveCacheController, 
+optionally slice into temporal windows, then wrap in DataLoaders.
 """
 from __future__ import annotations
 import inspect
@@ -11,6 +10,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR     = PROJECT_ROOT / "tmp" / "data"
 logger = logging.getLogger(__name__)
+import numpy as np
 import psutil
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -18,24 +18,11 @@ import tonic
 import tonic.transforms as transforms
 import tonic.slicers as slicers
 import tqdm as t
-from typing import Protocol
-
 from skeleton.seeding import split_generator
 from .system_monitor import monitor
-from .cache_engine import (
-    AdaptiveCacheController, ComposedTransform, FixedToFrame,
-    cache_identity, measure_event_bytes,
-)
+from torchvision.transforms import v2
+from .cache_engine import AdaptiveCacheController, FixedToFrame, cache_folder_name
 from .dataset_registry import resolve_dataset_entry
-
-
-class DatasetAwareConfig(Protocol):
-    """Narrow structural contract this module needs from Settings, not the whole object."""
-    DEVICE: str
-    DATASET_NAME: str
-    BATCH_SIZE: int
-
-    def apply_dataset_shape(self, sensor_h: int, sensor_w: int, in_channels: int, num_classes: int) -> None: ...
 
 
 class RawDatasets:
@@ -58,19 +45,9 @@ class RawDatasets:
             dataset.target_transform = mapper
 
 
-def create_sliced_dataset(
-    dataset: Dataset,
-    slice_duration_ms: float = 15.0,
-    overlap_ms: float = 0.0,
-    transform=None,
-    metadata_path=None,
-) -> tonic.SlicedDataset:
-    """Wrap dataset with tonic's SlicedDataset. metadata_path, if given,
-    stores the slice index as HDF5 so it isn't rebuilt on later runs."""
-    slicer = slicers.SliceByTime(
-        time_window=slice_duration_ms * 1000,
-        overlap=overlap_ms * 1000,
-    )
+def create_sliced_dataset(dataset: Dataset, slice_duration_us, overlap_us, transform, metadata_path) -> tonic.SlicedDataset:
+    """Wrap dataset with tonic's SlicedDataset; metadata_path stores the slice index as HDF5 so later runs reuse it."""
+    slicer = slicers.SliceByTime(time_window=slice_duration_us, overlap=overlap_us)
 
     return tonic.SlicedDataset(dataset, slicer=slicer, transform=transform, metadata_path=metadata_path)
 
@@ -103,9 +80,10 @@ class DeviceLoader:
 class NeuromorphicEncoder:
     """Loads a dataset, caches it, and builds the train/test DataLoaders used by training."""
 
-    def __init__(self, cfg: DatasetAwareConfig, use_temporal_slicing=None, slice_duration_ms=None):
+    def __init__(self, cfg, dataset_entry: dict, use_temporal_slicing=None, slice_duration_ms=None):
 
         self.cfg = cfg
+        self.dataset_entry = dataset_entry  # resolved once by the caller, from dataset_registry
 
         cuda_enabled = torch.device(cfg.DEVICE).type == "cuda"
         monitor.configure(cache_path=self.cfg.CACHE_PATH, cuda_enabled=cuda_enabled)
@@ -129,14 +107,9 @@ class NeuromorphicEncoder:
         train_data, test_data = self.apply_pipeline(raw_train, raw_test, frame_tf)
         self.create_loaders(train_data, test_data)
 
-    def select_dataset(self) -> dict:
-        """See module-level resolve_dataset_entry — kept as a method for callers that
-        already have a NeuromorphicEncoder instance."""
-        return resolve_dataset_entry(self.cfg)
-
     def load_raw(self):
         """Load the raw dataset (no transform, no cache yet) and build the frame transform for it."""
-        entry = self.select_dataset()
+        entry = self.dataset_entry
         sensor_size = entry["sensor_size"]
         # tonic datasets that ship a train/test split take a `train` argument; the rest are split 80/20 here.
         if "train" in inspect.signature(entry["cls"]).parameters:
@@ -152,11 +125,6 @@ class NeuromorphicEncoder:
                 generator=split_generator(getattr(self.cfg, "SEED", 0)),
             )
         self.dataset_label = entry["name"]
-        self.cfg.apply_dataset_shape(
-            sensor_h=sensor_size[1], sensor_w=sensor_size[0],
-            in_channels=sensor_size[2], num_classes=entry["num_classes"],
-        )
-
         self.sensor_size = sensor_size
         W, H, C = sensor_size
         logger.info(f"[PIPELINE] Dataset : {self.dataset_label}  |  Sensor H={H} W={W} C={C}")
@@ -169,8 +137,8 @@ class NeuromorphicEncoder:
 
         if entry.get("input") == "frames":
             self.denoise_filter_time_us = self.cfg.DENOISE_FILTER_TIME_US
-            frame_tf = ComposedTransform([])
-            self.batch_sample_bytes = measure_event_bytes(frame_tf(raw_train[0][0]))
+            frame_tf = transforms.Compose([])
+            self.batch_sample_bytes = frame_tf(raw_train[0][0]).nbytes
             logger.info("[PIPELINE] Frame input -- denoise and binning skipped")
             return raw_train, raw_test, frame_tf
 
@@ -180,10 +148,10 @@ class NeuromorphicEncoder:
             to_frame = transforms.ToFrame(sensor_size=sensor_size, n_time_bins=self.cfg.N_TIME_BINS)
         else:
             to_frame = transforms.ToFrame(sensor_size=sensor_size, time_window=self.cfg.TIME_WINDOW_US)
-        frame_tf = ComposedTransform([denoise, FixedToFrame(to_frame)])
+        frame_tf = transforms.Compose([denoise, FixedToFrame(to_frame)])
 
         first_frame = frame_tf(raw_train[0][0])
-        self.batch_sample_bytes = measure_event_bytes(first_frame)
+        self.batch_sample_bytes = first_frame.nbytes
 
         return raw_train, raw_test, frame_tf
 
@@ -193,7 +161,6 @@ class NeuromorphicEncoder:
             cache_path=self.cfg.CACHE_PATH,
             memory_safety_margin_gb=self.cfg.MEMORY_SAFETY_MARGIN_GB,
             memory_cache_threshold_gb=self.cfg.MEMORY_CACHE_THRESHOLD_GB,
-            gpu_pressure_threshold=self.cfg.GPU_PRESSURE_THRESHOLD,
             memory_tier_headroom_fraction=self.cfg.MEMORY_TIER_HEADROOM_FRACTION,
             disk_tier_headroom_multiple=self.cfg.DISK_TIER_HEADROOM_MULTIPLE,
         )
@@ -201,47 +168,37 @@ class NeuromorphicEncoder:
 
         worker_estimate, _, _ = monitor.worker_count(
             torch.device(self.cfg.DEVICE), safety_margin_gb=self.cfg.MEMORY_SAFETY_MARGIN_GB,
-            worker_count_override=self.cfg.worker_count_override,
+            worker_count_override=self.cfg.WORKER_COUNT,
         )
         worker_estimate = max(1, worker_estimate)
 
-        train_tf = transforms.Compose([frame_tf, torch.from_numpy])
+        augment = v2.RandomRotation(self.cfg.AUGMENT_ROTATION_DEG) if self.cfg.AUGMENT_ENABLED else None
+        train_tf = transforms.Compose([frame_tf, torch.from_numpy] + ([augment] if augment else []))
         test_tf = frame_tf
 
-        identity_dir, self.cache_manifest = cache_identity(self.cfg, self.denoise_filter_time_us)
-        dataset_prefix = f'{self.dataset_label.replace(" ", "_")}/{identity_dir}'
-        logger.info(f"[PIPELINE] Cache identity: {dataset_prefix}")
+        dataset_prefix = f'{self.dataset_label.replace(" ", "_")}/{cache_folder_name(self.cfg, self.denoise_filter_time_us)}'
+        logger.info(f"[PIPELINE] Cache folder: {dataset_prefix}")
 
         if self.use_temporal_slicing:
 
-            cached_train = controller.determine_dataset_strategy(raw_train, split=f"{dataset_prefix}/train", num_workers=worker_estimate, manifest=self.cache_manifest)
-            cached_test  = controller.determine_dataset_strategy(raw_test,  split=f"{dataset_prefix}/test", num_workers=worker_estimate, manifest=self.cache_manifest)
+            cached_train = controller.determine_dataset_strategy(raw_train, split=f"{dataset_prefix}/train", num_workers=worker_estimate)
+            cached_test  = controller.determine_dataset_strategy(raw_test,  split=f"{dataset_prefix}/test", num_workers=worker_estimate)
 
             metadata_dir = str(PROJECT_ROOT / "metadata" / dataset_prefix)
-            train_data = create_sliced_dataset(cached_train,
-                slice_duration_ms=self.slice_duration_ms, transform=train_tf,
-                metadata_path=f"{metadata_dir}/train",
-            )
-            test_data = create_sliced_dataset(cached_test,
-                slice_duration_ms=self.slice_duration_ms, transform=test_tf,
-                metadata_path=f"{metadata_dir}/test",
-            )
+            train_data = create_sliced_dataset(cached_train, self.slice_duration_ms * 1000, self.cfg.SLICE_OVERLAP_US,
+                                               train_tf, f"{metadata_dir}/train")
+            test_data = create_sliced_dataset(cached_test, self.slice_duration_ms * 1000, self.cfg.SLICE_OVERLAP_US,
+                                              test_tf, f"{metadata_dir}/test")
             logger.info(f"[PIPELINE] After slicing — train: {len(train_data)}, test: {len(test_data)}")
             if len(train_data) == 0 or len(test_data) == 0:
                 raise RuntimeError(
                     f"[PIPELINE] Temporal slicing produced an empty dataset — "
                     f"train: {len(train_data)} samples, test: {len(test_data)} samples. "
-                    "Increase temporal_slicing.slice_duration_us in data_workflow.yaml."
+                    "Increase temporal.slice_duration_us in data_workflow.yaml."
                 )
         else:
-            train_data = controller.determine_dataset_strategy(
-                raw_train, transform=frame_tf,
-                split=f"{dataset_prefix}/train", num_workers=worker_estimate,
-                manifest=self.cache_manifest)
-            test_data = controller.determine_dataset_strategy(
-                raw_test, transform=frame_tf,
-                split=f"{dataset_prefix}/test", num_workers=worker_estimate,
-                manifest=self.cache_manifest)
+            train_data = controller.determine_dataset_strategy( raw_train, transform=frame_tf, live_transform=augment, split=f"{dataset_prefix}/train", num_workers=worker_estimate)
+            test_data = controller.determine_dataset_strategy( raw_test, transform=frame_tf, split=f"{dataset_prefix}/test", num_workers=worker_estimate)
 
         source = getattr(raw_train, "dataset", raw_train)
         if getattr(source, "requires_single_process_loading", False):
@@ -254,8 +211,8 @@ class NeuromorphicEncoder:
 
     def warm_recording_cache(self, cached_data, raw_subset) -> None:
         """Populates cached_data in recording order (not raw_subset's random_split order) so a multi-recording WindowedRecordingDataset's single-recording load cache doesn't thrash on the first pass."""
-        for local_idx in sorted(range(len(raw_subset)), key=lambda i: raw_subset.indices[i]):
-            cached_data[local_idx]
+        for local_idx in np.argsort(raw_subset.indices):
+            cached_data[int(local_idx)]
 
     def create_loaders(self, train_data, test_data):
         """Build the train/test DataLoaders, with worker config sized from live
@@ -270,26 +227,21 @@ class NeuromorphicEncoder:
             bytes_per_batch=self.batch_sample_bytes * batch_size,
             worker_ram_fraction=self.cfg.WORKER_RAM_FRACTION,
             worker_timeout_s=self.cfg.DATALOADER_WORKER_TIMEOUT_S,
-            worker_count_override=self.cfg.worker_count_override,
+            worker_count_override=self.cfg.WORKER_COUNT,
             metrics=monitor.snapshot(),
         )
         base_cfg = monitor.dataloader_config(device, **loader_cfg_kwargs)
 
         pad = tonic.collation.PadTensors(batch_first=False)
-
-        train_loader = DataLoader(train_data, batch_size=batch_size, collate_fn=pad, shuffle=True, drop_last=True,
-            **self.loader_kwargs(train_data, base_cfg),
-        )
-        test_loader = DataLoader(test_data, batch_size=batch_size, collate_fn=pad,
-            **self.loader_kwargs(test_data, base_cfg),
-        )
+        train_loader = DataLoader(train_data, batch_size=batch_size, collate_fn=pad, shuffle=True, drop_last=True,**self.loader_kwargs(train_data, base_cfg),)
+        test_loader = DataLoader(test_data, batch_size=batch_size, collate_fn=pad,**self.loader_kwargs(test_data, base_cfg),)
 
         logger.info(f"[PIPELINE] Train batches : {len(train_loader)}")
         logger.info(f"[PIPELINE] Test batches  : {len(test_loader)}")
         logger.info(f"[PIPELINE] Batch size    : {batch_size}")
 
         self.train_loader = DeviceLoader(train_loader, device)
-        self.test_loader  = DeviceLoader(test_loader,  device)
+        self.test_loader  = DeviceLoader(test_loader,  torch.device(self.cfg.INFERENCE_DEVICE))
 
     def loader_kwargs(self, dataset, base_cfg: dict) -> dict:
         """Force single-process loading for a dataset that needs it (see requires_single_process_loading)."""
@@ -310,7 +262,7 @@ class NeuromorphicEncoder:
         events, _ = dataset[0]
         if events is None or (hasattr(events, "numel") and events.numel() == 0):
             raise ValueError(f"{split} dataset: first sample is empty")
-        sample_bytes = measure_event_bytes(events)
+        sample_bytes = events.nbytes
         logger.info(f"[VALIDATION] {split.capitalize()} dataset: first sample OK ({sample_bytes / 1024:.1f} KB)")
         return sample_bytes
 
@@ -318,5 +270,5 @@ class NeuromorphicEncoder:
 def main() -> tuple[DeviceLoader, DeviceLoader]:
     from skeleton.config import Settings, load_config
     cfg = Settings(load_config())
-    encoder = NeuromorphicEncoder(cfg)
+    encoder = NeuromorphicEncoder(cfg, resolve_dataset_entry())
     return encoder.get_dataloaders()

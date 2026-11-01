@@ -4,34 +4,14 @@ import csv
 import time
 import logging
 from pathlib import Path
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from skeleton import Settings
 import matplotlib.pyplot as plt
-from event_data_workflow.system_monitor import PipelineMonitor, monitor
-from learning.utilities import measure_dense_macs, warm_up
+from event_data_workflow.system_monitor import PipelineMonitor
+from learning.utilities import elapsed_ms, spike_count_loss, timed, warm_up
 logger = logging.getLogger(__name__)
-
-# A synaptic operation is one addition, 0.9 pJ at 45 nm (Horowitz, ISSCC 2014)
-SYNOPS_ENERGY_PJ = 0.9
-
-
-def aggregate_spike_output(spk_rec: torch.Tensor) -> torch.Tensor:
-    """Reduce any spike recording shape to [B, C] class logits.
-
-    Supported layouts:
-      [B, C]       — already aggregated (e.g. SpikingJelly pre-summed output)
-      [T, B, C]    — timestep-first stack (e.g. Norse, SNNTorch, Brian2)
-    """
-    if spk_rec.dim() == 2:
-        return spk_rec
-    if spk_rec.dim() == 3:
-        return spk_rec.sum(dim=0)
-    raise ValueError(
-        f"aggregate_spike_output: unsupported spike recording shape {tuple(spk_rec.shape)}. "
-        "Expected [B, C] or [T, B, C]."
-    )
 
 
 class SNNTrainer:
@@ -42,200 +22,47 @@ class SNNTrainer:
         self.cfg          = cfg
         self.device       = device
 
-        # Final, host-side histories — extended once per epoch (train()'s epoch-boundary
-        # sync), not held GPU-resident for the whole run. Kept under these exact names
-        # since plot_training()/the train() return dict already depend on them.
+        # One value per iteration across the whole run, read back from the GPU once per epoch.
         self.loss_hist       = []
         self.acc_hist        = []
         self.spike_rate_hist = []
-        self.vram_current_hist = []  # per-iteration current allocated VRAM (GB) -- host-side counter, appended every iteration, no sync
-        self.last_spk_rec    = None
-        self.last_activity_snapshot: dict = {}
         self.epoch_log       = []
-        self.best_acc_so_far = 0.0  # tracked across epochs here now that each epoch's report finalizes immediately, not in one bulk pass at the end
-
-        # GPU-resident accumulation through the run — see train()'s docstring
-        # note on the deferred-sync design. Nothing here is read back to host
-        # memory until training finishes.
-        self.loss_hist_gpu       = []
-        self.acc_hist_gpu        = []
-        self.spike_rate_hist_gpu = []
-        self.fwd_events          = []  # (start, end) CUDA event pairs, or (t0, t1) perf_counter pairs on CPU
-        self.bwd_events          = []
-        self.dense_macs_per_layer = {}
 
         self.pipeline_monitor = PipelineMonitor()
 
-        use_amp = getattr(cfg, "USE_AMP", True) and device.type == "cuda"
-        self.scaler           = torch.amp.GradScaler("cuda", enabled=use_amp)  # type: ignore[attr-defined]
-        self.use_amp          = use_amp
-        self.grad_accum_steps = max(1, getattr(cfg, "GRAD_ACCUM_STEPS", 1))
-
-        lr_sched = getattr(cfg, "LR_SCHEDULER", "cosine")
-        opt = getattr(self.model, "optimizer", None)
-        self.scheduler = (CosineAnnealingLR(opt, T_max=cfg.EPOCHS) if opt is not None and lr_sched == "cosine" else None)
-
-    def forward_pass(self, data: torch.Tensor) -> torch.Tensor:
-        return self.model(data)
-
-    def measure_activity(self, probe_data: torch.Tensor, timesteps: int) -> dict:
-        """One UNTIMED forward pass with spike recording ON, for the epoch's
-        activity metric: SynOps.
-
-        Separated from the timed loop deliberately. ActivityMonitor's hooks fire on
-        every LIF call, and while they force no CUDA sync they do detach, take a
-        threading lock and — the part that actually matters — RETAIN one spike tensor
-        per layer per timestep for the whole forward. At T=16 with two hooked layers
-        that is 32 tensors held live inside the region being timed, which is real
-        allocator pressure and can move a timing in ways that do not reproduce.
-
-        So recording stays paused throughout training (see train()) and happens here
-        instead, once per epoch, outside any timer. The cost is one extra forward pass
-        per epoch; what is bought is a timed number that measures the network and
-        nothing else.
-
-        WHAT THIS CHANGES IN THE OUTPUT: SynOps is now sampled once per
-        epoch on one batch, rather than accumulated per iteration. The per-iteration
-        SynOps series is therefore a broadcast of the epoch's value, exactly as GPU
-        energy already was -- see iteration_series().
-        """
-        self.model.activity.resume()
-        self.model.activity.clear()
-        with torch.no_grad():
-            self.forward_pass(probe_data)
-        recordings = self.model.activity.recordings()
-
-        synops = torch.zeros((), device=self.device)
-        for name, macs in self.dense_macs_per_layer.items():
-            buf = self.model.activity.buffers.get(name)
-            rate_t = buf.firing_rate_tensor() if buf is not None else None
-            if rate_t is not None:
-                synops = synops + rate_t * macs * timesteps
-        snapshot = {k: (v.cpu() if v is not None else None) for k, v in recordings.items()}
-        # Straight back off before the next epoch's timed loop starts -- unless the activity penalty needs the recordings.
-        if not self.cfg.ACTIVITY_REG_ENABLED:
-            self.model.activity.pause()
-        self.model.activity.clear()
-        return {"synops": float(synops.item()), "snapshot": snapshot}
-
-    @contextmanager
-    def timed(self, event_list: list):
-        """Brackets one operation with a CUDA event pair (CPU: a perf_counter
-        pair) and appends it to `event_list`. `record()` queues on the stream
-        without waiting for it, so this never stalls the training loop the
-        way a `torch.cuda.synchronize()`-bracketed timer would — the
-        blocking half (`elapsed_time()` / the CPU delta) only happens once,
-        later, at that epoch's own boundary in `train()`."""
-        if self.device.type == "cuda":
-            start = torch.cuda.Event(enable_timing=True)
-            end   = torch.cuda.Event(enable_timing=True)
-            start.record()
-            yield
-            end.record()
-            event_list.append((start, end))
-        else:
-            t0 = time.perf_counter()
-            yield
-            event_list.append((t0, time.perf_counter()))
-
-    @staticmethod
-    def elapsed_ms(pair) -> float:
-        a, b = pair
-        if isinstance(a, torch.cuda.Event):
-            return a.elapsed_time(b)
-        return (b - a) * 1000.0
-
-    def iteration_series(self) -> dict:
-        """Learning rate and GPU energy, broadcast to one value per iteration from each
-        epoch's own already-recorded value (record["n"] iterations of that epoch share
-        it) -- the scheduler only steps once per epoch, so there's no separate per-
-        iteration LR to measure, and NVML power sampling isn't synced to iteration
-        boundaries, so per-iteration energy is that epoch's total split evenly across
-        its iterations, not a real per-iteration reading. Firing rate is a direct per-
-        iteration reading."""
-        learning_rate, gpu_energy_j, synops_pj = [], [], []
-        for r in self.epoch_log:
-            n = r["n"]
-            learning_rate.extend([r["learning_rate"]] * n)
-            gpu_energy_j.extend([r["energy_j_total"] / n if n else 0.0] * n)
-            # Broadcast, like energy: SynOps is now sampled ONCE per epoch by the
-            # untimed activity pass, because recording it per iteration meant the
-            # ActivityMonitor's hooks ran inside the timed loop. So this is that
-            # epoch's single measurement repeated, not a per-iteration reading.
-            synops_pj.extend([r["synops_energy_pj"]] * n)
-
-
-        return {"learning_rate": learning_rate, "gpu_energy_j": gpu_energy_j,
-                "synops_energy_pj": synops_pj}
+        self.use_amp          = cfg.USE_AMP and device.type == "cuda"
+        self.scaler           = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.grad_accum_steps = cfg.GRAD_ACCUM_STEPS
+        self.optimizer        = getattr(torch.optim, cfg.OPTIMIZER)(model.parameters(), **cfg.OPTIMIZER_ARGS)  # a torch.optim class by name
+        self.scheduler        = CosineAnnealingLR(self.optimizer, T_max=cfg.EPOCHS) if cfg.LR_SCHEDULER == "cosine" else None
 
     def write_batch_csv(self, path: str = "./outputs/data/batch_metrics.csv"):
-        """One row per training iteration across the whole run -- every series plot_iteration_metrics()/plot_training() draw."""
-        if not self.loss_hist:
-            return
+        """One row per training iteration across the whole run."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        derived = self.iteration_series()
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["iteration", "loss", "accuracy", "spike_rate",
-                              "learning_rate", "vram_current_gb", "gpu_energy_j", "synops_energy_pj"])
-            writer.writerows(zip(
-                range(len(self.loss_hist)), self.loss_hist, self.acc_hist, self.spike_rate_hist,
-                derived["learning_rate"], self.vram_current_hist,
-                derived["gpu_energy_j"], derived["synops_energy_pj"],
-            ))
-        print(f"[INFO] Iteration metrics log saved -> {path}")
+            writer.writerow(["iteration", "loss", "accuracy", "spike_rate"])
+            writer.writerows(zip(range(len(self.loss_hist)), self.loss_hist, self.acc_hist, self.spike_rate_hist))
+        logger.info(f"[INFO] Iteration metrics saved -> {path}")
 
     def train(self, results_dir: str = "./outputs/data") -> dict:
-        """Deferred-sync training loop: every per-batch metric (loss,
-        accuracy, spike rate, forward/backward latency, SynOps energy) is
-        accumulated as a GPU-resident tensor or an un-synced CUDA event —
-        no `.item()`/`.cpu()` call happens inside the batch loop. Read back
-        to host memory once per epoch, at that epoch's own boundary (not
-        once for the whole run -- holding every epoch's events/tensors
-        until the very end exhausted CUDA resources on a real multi-epoch
-        run). See SNN_GPU_Evaluation_Metrics.md for why per-batch `.item()`
-        calls are avoided (forces a CUDA stream sync, stalling the GPU every
-        iteration)."""
-        monitor.enter_phase("training")
+        """Training loop with deferred sync: per-batch metrics and timings stay on the GPU and are read back once per epoch."""
         self.pipeline_monitor.start()
         self.pipeline_monitor.measure_idle_baseline()
 
         epochs    = self.cfg.EPOCHS
-        # None means "not resolved yet" (a caller that skipped resolve_iterations).
-        # Settle it here rather than letting `i >= None` raise mid-epoch.
         num_iters = self.cfg.ITERA
-        if num_iters is None:
-            num_iters = self.cfg.resolve_iterations(self.train_loader)
-        print(f"  [TRAIN] {epochs} epoch(s) x {num_iters} iterations "
-              f"(batch {self.cfg.BATCH_SIZE})")
         accum     = self.grad_accum_steps
+        logger.info(f"[TRAIN] {epochs} epoch(s) x {num_iters} iterations (batch {self.cfg.BATCH_SIZE})")
 
         autocast_ctx = (torch.autocast(device_type="cuda", dtype=torch.float16) if self.use_amp else nullcontext())
 
-        # Dense-MAC measurement for the SynOps estimate — SNN_GPU_Evaluation_Metrics.md §2.4/§4.4.
-        # self.train_loader is a DeviceLoader — probe_data is already device-resident.
-        probe_data, _ = next(iter(self.train_loader))
-        timesteps = probe_data.shape[0]  # loader yields [T, B, C, H, W] — the real BPTT unroll length, not a config value
-        self.dense_macs_per_layer = measure_dense_macs(self.model, probe_data)
-
-        # ---- warm-up: untimed, weights untouched -----------------------------------
-        # Before the timed loop, so CUDA kernel compilation and allocator growth are not
-        # charged to training -- and, in a multi-framework run, not charged to whichever
-        # framework happens to run first.
-        self.warmup = warm_up(self.model, probe_data, getattr(self.cfg, "WARMUP_ITERATIONS", 5))
-
-        # Spike recording OFF for every timed region from here on. The hooks retain a
-        # tensor per layer per timestep, which is allocator pressure inside the window
-        # being timed. measure_activity() turns them back on once per epoch, untimed.
-        # Exception: activity regularization reads these recordings as its loss term, so they stay on, with their graph.
-        if self.cfg.ACTIVITY_REG_ENABLED:
-            self.model.activity.resume()
-            self.model.activity.keep_graph = True
-        else:
-            self.model.activity.pause()
+        # Untimed warm-up, so kernel compilation is not charged to the first epoch.
+        probe_data, _ = next(iter(self.train_loader))  # already on the device
+        self.warmup = warm_up(self.model, probe_data, self.cfg.WARMUP_ITERATIONS)
         if self.warmup["iterations"]:
-            print(f"  [WARM-UP] {self.warmup['iterations']} untimed forward+backward passes  "
-                  f"(weights unchanged: {self.warmup['weights_unchanged']})")
+            logger.info(f"[WARM-UP] {self.warmup['iterations']} untimed forward+backward passes  "
+                        f"(weights unchanged: {self.warmup['weights_unchanged']})")
             if not self.warmup["weights_unchanged"]:
                 raise RuntimeError(
                     "[WARM-UP] the model's weights changed during warm-up. No optimizer "
@@ -244,39 +71,28 @@ class SNNTrainer:
                 )
 
         for epoch in range(epochs):
-            self.model.train_mode()
-            epoch_loss_sum   = torch.zeros((), device=self.device)
-            epoch_acc_sum    = torch.zeros((), device=self.device)
-            epoch_spike_sum  = torch.zeros((), device=self.device)
-            n, step_count = 0, 0
+            self.model.train()
+            loss_dev, acc_dev, spike_dev, fwd_events, bwd_events = [], [], [], [], []
             t0 = time.perf_counter()
             self.pipeline_monitor.set_phase(f"epoch_{epoch}")
             self.pipeline_monitor.reset_epoch_memory()
 
-            self.model.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
-            # self.train_loader is a DeviceLoader (event_data_workflow.data_pipeline) —
-            # batches arrive already device-resident, no .to(device) needed below.
             for i, (data, targets) in enumerate(self.train_loader):
-                # Checked BEFORE the work, not after. Previously this sat at the end of
-                # the body, so the batch at i == num_iters had already been trained on
-                # and an epoch ran num_iters + 1 iterations. Invisible on a calibrated
-                # run (ITERA == len(loader), so the loader exhausts first and the check
-                # never fires) but a 33% overrun when iterations_per_epoch is set small
-                # for a diagnostic -- exactly when the timings are being read.
-                if i >= num_iters:
+                if i >= num_iters:  # checked before the work, so an epoch runs exactly num_iters batches
                     break
                 if i % 20 == 0:
-                    print(f"  [epoch {epoch + 1}/{epochs}] iter {i}/{num_iters}  "
-                          f"({time.perf_counter() - t0:.1f}s elapsed)", flush=True)
+                    logger.info(f"[epoch {epoch + 1}/{epochs}] iter {i}/{num_iters}  "
+                                f"({time.perf_counter() - t0:.1f}s elapsed)")
                 targets = targets.long()
 
                 with autocast_ctx:
-                    with self.timed(self.fwd_events):
-                        spk_rec   = self.forward_pass(data)
-                    task_loss = self.model.loss_fn(spk_rec, targets)
+                    with timed(self.device, fwd_events):
+                        spk_rec = self.model(data)
+                    task_loss = spike_count_loss(spk_rec, targets, self.cfg.LOSS_FN)
                     if self.cfg.ACTIVITY_REG_ENABLED:
-                        task_loss = task_loss + self.model.activity.regularization_loss(
+                        task_loss = task_loss + self.model.spike_recorder.penalty(
                             min_rate   = self.cfg.ACTIVITY_REG_MIN_RATE,
                             max_rate   = self.cfg.ACTIVITY_REG_MAX_RATE,
                             lambda_low = self.cfg.ACTIVITY_REG_LAMBDA_LOW,
@@ -284,158 +100,86 @@ class SNNTrainer:
                         )
                     loss_val = task_loss / accum
 
-
-                do_step = ((step_count + 1) % accum == 0)
-                with self.timed(self.bwd_events):
-                    self.model.backward_pass(loss_val, scaler=self.scaler, do_step=do_step)
+                do_step = ((i + 1) % accum == 0)
+                with timed(self.device, bwd_events):
+                    self.scaler.scale(loss_val).backward()  # a disabled scaler (no AMP) passes the loss through unchanged
+                    if do_step:  # otherwise gradients keep accumulating
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
                 if do_step:
-                    self.model.zero_grad()
-                step_count += 1
+                    self.optimizer.zero_grad(set_to_none=True)
 
-                per_batch_loss = loss_val.detach() * accum
-                logits = aggregate_spike_output(spk_rec.detach().float())
-                per_batch_acc = (logits.argmax(dim=1) == targets).float().mean()
-                per_batch_spike = spk_rec.detach().float().mean()
+                spikes = spk_rec.detach().float()
+                loss_dev.append(loss_val.detach() * accum)
+                acc_dev.append((spikes.sum(dim=0).argmax(dim=1) == targets).float().mean())  # the spike count per class is its score
+                spike_dev.append(spikes.mean())
 
-                self.loss_hist_gpu.append(per_batch_loss)
-                self.acc_hist_gpu.append(per_batch_acc)
-                self.spike_rate_hist_gpu.append(per_batch_spike)
-                self.last_spk_rec = spk_rec.detach()  # stays GPU-resident — see plot_raster()
+            n = len(loss_dev)
+            # A partial accumulation cycle at the end: step with the gradients already accumulated (no second backward).
+            if n % accum != 0:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
 
-                # SynOps is NOT computed here any more. It needs the ActivityMonitor's
-                # per-timestep recordings, and those are paused throughout this timed
-                # loop so the hooks' tensor retention cannot affect the timing. It is
-                # measured once per epoch instead, in measure_activity(), outside any
-                # timer -- see that method for the full reasoning and what it costs.
-                #
-                # Host-side allocator counter, not a tensor -- no .item()/sync needed, and it's the
-                # quantity that actually varies iteration to iteration (activation size tracks each
-                # batch's real, unpadded sample lengths); weights/gradients/optimizer state don't
-                # change shape once training starts.
-                self.vram_current_hist.append(torch.cuda.memory_allocated(self.device) / (1024 ** 3) if self.device.type == "cuda" else 0.0)
-
-                epoch_loss_sum   = epoch_loss_sum   + per_batch_loss
-                epoch_acc_sum    = epoch_acc_sum    + per_batch_acc
-                epoch_spike_sum  = epoch_spike_sum  + per_batch_spike
-                n += 1
-
-
-            # Flush any gradients accumulated in a partial final batch (fires
-            # when the loop exits mid-accumulation-cycle, e.g. ITERA not a
-            # multiple of accum). Must NOT call backward_pass() again here --
-            # that re-invokes loss.backward() on loss_val's graph, which the
-            # in-loop call above (line ~300) already consumed, and PyTorch
-            # frees a graph after backward() by default. The gradients from
-            # every in-loop call are already accumulated in .grad; this only
-            # needs to step the optimizer with them, mirroring backward_pass's
-            # own scaler-branch logic without repeating the backward() call.
-            if step_count % accum != 0:
-                if self.use_amp:
-                    self.scaler.step(self.model.optimizer)
-                    self.scaler.update()
-                else:
-                    self.model.optimizer.step()
-                self.model.zero_grad()
-
-            # Read back and discard this epoch's CUDA events now, rather than
-            # holding all epochs' events (a torch.cuda.Event pair per batch)
-            # for the whole run -- on a real multi-epoch run that's thousands
-            # of live event handles never freed until the very end, which
-            # exhausted a CUDA resource and crashed a real 5-epoch/1175-batch
-            # run late in training. elapsed_time() does NOT block until both
-            # events complete -- it raises if they haven't -- so this sync is
-            # required, not optional; it's one sync per epoch boundary, not
-            # the per-batch sync the deferred-accumulation design avoids.
-            # Guarded: on a CPU-only torch build this raises "Torch not compiled with
-            # CUDA enabled" and the whole run dies at the first epoch boundary, which
-            # made a laptop run impossible. On CUDA the condition is true, so the
-            # behaviour there is unchanged.
+            # The one sync per epoch: everything above is read back here.
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
-            fwd_latencies_ms = [self.elapsed_ms(p) for p in self.fwd_events]
-            bwd_latencies_ms = [self.elapsed_ms(p) for p in self.bwd_events]
-            self.fwd_events, self.bwd_events = [], []
-
-            # Same reasoning, same fix, for the per-batch loss/accuracy/spike-rate
-            # scalars: read back and clear each epoch's GPU-resident list here
-            # instead of holding all 5 epochs' worth (1175 tensors each) until
-            # the very end.
-            self.loss_hist.extend(t.item() for t in self.loss_hist_gpu)
-            self.acc_hist.extend(t.item() for t in self.acc_hist_gpu)
-            self.spike_rate_hist.extend(t.item() for t in self.spike_rate_hist_gpu)
-            self.loss_hist_gpu, self.acc_hist_gpu, self.spike_rate_hist_gpu = [], [], []
-
-            # ---- untimed activity pass ------------------------------------------
-            # After the epoch's timer has stopped and after the energy window has
-            # closed, so nothing measured above is affected by the recording hooks.
-            activity = self.measure_activity(probe_data, timesteps)
+            losses = [t.item() for t in loss_dev]
+            accs   = [t.item() for t in acc_dev]
+            rates  = [t.item() for t in spike_dev]
+            self.loss_hist.extend(losses)
+            self.acc_hist.extend(accs)
+            self.spike_rate_hist.extend(rates)
+            fwd_ms = sum(elapsed_ms(p) for p in fwd_events) / n
+            bwd_ms = sum(elapsed_ms(p) for p in bwd_events) / n
 
             if self.scheduler is not None:
                 self.scheduler.step()
 
-            epoch_duration = time.perf_counter() - t0
-            epoch_phase    = f"epoch_{epoch}"
-            energy_report  = self.pipeline_monitor.phase_energy_report(epoch_phase, epoch_duration)  # None fields on CPU-only or without NVML
-            gpu             = energy_report["gpu"]
-            # TOTAL energy: idle draw INCLUDED. Scales with duration, so a slower
-            # framework reports more of it even at identical power draw.
-            energy_j         = energy_report["gpu_energy_j"] or 0.0
-            # ABOVE idle: what the computation itself cost. Falls back to the total
-            # when no idle baseline was measured, in which case idle_power_w is None.
-            dynamic_energy_j = energy_report["gpu_dynamic_energy_j"] or 0.0
-            avg_power_w      = energy_report["avg_power_w"] or 0.0
-            dynamic_power_w  = energy_report["dynamic_power_w"] or 0.0
-            idle_power_w     = energy_report["idle_power_w"]
-            gpu_active_s    = epoch_duration * gpu.get("gpu_util_avg_pct", 0.0) / 100.0
+            duration = time.perf_counter() - t0
+            energy   = self.pipeline_monitor.phase_energy_report(f"epoch_{epoch}", duration)  # None fields without NVML
+            gpu      = energy["gpu"]
+            energy_j = energy["gpu_energy_j"] or 0.0          # idle draw included
+            dynamic_j = energy["gpu_dynamic_energy_j"] or 0.0  # above idle
+            idle_w   = energy["idle_power_w"]
 
-            # .item()/.cpu() here (sync already paid above for fwd/bwd_latencies_ms), not held
-            # GPU-resident until the whole run finishes -- same class of fix as fwd/bwd_events above.
-            #
-            # activity_snapshot (built in measure_activity(), just above) is a real per-layer
-            # spike-recording tensor dict, already moved to CPU. This record used to be appended
-            # to a list held for the WHOLE run and only processed in one bulk pass at the very
-            # end -- meaning every epoch's snapshot stayed resident in host RAM simultaneously,
-            # growing linearly epoch over epoch (a real run: system RAM climbed steadily and the
-            # process was killed partway through a 10-epoch run). Finalizing immediately, one
-            # epoch at a time, means each record (snapshot included) is freed as soon as that
-            # epoch's report is printed, instead of accumulating for the whole run.
-            record = {
-                "epoch":              epoch + 1,
-                "n":                  n,
-                "fwd_latencies_ms":   fwd_latencies_ms,
-                "bwd_latencies_ms":   bwd_latencies_ms,
-                "epoch_loss_sum":     epoch_loss_sum.item(),
-                "epoch_acc_sum":      epoch_acc_sum.item(),
-                "epoch_spike_sum":    epoch_spike_sum.item(),
-                # Sampled once per epoch by the untimed pass above, not accumulated
-                # per iteration -- see measure_activity().
-                "epoch_synops":       activity["synops"],
-                "activity_snapshot":  activity["snapshot"],
-                "epoch_duration":     epoch_duration,
-                "gpu":                gpu,
-                "energy_j":           energy_j,
-                "dynamic_energy_j":   dynamic_energy_j,
-                "avg_power_w":        avg_power_w,
-                "dynamic_power_w":    dynamic_power_w,
-                "idle_power_w":       idle_power_w,
-                "gpu_active_s":       gpu_active_s,
-                "current_lr":         self.model.get_lr(),
+            entry = {
+                "epoch":               epoch + 1,
+                "train_loss":          round(sum(losses) / n, 4),
+                "train_accuracy":      round(sum(accs) / n, 4),
+                "spike_rate":          round(sum(rates) / n, 4),
+                "epoch_duration_s":    round(duration, 2),
+                "forward_latency_ms":  round(fwd_ms, 3),
+                "backward_latency_ms": round(bwd_ms, 3),
+                "energy_j_total":      round(energy_j, 2),
+                "energy_j_dynamic":    round(dynamic_j, 2),
+                "idle_power_w":        round(idle_w, 2) if idle_w is not None else None,
+                **gpu,
             }
-            self.finalize_one_epoch_report(record, epochs, timesteps)
+            self.epoch_log.append(entry)
 
-        self.model.activity.keep_graph = False
-        self.model.activity.clear()
+            lines = [f"Epoch {epoch + 1}/{epochs}",
+                     f"  • Train Loss      : {entry['train_loss']:.4f}",
+                     f"  • Train Accuracy  : {entry['train_accuracy'] * 100:.2f}%",
+                     f"  • Spike Rate      : {entry['spike_rate']:.4f}",
+                     f"  • Fwd/Bwd Latency : {fwd_ms:.3f} ms / {bwd_ms:.3f} ms",
+                     f"  • Wall time       : {duration:.2f}s",
+                     f"  • Energy (total)  : {energy_j:.2f} J  ({energy['avg_power_w'] or 0.0:.1f} W avg, idle draw included)"]
+            if idle_w is not None:
+                lines.append(f"  • Energy (dynamic): {dynamic_j:.2f} J  "
+                             f"({energy['dynamic_power_w'] or 0.0:.1f} W above a {idle_w:.1f} W idle baseline)")
+            else:
+                lines.append("  • Energy (dynamic): not available -- no idle baseline was measured")
+            if gpu:
+                lines.append(f"  • GPU Util        : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
+                if gpu.get("gpu_idle_episodes", 0) > 0:
+                    lines.append(f"  • GPU Idle        : {gpu['gpu_idle_episodes']} episode(s), {gpu['gpu_idle_total_s']:.1f}s total "
+                                 f"— CPU-side data prep couldn't keep up with the GPU this often")
+            logger.info("\n".join(lines))
+
+        if self.model.spike_recorder is not None:
+            self.model.spike_recorder.clear()
         self.pipeline_monitor.stop()
-        overall = self.pipeline_monitor.summary()
-        if overall.get("avg_gpu_util_pct") is not None:
-            print("\nGPU Training Summary")
-            print(f"  • Avg utilization  : {overall['avg_gpu_util_pct']}%")
-            print(f"  • Peak utilization : {overall['max_gpu_util_pct']}%")
-            print(f"  • Peak VRAM used   : {overall['overall_peak_mem_gb']} GB / {overall['total_vram_gb']} GB  ({overall['overall_peak_mem_pct']}%)")
-
-        trend = self.pipeline_monitor.memory_trend()
-        if "ram_trend" in trend:
-            print(f"  • RAM trend        : {trend['ram_trend']}  ({trend['ram_start_gb']}GB -> {trend['ram_end_gb']}GB)")
 
         self.write_batch_csv(str(Path(results_dir) / "batch_metrics.csv"))
 
@@ -446,98 +190,8 @@ class SNNTrainer:
             "epoch_log":          self.epoch_log,
         }
 
-    def finalize_one_epoch_report(self, record: dict, epochs: int, timesteps: int) -> None:
-        """Builds and prints ONE epoch's report, called right after that epoch finishes --
-        not deferred to a bulk pass over every epoch at the end of the run, so record
-        (activity_snapshot included) is freed as soon as this returns rather than staying
-        resident for the whole run. self.loss_hist/acc_hist/spike_rate_hist and record's own
-        fwd/bwd_latencies_ms are already plain Python values by this point, read back at
-        this epoch's own boundary rather than held GPU-resident."""
-        n = record["n"]
-        epoch_fwd = record["fwd_latencies_ms"]
-        epoch_bwd = record["bwd_latencies_ms"]
-
-        train_loss  = (record["epoch_loss_sum"]  / n) if n else 0.0
-        train_acc   = (record["epoch_acc_sum"]   / n) if n else 0.0
-        train_spike = (record["epoch_spike_sum"] / n) if n else 0.0
-        # One batch's SynOps, sampled by the untimed pass -- a PER-BATCH figure,
-        # not an epoch total. It used to be summed over every iteration, which
-        # made it scale with iteration count and so not comparable between runs
-        # of different length.
-        synops_pj   = record["epoch_synops"] * SYNOPS_ENERGY_PJ
-
-
-        # Kept on the trainer so a caller can build per-layer rows (layers.csv)
-        # from the measurement this epoch already took, instead of paying for an
-        # extra pass. Hooked layers only -- lif_out is not hooked.
-        self.last_activity_snapshot = record["activity_snapshot"]
-
-        avg_fwd_ms = sum(epoch_fwd) / len(epoch_fwd) if epoch_fwd else 0.0
-        avg_bwd_ms = sum(epoch_bwd) / len(epoch_bwd) if epoch_bwd else 0.0
-
-        gpu      = record["gpu"]
-
-        is_best_epoch = train_acc > self.best_acc_so_far
-        if is_best_epoch:
-            self.best_acc_so_far = train_acc
-
-        self.epoch_log.append({
-            "epoch":               record["epoch"],
-            "n":                   n,
-            "train_loss":          round(train_loss, 4),
-            "train_accuracy":      round(train_acc, 4),
-            "best_accuracy_so_far": round(self.best_acc_so_far, 4),
-            "is_best_epoch":       is_best_epoch,
-            "spike_rate":          round(train_spike, 4),
-            # Recorded because calibrate_batch_size sizes this from live VRAM, so
-            # it legitimately differs between machines and between runs. Batch size
-            # is the largest single lever on wall-clock time, so two rows can only
-            # be compared on speed once this column is known to match.
-            "batch_size":          getattr(self.cfg, "BATCH_SIZE", None),
-            "batch_size_calibrated": getattr(self.cfg, "CALIBRATE_BATCH_SIZE", None),
-            "learning_rate":       round(record["current_lr"], 6),
-            "epoch_duration_s":    round(record["epoch_duration"], 2),
-            "gpu_active_s":        round(record["gpu_active_s"], 2),
-            # Named so a CSV reader cannot mistake one basis for the other.
-            "energy_j_total":      round(record["energy_j"], 2),
-            "energy_j_dynamic":    round(record["dynamic_energy_j"], 2),
-            "avg_power_w":         round(record["avg_power_w"], 2),
-            "dynamic_power_w":     round(record["dynamic_power_w"], 2),
-            # The baseline both dynamic figures rest on. None = never measured,
-            # which is also when dynamic equals total.
-            "idle_power_w":        (round(record["idle_power_w"], 2)
-                                    if record["idle_power_w"] is not None else None),
-            "forward_latency_ms":  round(avg_fwd_ms, 3),
-            "backward_latency_ms": round(avg_bwd_ms, 3),
-            "synops_energy_pj":    round(synops_pj, 2),
-            **{k: v for k, v in gpu.items()},
-        })
-
-        print(f"\nEpoch {record['epoch']}/{epochs}")
-        print(f"  • Train Loss     : {train_loss:.4f}")
-        print(f"  • Train Accuracy : {train_acc * 100:.2f}%" + ("  (best so far)" if is_best_epoch else ""))
-        print(f"  • Spike Rate     : {train_spike:.4f}")
-        print(f"  • Fwd/Bwd Latency: {avg_fwd_ms:.3f} ms / {avg_bwd_ms:.3f} ms")
-        print(f"  • SynOps Energy  : {synops_pj:.2f} pJ (estimated, per epoch)")
-        print(f"  • LR             : {record['current_lr']:.6f}")
-        print(f"  • Wall time      : {record['epoch_duration']:.2f}s")
-        print(f"  • GPU active     : {record['gpu_active_s']:.2f}s  ({gpu.get('gpu_util_avg_pct', 0.0):.1f}% of wall time)")
-        print(f"  • Energy (total) : {record['energy_j']:.2f} J  ({record['avg_power_w']:.1f} W avg, idle draw INCLUDED)")
-        if record["idle_power_w"] is not None:
-            print(f"  • Energy (dynamic): {record['dynamic_energy_j']:.2f} J  "
-                  f"({record['dynamic_power_w']:.1f} W above a {record['idle_power_w']:.1f} W idle baseline)")
-            print("                      ^ total scales with runtime; dynamic isolates the work")
-        else:
-            print("  • Energy (dynamic): not available -- no idle baseline was measured, "
-                  "so the total above is all there is")
-        if gpu:
-            print(f"  • GPU Util       : avg {gpu['gpu_util_avg_pct']}%  peak {gpu['gpu_util_peak_pct']}%")
-            print(f"  • GPU Memory     : {gpu['gpu_mem_peak_gb']} GB / {self.pipeline_monitor.total_memory_gb:.2f} GB  ({gpu['gpu_mem_peak_pct']}% peak)")
-            if gpu.get("gpu_idle_episodes", 0) > 0:
-                print(f"  • GPU Idle       : {gpu['gpu_idle_episodes']} episode(s), {gpu['gpu_idle_total_s']:.1f}s total "
-                      f"— CPU-side data prep couldn't keep up with the GPU this often")
-
     def plot_training(self, save_dir: str = "./outputs/plots") -> None:
+        """Loss, accuracy and spike rate per iteration, across all epochs."""
         os.makedirs(save_dir, exist_ok=True)
 
         fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
@@ -561,84 +215,4 @@ class SNNTrainer:
         path = os.path.join(save_dir, "training_metrics.png")
         plt.savefig(path, dpi=150)
         plt.close(fig)
-        print(f"[PLOT] Saved -> {path}")
-
-    def plot_iteration_metrics(self, save_dir: str = "./outputs/plots") -> None:
-        """VRAM, learning rate, and both energy readings, one point per
-        iteration -- a single index counting up across every epoch back to back (epoch 2's
-        iteration 0 continues from epoch 1's last iteration, not a reset).
-
-        VRAM comes from self.vram_current_hist, appended every iteration inside train() at
-        effectively no cost (a host-side counter read, no CUDA sync). Learning rate, GPU energy and SynOps come from self.iteration_series() -- see
-        that method for which are exact per-iteration readings and which are one
-        per-epoch measurement broadcast across that epoch. Each metric gets its own
-        figure and its own file."""
-        if not self.epoch_log or not self.loss_hist:
-            print("[PLOT] No iteration data — run train() first.")
-            return
-        os.makedirs(save_dir, exist_ok=True)
-        iters = list(range(len(self.loss_hist)))
-        derived = self.iteration_series()
-
-        def save(fig, filename: str) -> None:
-            plt.tight_layout()
-            path = os.path.join(save_dir, filename)
-            fig.savefig(path, dpi=150)
-            plt.close(fig)
-            print(f"[PLOT] Saved -> {path}")
-
-        # Current allocated VRAM per iteration; it varies with each batch's real, unpadded event count.
-        fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(iters, self.vram_current_hist, linewidth=0.6, color="tab:blue")
-        ax.set_title("VRAM per Iteration")
-        ax.set_xlabel("Iteration (cumulative across epochs)")
-        ax.set_ylabel("VRAM (GB)")
-        ax.grid(True, alpha=0.3)
-        save(fig, "vram_per_iteration.png")
-
-        fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(iters, derived["learning_rate"], linewidth=0.8, color="tab:red")
-        ax.set_title("Learning Rate per Iteration")
-        ax.set_xlabel("Iteration (cumulative across epochs)")
-        ax.set_ylabel("Learning Rate")
-        ax.grid(True, alpha=0.3)
-        save(fig, "learning_rate.png")
-
-        fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(iters, derived["gpu_energy_j"], linewidth=0.8, color="tab:purple")
-        ax.set_title("GPU Energy per Iteration (epoch total ÷ iteration count)")
-        ax.set_xlabel("Iteration (cumulative across epochs)")
-        ax.set_ylabel("GPU Energy (J)")
-        ax.grid(True, alpha=0.3)
-        save(fig, "gpu_energy.png")
-
-        fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(iters, self.iteration_series()["synops_energy_pj"], linewidth=0.6, color="tab:brown")
-        ax.set_title("SynOps Energy per Iteration")
-        ax.set_xlabel("Iteration (cumulative across epochs)")
-        ax.set_ylabel("SynOps Energy (pJ)")
-        ax.grid(True, alpha=0.3)
-        save(fig, "synops_energy.png")
-
-    def plot_raster(self, save_dir: str = "./outputs/plots") -> None:
-        if self.last_spk_rec is None:
-            print("[PLOT] No spike data — run train() first.")
-            return
-        os.makedirs(save_dir, exist_ok=True)
-
-        # Normalise to [T, C]: for [T, B, C] take sample 0; for [B, C] treat each batch row as a timestep
-        # last_spk_rec is GPU-resident (deferred-sync design) — .cpu() happens
-        # here, once, on explicit user request to plot, not inside the loop.
-        spk = self.last_spk_rec.cpu()
-        spk_sample = spk[:, 0, :] if spk.dim() == 3 else spk
-        timesteps, neurons = spk_sample.numpy().nonzero()
-        fig, ax = plt.subplots(figsize=(10, 3))
-        ax.scatter(timesteps, neurons, s=2, c="black", marker="|")
-        ax.set_title("Output Neuron Spike Raster  (last batch · sample 0)")
-        ax.set_xlabel("Time step")
-        ax.set_ylabel("Neuron index")
-        plt.tight_layout()
-        path = os.path.join(save_dir, "spike_raster.png")
-        plt.savefig(path, dpi=150)
-        plt.close(fig)
-        print(f"[PLOT] Saved -> {path}")
+        logger.info(f"[PLOT] Saved -> {path}")

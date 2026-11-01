@@ -87,7 +87,7 @@ def _shared_params(model: nn.Module) -> list[tuple[str, torch.Tensor]]:
         (n, t) for n, t in named
         if any(h in n.lower() for h in SHARED_PARAM_HINTS) and "tau" not in n.lower()
     ]
-    return sorted(shared, key=lambda kv: kv[0])
+    return sorted(shared)  # by name; names are unique, so the tensors are never compared
 
 
 def _digest(tensors: Iterable[tuple[str, torch.Tensor]], name_sensitive: bool) -> str:
@@ -103,10 +103,7 @@ def weight_fingerprint(model: nn.Module) -> str:
     """Hash of every trainable parameter, names included. Identifies exactly what was
     trained, but is NOT comparable across backends -- Sinabs' extra `tau_mem` tensors
     and each backend's own module naming both change it. Use for run provenance."""
-    named = sorted(
-        ((n, t) for n, t in model.named_parameters() if t.requires_grad),
-        key=lambda kv: kv[0],
-    )
+    named = sorted((n, t) for n, t in model.named_parameters() if t.requires_grad)  # by name, as in _shared_params
     return _digest(named, name_sensitive=True)
 
 

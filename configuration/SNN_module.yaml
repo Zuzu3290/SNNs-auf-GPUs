@@ -1,29 +1,22 @@
-dataset:
-  name: null
-
 training:
   framework: sj
   device: cuda
 
   seed: 0
-
   epochs: 2
   batch_size: 128
-
   iterations_per_epoch: null
   calibrate_batch_size: true
-
   warmup_iterations: 5
 
   latency_samples: 100
 
-  optimizer:
-    type: nadam
+  optimizer:           # any torch.optim class by name; the other keys are passed to it as they are
+    type: NAdam
     lr: 0.002
     weight_decay: 0.0
-    momentum: 0.0
 
-  loss: cross_entropy
+  loss: cross_entropy  # cross_entropy | mse_count (snnTorch's own loss, not neutral across frameworks)
 
   lr_scheduler: cosine
 
@@ -35,6 +28,9 @@ training:
   activity_reg_max_rate: 0.50
   activity_reg_lambda_low: 0.1
   activity_reg_lambda_high: 0.1
+
+inference:
+  device: null
 
 output:
   plot_dir: ./outputs/plots

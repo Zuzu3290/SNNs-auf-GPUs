@@ -29,42 +29,61 @@ pip install -r requirements.txt
 
 | File | What it controls |
 |---|---|
-| `configuration/SNN_module.yaml` | Dataset, framework, device, seed, epochs, optimiser, loss, output folders, checkpoint saving |
+| `configuration/SNN_module.yaml` | Framework, training and inference device, seed, epochs, optimiser, loss, output folders, checkpoint saving |
 | `configuration/network_architecture.yaml` | Convolution blocks, pooling, hidden layers, and each framework's neuron parameters |
-| `configuration/data_workflow.yaml` | Time bins per sample, denoising, cache location, DataLoader workers, GPU memory target for the batch size |
+| `configuration/data_workflow.yaml` | Time bins per sample, denoising, augmentation, cache location, DataLoader workers, GPU memory target for the batch size |
 
 The settings most people change, all in `SNN_module.yaml`:
 
 ```yaml
-dataset:
-  name: N-MNIST        # null = ask at startup
 training:
   framework: sj        # torch | norse | sj | sinabs
-  device: cuda         # cuda | cpu
+  device: cuda         # training runs on a CUDA GPU
   seed: 0
   epochs: 2
+  calibrate_batch_size: true   # true = batch size fitted to the GPU; batch_size is used only when false
+inference:
+  device: null         # cuda | cpu | null = ask at startup
 output:
   save_checkpoint: true
 ```
 
+Training needs a CUDA GPU (the batch size is fitted to its memory). Testing, single-sample latency
+and activation density run on the inference device, so a model trained on the GPU can also be
+evaluated on the CPU. GPU energy and memory are only meaningful when inference runs on `cuda`.
+
+### Designing your own network
+
+Everything about the network is in `network_architecture.yaml` and needs no code changes:
+
+- `convolution.blocks`: one entry per Conv → LIF → MaxPool block (`out` channels, `kernel` size);
+  add or remove entries to make the network deeper or shallower.
+- `convolution.fc_hidden`: a list of hidden layer widths before the output, e.g. `[256]`; `null` for none.
+- `convolution.batch_norm`: BatchNorm between each convolution and its neuron.
+- `neuron.<framework>`: the LIF parameters for each library (decay, threshold, reset, surrogate gradient).
+  Sinabs accepts five surrogates; the parameters each one needs are the names its constructor uses.
+
+The input size and the number of outputs come from the dataset, so the same configuration works on
+every dataset.
+
+### Augmentation
+
+`augmentation.enabled: true` in `data_workflow.yaml` rotates every training clip by a random angle
+up to `rotation_degrees`, one angle for all frames of a clip, freshly drawn each epoch. It is
+applied after the cache, so the cached frames are unchanged, and never to the test set.
+
 ### Datasets
 
-Set `dataset.name` to a name or its number. Case, spaces, hyphens and underscores are ignored, so
-`DVS128 Gesture` and `dvs128-gesture` are the same. If you leave it at `null`, the run asks at
-startup.
+Each run asks for the dataset at startup. Answer with its number:
 
-| Value | Dataset | Classes | Download |
+| Answer | Dataset | Classes | Download |
 |---|---|---|---|
-| `N-MNIST` or `1` | N-MNIST | 10 | 1.2 GB |
-| `N-Caltech101` or `2` | N-Caltech101 | 101 | 3.7 GB |
-| `DVS128 Gesture` or `3` | DVS128 Gesture | 11 | 3.0 GB |
+| `1` | N-MNIST | 10 | 1.2 GB |
+| `2` | N-Caltech101 | 101 | 3.7 GB |
+| `3` | DVS128 Gesture | 11 | 3.0 GB |
 
-Datasets download into `./tmp/data` on first use. A misspelled name stops the run immediately and
-suggests the closest match:
-
-```
-dataset.name = 'N-MNSIT' is not a known dataset. Did you mean: N-MNIST?
-```
+Datasets download into `./tmp/data` on first use. A number that is not on the menu stops the run
+immediately.
 
 The registry also lists **DAVIS Camera Pose** (`4`) and **Eye Tracking** (`5`). These are
 regression datasets: their loaders work, but the pipeline only trains classifiers, so selecting
@@ -84,15 +103,25 @@ python learning/main.py                       # framework from SNN_module.yaml
 python learning/main.py --framework sinabs    # override the framework for this run
 ```
 
-Each run prints the configuration and the network layer by layer, sizes the batch to fit the GPU,
-trains, tests, and writes the results.
+Each run asks for the inference device (when `inference.device` is `null`) and then the dataset,
+prints the configuration and the network layer by layer, sizes the batch to fit the GPU, trains,
+tests, and writes the results.
+
+The answers can also be piped in, one per line in that order, so a run needs nobody at the
+keyboard. With `inference.device` set in the config, only the dataset is asked:
+
+```bash
+echo 1 | python learning/main.py --framework sinabs           # N-MNIST
+printf "1\n3\n" | python learning/main.py --framework sinabs  # inference on cuda, DVS128 Gesture
+```
 
 ### Comparing frameworks
 
-Run the same configuration once per framework. Every run adds one row to the same `runs.csv`:
+Run the same configuration once per framework. Every run adds one row to `training_runs.csv` and
+one to `inference_runs.csv`:
 
 ```bash
-for fw in torch norse sj sinabs; do python learning/main.py --framework $fw; done
+for fw in torch norse sj sinabs; do echo 1 | python learning/main.py --framework $fw; done
 ```
 
 All four start from identical weights for a given seed, so the neuron implementation is the only
@@ -106,17 +135,22 @@ Everything goes to the `output:` folders in `SNN_module.yaml`:
 
 | File | Contents |
 |---|---|
-| `outputs/data/runs.csv` | One row per run: accuracy, throughput, single-sample latency, training speed, peak memory, GPU energy, SynOps energy, spike rates, environment |
-| `outputs/data/epochs.csv` | One row per epoch per run: loss, accuracy, time, spike rate, latency, SynOps |
+| `outputs/data/training_runs.csv` | One row per training run: settings, architecture, training loss and time, forward/backward latency, spike rate, peak memory, GPU energy, environment |
+| `outputs/data/inference_runs.csv` | One row per test pass: inference device, accuracy, throughput, single-sample latency, activation density, SynOps per sample, peak memory, GPU energy, environment |
+| `outputs/data/epochs.csv` | One row per epoch per run: loss, accuracy, time, spike rate, forward/backward latency |
 | `outputs/data/layers.csv` | One row per spiking layer per run: neurons, spikes, spike rate |
-| `outputs/data/runs/<run_id>.json` | The full record of one run, including the neuron parameters actually built |
-| `outputs/data/test.csv` | Per-class precision, recall, F1 and specificity for the latest run |
-| `outputs/data/batch_metrics.csv` | One row per training iteration for the latest run |
+| `outputs/data/runs/<run_id>.json` | The full record of one run, including the neuron parameters and the inference device |
+| `outputs/data/batch_metrics.csv` | One row per training iteration for the latest run: loss, accuracy, spike rate |
 | `outputs/data/model_checkpoint.pt` | Trained weights, when `save_checkpoint: true` |
-| `outputs/plots/` | Training curves, per-iteration metrics, spike raster |
+| `outputs/plots/` | Training curves (loss, accuracy and spike rate per iteration) and a spike raster of one test sample |
 
-`runs.csv`, `epochs.csv` and `layers.csv` are appended to, never overwritten. If a code update
-changes their columns, move the old files away before the next run.
+The two run files share `run_id`: join them on it to put a run's training and test figures side by
+side. When inference runs on the CPU, the GPU memory and energy columns of `inference_runs.csv` are
+left empty, since the GPU was only idling.
+
+`training_runs.csv`, `inference_runs.csv`, `epochs.csv` and `layers.csv` are appended to, never
+overwritten. If a code update changes their columns, move the old files away before the next run.
+Results written before the split are in `runs.csv`, which is no longer written to.
 
 The `config_hash` column identifies the exact settings behind each row: two rows with the same
 hash used the same configuration.
@@ -135,13 +169,14 @@ with (same framework, same architecture, same dataset shape):
 import torch
 from skeleton.config import Settings, load_config
 from frameworks.snn_model import SNNModel
+from frameworks.snntorch_lif import Neuron   # the framework the checkpoint was trained with
 
 cfg = Settings(load_config())                       # the configuration used for training
 cfg.apply_dataset_shape(sensor_h=34, sensor_w=34, in_channels=2, num_classes=10)  # e.g. N-MNIST
 
-model = SNNModel(cfg)                               # framework comes from training.framework
-model.load_state(torch.load("outputs/data/model_checkpoint.pt"))
-model.eval_mode()
+model = SNNModel(cfg, Neuron)
+model.load_state_dict(torch.load("outputs/data/model_checkpoint.pt")["model_state_dict"])
+model.eval()
 # model(data) with data shaped [time, batch, channels, height, width]
 ```
 
@@ -153,12 +188,13 @@ If the architecture does not match, loading fails instead of silently loading wr
 
 A Colab runtime starts empty every session, so start with step 1. Then:
 
-- set `dataset.name` in `SNN_module.yaml`, since a notebook cell cannot answer the startup prompt;
+- set `inference.device` in `SNN_module.yaml` and pipe the dataset number in (below), since a
+  notebook cell cannot answer the startup prompts;
 - point the `output:` folders at your mounted Google Drive, because `/content` is deleted when the
   runtime stops;
 - if space is short, point `cache.path` in `data_workflow.yaml` at Drive as well.
 
 ```bash
-python learning/main.py --framework norse
-python learning/main.py --framework sj
+echo 1 | python learning/main.py --framework norse
+echo 1 | python learning/main.py --framework sj
 ```

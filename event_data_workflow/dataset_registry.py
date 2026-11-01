@@ -1,6 +1,5 @@
 """Every dataset the pipeline can load: its tonic class (or loader), sensor shape and class count."""
 from __future__ import annotations
-import difflib
 import logging
 from pathlib import Path
 import h5py
@@ -19,22 +18,18 @@ tonic.datasets.DVSGesture.test_url = "https://ndownloader.figshare.com/files/380
 
 
 class WindowedRecordingDataset(Dataset):
-    """Splits long recordings into (event_window, target) samples, one per target's (start_us, stop_us) window."""
+    """Splits long recordings, each read as (events, (targets, windows)), into one (event_window, target) sample per window."""
 
     requires_single_process_loading = True
 
-    def __init__(self, recordings: Dataset, get_events, get_targets, get_windows,
-                  count_windows=None):
+    def __init__(self, recordings: Dataset, count_windows=None):
         """`count_windows(rec_idx)` counts a recording's windows without loading its events, which can take minutes."""
         self.recordings = recordings
-        self.get_events = get_events
-        self.get_targets = get_targets
-        self.get_windows = get_windows
 
         self._index: list[tuple[int, int]] = []
         for rec_idx in range(len(recordings)):
             n_windows = (count_windows(rec_idx) if count_windows is not None
-                         else len(get_windows(recordings[rec_idx])))
+                         else len(recordings[rec_idx][1][1]))
             self._index.extend((rec_idx, frame_idx) for frame_idx in range(n_windows))
 
         self._cached_rec_idx = None
@@ -47,11 +42,8 @@ class WindowedRecordingDataset(Dataset):
 
     def _load(self, rec_idx: int):
         if self._cached_rec_idx != rec_idx:
-            recording = self.recordings[rec_idx]
             self._cached_rec_idx = rec_idx
-            self._cached_events = self.get_events(recording)
-            self._cached_targets = self.get_targets(recording)
-            self._cached_windows = self.get_windows(recording)
+            self._cached_events, (self._cached_targets, self._cached_windows) = self.recordings[rec_idx]
         return self._cached_events, self._cached_targets, self._cached_windows
 
     def __getitem__(self, idx: int):
@@ -130,13 +122,7 @@ class DAVISPoseRecordings(Dataset):
 def load_davis_pose(save_to: str, split: str) -> WindowedRecordingDataset:
     """Camera 6-DOF pose windows; `split` is unused."""
     recordings = DAVISPoseRecordings(save_to, sequences=DAVIS_POSE_SEQUENCES)
-    return WindowedRecordingDataset(
-        recordings,
-        get_events=lambda rec: rec[0],
-        get_targets=lambda rec: rec[1][0],
-        get_windows=lambda rec: rec[1][1],
-        count_windows=recordings.window_count,
-    )
+    return WindowedRecordingDataset(recordings, count_windows=recordings.window_count)
 
 
 EYETRACKING_SENSOR_SIZE = (240, 180, 2)  # DAVIS240C
@@ -172,12 +158,7 @@ class EyeTrackingRecordings(Dataset):
 def load_eyetracking(save_to: str, split: str) -> WindowedRecordingDataset:
     """Gaze-position windows; `split` is unused."""
     recordings = EyeTrackingRecordings(save_to, split="train")
-    return WindowedRecordingDataset(
-        recordings,
-        get_events=lambda rec: rec[0],
-        get_targets=lambda rec: rec[1][0],
-        get_windows=lambda rec: rec[1][1],
-    )
+    return WindowedRecordingDataset(recordings)
 
 
 # 1-3 train end to end; 4-5 are loaders only, kept for anyone who wants to add a regression path (they have no num_classes).
@@ -215,56 +196,13 @@ DATASET_REGISTRY = {
 }
 
 
-class UnknownDataset(Exception):
-    """dataset.name names something that is not in DATASET_REGISTRY."""
-
-
-def normalise_dataset_name(name: str) -> str:
-    """Fold case, spaces, hyphens and underscores so 'DVS128 Gesture' and 'dvs128-gesture' match."""
-    return "".join(ch for ch in str(name).lower() if ch.isalnum())
-
-
-def dataset_menu() -> str:
-    lines = []
+def resolve_dataset_entry() -> dict:
+    """The dataset for this run, picked by its number at a menu."""
+    print("\n[PIPELINE] Select a dataset:")
     for key, entry in DATASET_REGISTRY.items():
         output = (f"{entry['num_classes']} classes" if "num_classes" in entry
                   else f"{entry['num_targets']} targets, loader only")
-        lines.append(f"  {key}) {entry['name']}  [{output}]")
-    return "\n".join(lines)
-
-
-def lookup_dataset(wanted: str) -> dict:
-    """One dataset by name or menu number; anything unrecognised raises with the closest matches."""
-    text = str(wanted).strip()
-    if text in DATASET_REGISTRY:
-        return DATASET_REGISTRY[text]
-
-    target = normalise_dataset_name(text)
-    for entry in DATASET_REGISTRY.values():
-        if normalise_dataset_name(entry["name"]) == target:
-            return entry
-
-    names = [entry["name"] for entry in DATASET_REGISTRY.values()]
-    close = difflib.get_close_matches(text, names, n=3, cutoff=0.5)
-    if not close:  # retry on the folded forms, so 'nmnist' still suggests N-MNIST
-        folded = {normalise_dataset_name(n): n for n in names}
-        close = [folded[m] for m in difflib.get_close_matches(target, list(folded), n=3, cutoff=0.5)]
-    hint = f" Did you mean: {', '.join(close)}?" if close else ""
-    raise UnknownDataset(
-        f"dataset.name = {text!r} is not a known dataset.{hint}\n"
-        f"Available (name, or the number in brackets):\n{dataset_menu()}"
-    )
-
-
-def resolve_dataset_entry(cfg) -> dict:
-    """The dataset named by dataset.name, or asked for at a prompt when it is null."""
-    wanted = getattr(cfg, "DATASET_NAME", None)
-    if wanted is not None and str(wanted).strip():
-        entry = lookup_dataset(wanted)
-        logger.info(f"[PIPELINE] Dataset from config: {entry['name']}")
-        return entry
-
-    print("\n[PIPELINE] Select a dataset:")
-    print(dataset_menu())
-    print("  (set dataset.name in the config to skip this prompt)")
-    return lookup_dataset(input("Enter number: ").strip())
+        print(f"  {key}) {entry['name']}  [{output}]")
+    entry = DATASET_REGISTRY[input("Enter number: ").strip()]
+    logger.info(f"[PIPELINE] Dataset: {entry['name']}")
+    return entry

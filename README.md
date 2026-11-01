@@ -22,7 +22,7 @@ docs/                 Background notes, design records and earlier reports
 python learning/main.py
 ```
 
-`learning/main.py` asks for the dataset, prints the configuration and the network layer by layer, calibrates the batch size to the GPU, trains, tests and
+`learning/main.py` asks for the dataset and the inference device, prints the configuration and the network layer by layer, calibrates the batch size to the GPU, trains, tests and
 writes the results. Installation, options and the Colab setup are in [HOW_TO_RUN.md](HOW_TO_RUN.md).
 
 ## Datasets
@@ -38,19 +38,27 @@ Events must be available as `(x, y, t, p)`: pixel column, pixel row, timestamp, 
 
 | Framework | Selected with | Neuron adapter |
 |---|---|---|
-| snnTorch | `torch` | `frameworks/adapters/snntorch_lif.py` |
-| SpikingJelly | `sj` | `frameworks/adapters/spikingjelly_lif.py` |
-| Norse | `norse` | `frameworks/adapters/norse_lif.py` |
-| Sinabs | `sinabs` | `frameworks/adapters/sinabs_lif.py` |
+| snnTorch | `torch` | `frameworks/snntorch_lif.py` |
+| SpikingJelly | `sj` | `frameworks/spikingjelly_lif.py` |
+| Norse | `norse` | `frameworks/norse_lif.py` |
+| Sinabs | `sinabs` | `frameworks/sinabs_lif.py` |
 
 The framework is set by `training.framework` in `configuration/SNN_module.yaml` or `--framework`.
 Each framework's neuron parameters live in `configuration/network_architecture.yaml`.
 
+## Adding a framework
+
+Only the spiking neuron changes between frameworks; the network, training, data path and measurements are
+shared. To add an SNN library, a different neuron from a library already here, or a neuron you write
+yourself, add one file with a class `Neuron` to `frameworks/`, give it a name in the config, and run it
+with `--framework <name>`. The step-by-step guide, with a template, is in
+[frameworks/README.md](frameworks/README.md).
+
 ## What is measured
 
-Every run records test accuracy and per-class metrics, spike rates (training, test and per layer),
+Every run records test accuracy, spike rates (training, test and per layer),
 single-sample latency, throughput, training forward/backward time, peak GPU memory, GPU energy from
 NVML, and the synaptic operations (SynOps) per inference.
 The synaptic-operation energy columns are an estimate for neuromorphic hardware, not a measurement
 on a chip: SynOps × 0.9 pJ, the energy of one addition at 45 nm (Horowitz, ISSCC 2014;
-`SYNOPS_ENERGY_PJ` in `learning/training.py` and `learning/inference.py`).
+`SYNOPS_ENERGY_PJ` in `learning/utilities.py`).

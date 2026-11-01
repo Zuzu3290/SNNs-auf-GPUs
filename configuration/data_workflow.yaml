@@ -1,22 +1,24 @@
 temporal:
   enabled: false
-
   slice_duration_us: 15000
+  overlap_us: 0              # overlap between consecutive slices
 
 binning:
   mode: n_time_bins
   n_time_bins: 16
   time_window_ms: 15.0
-
   denoise_filter_time_us: 10000
 
 cache:
   path: "./cache"
 
+augmentation:
+  enabled: false
+  rotation_degrees: 15
+
 resource_policy:
   memory_safety_margin_gb: 2.0
   memory_cache_threshold_gb: 6.0
-  gpu_pressure_threshold: 0.75
   batch_vram_fraction: 0.45
   batch_vram_band_min: 0.40
   max_batch_size: 256
